@@ -1,12 +1,16 @@
 function batch_matmul(
-    A::CuArray{T,3}, B::CuArray{T,3}; A_trans=false, B_trans=false
+    A::CuArray{T,3}, B::CuArray{T,3}; A_trans::Bool=false, B_trans::Bool=false
 ) where {T}
     C = CuArray{T}(undef, size(A, 1), size(B, 2), size(A, 3))
-    return batch_matmul!(C, A, B)
+    return batch_matmul!(C, A, B; A_trans, B_trans)
 end
 
 function batch_matmul!(
-    C::CuArray{T,3}, A::CuArray{T,3}, B::CuArray{T,3}; A_trans=false, B_trans=false
+    C::CuArray{T,3},
+    A::CuArray{T,3},
+    B::CuArray{T,3};
+    A_trans::Bool=false,
+    B_trans::Bool=false,
 ) where {T}
     # Validate input dimensions
     A_M, A_N, A_B = size(A)
@@ -21,7 +25,7 @@ function batch_matmul!(
 
     # Launch kernel with one thread per row, one thread-block per matrix
     @cuda threads = C_M blocks = C_B batch_matmul_kernel!(
-        C, A, B, C_M, C_N, A_N; A_trans, B_trans
+        C, A, B, C_M, C_N, A_N, A_trans, B_trans
     )
 
     return nothing
@@ -33,9 +37,9 @@ function batch_matmul_kernel!(
     B::CuArray{T,3},
     C_M::Int,
     C_N::Int,
-    A_N::Int;
-    A_trans::Bool=false,
-    B_trans::Bool=true,
+    A_N::Int,
+    A_trans::Bool,
+    B_trans::Bool,
 ) where {T}
     b = blockIdx().x
     i = threadIdx().x
