@@ -1,5 +1,9 @@
 module BatchedKernels
 
-# Write your package code here.
+using CUDA
+
+include("cholesky.jl")
+include("multiply.jl")
+include("qr.jl")
 
 end
