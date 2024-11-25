@@ -1,6 +1,6 @@
-using BatchedKernels
-using Test
+using TestItems
+using TestItemRunner
 
-@testset "BatchedKernels.jl" begin
-    # Write your tests here.
-end
+@run_package_tests
+
+include("multiply.jl")
