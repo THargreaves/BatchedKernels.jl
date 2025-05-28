@@ -50,131 +50,147 @@ function batched_matvec_kernel!(
     base_addr = (bid - 1i32) * N_B * D^2 + 1i32
     align_offset = (base_addr - 1i32) % 32i32
 
-    offset = 0i32
-    while offset < E_B + align_offset  # check
-        raw_idx = offset + tid - align_offset
-        raw_mtrx = div(raw_idx - 1i32, D^2) + 1i32
-        grid_mtrx_load = raw_mtrx + (bid - 1i32) * N_B
+    @inbounds begin
+        offset = 0i32
+        while offset < E_B + align_offset  # check
+            raw_idx = offset + tid - align_offset
+            raw_mtrx = div(raw_idx - 1i32, D^2) + 1i32
+            grid_mtrx_load = raw_mtrx + (bid - 1i32) * N_B
 
-        if raw_mtrx <= N_B && grid_mtrx_load <= N && raw_idx > 0
-            padded_amount = (raw_idx - 1i32) ÷ pad_stride
+            if raw_mtrx <= N_B && grid_mtrx_load <= N && raw_idx > 0i32
+                padded_amount = (raw_idx - 1i32) ÷ pad_stride
 
-            src_idx = (bid - 1i32) * N_B * D^2 + raw_idx
-            dest_idx = raw_idx + padded_amount
+                src_idx = (bid - 1i32) * N_B * D^2 + raw_idx
+                dest_idx = raw_idx + padded_amount
 
-            # if bid == 1
-            #     @cuprintln(mod1(src_idx, 32), " ", mod1(tid, 32))
-            # end
+                # if bid == 1
+                #     @cuprintln(mod1(src_idx, 32), " ", mod1(tid, 32))
+                # end
 
-            shmem_A[dest_idx] = A[src_idx]
+                shmem_A[dest_idx] = A[src_idx]
+            end
+
+            offset += nthreads_i32
         end
 
-        offset += nthreads_i32
-    end
+        offset = 0i32
+        while offset < E_B + align_offset  # check
+            raw_idx = offset + tid - align_offset
+            raw_vec = div(raw_idx - 1i32, D) + 1i32
+            grid_vec_load = raw_vec + (bid - 1i32) * N_B
 
-    offset = 0i32
-    while offset < E_B + align_offset  # check
-        raw_idx = offset + tid - align_offset
-        raw_vec = div(raw_idx - 1i32, D) + 1i32
-        grid_vec_load = raw_vec + (bid - 1i32) * N_B
+            if raw_vec <= N_B && grid_vec_load <= N && raw_idx > 0i32
+                src_idx = (bid - 1i32) * N_B * D + raw_idx
+                dest_idx = raw_idx
+                shmem_x[dest_idx] = x[src_idx]
+            end
 
-        if raw_vec <= N_B && grid_vec_load <= N && raw_idx > 0i32
-            src_idx = (bid - 1i32) * N_B * D + raw_idx
-            dest_idx = raw_idx
-            shmem_x[dest_idx] = x[src_idx]
+            offset += nthreads_i32
         end
 
-        offset += nthreads_i32
-    end
+        sync_threads()
 
-    sync_threads()
+        offset = 0i32
+        while offset < E_W  # check
+            raw_idx = offset + lid
+            if raw_idx <= E_W  # might be accessing unused shmem but that's fine
+                # raw_idx already includes warp_matrix_id
+                logical_idx = (wid - 1i32) * N_W * D^2 + raw_idx
+                padded_amount = (logical_idx - 1i32) ÷ pad_stride
+                Aij = shmem_A[logical_idx + padded_amount]
 
-    # if threadIdx().x == 1 && bid == 1
-    #     CUDA.@cuprintln("$(shmem_A[2]), $(shmem_x[6])")
-    # end
+                # Compute the transposed index
+                within_matrix_idx = mod1(raw_idx, D^2)
+                within_warp_matrix_idx = div(raw_idx - 1i32, D^2) + 1i32
+                raw_row = mod1(within_matrix_idx, D)
+                raw_col = div(within_matrix_idx - 1i32, D) + 1i32
+                transposed_idx = (raw_row - 1i32) * D + raw_col
+                logical_idx = (
+                    (wid - 1i32) * N_W * D^2 +
+                    (within_warp_matrix_idx - 1i32) * D^2 +
+                    transposed_idx
+                )
+                padding = (logical_idx - 1i32) ÷ pad_stride
 
-    # First transpose to make memory access more efficient
-    # TODO: this might be more elegant if we use row-major
-    offset = 0i32
-    while offset < E_W  # check
-        raw_idx = offset + lid
-        if raw_idx <= E_W  # might be accessing unused shmem but that's fine
-            warp_matrix_id = div(raw_idx - 1i32, D^2) + 1i32
+                shmem_AT[logical_idx + padding] = Aij
+            end
 
-            # raw_idx already includes warp_matrix_id
-            logical_idx = (wid - 1i32) * N_W * D^2 + raw_idx
-            padded_amount = (logical_idx - 1i32) ÷ pad_stride
-            # if threadIdx().x == 1
-            #     CUDA.@cuprintln(
-            #         "logical_idx: $logical_idx, padded_amount: $padded_amount, index: $(padded_amount + logical_idx), raw_idx: $raw_idx, Ē_B: $Ē_B, E_B: $E_B"
-            #     )
-            # end
-            Aij = shmem_A[logical_idx + padded_amount]
-            # if threadIdx().x == 1 && bid == 1
-            #     CUDA.@cuprintln(Aij)
-            # end
-
-            # Compute the transposed index
-            within_matrix_idx = mod1(raw_idx, D^2)
-            within_warp_matrix_idx = div(raw_idx - 1i32, D^2) + 1i32
-            raw_row = mod1(within_matrix_idx, D)
-            raw_col = div(within_matrix_idx - 1i32, D) + 1i32
-            transposed_idx = (raw_row - 1i32) * D + raw_col
-            logical_idx = (
-                (wid - 1i32) * N_W * D^2 + (within_warp_matrix_idx - 1i32) * D^2 + transposed_idx
-            )
-            padding = (logical_idx - 1i32) ÷ pad_stride
-
-            # if threadIdx().x == 1 && bid == 1
-            #     CUDA.@cuprintln("raw_row: $raw_row, raw_col: $raw_col, transposed_idx: $transposed_idx, logical_idx: $logical_idx, padding: $padding")
-            # end
-
-            shmem_AT[logical_idx + padding] = Aij
+            offset += 32i32
         end
 
-        offset += 32i32
-    end
+        # transpose!(shmem_AT, shmem_A, wid, lid, D, N_W, pad_stride, E_W)
 
-    # Only the first D * floor(32 / D) threads in each warp will compute the result
-    if lid <= D * N_W
-        v = 0.0f0
-        for k in 1:D
-            # Load vector element
-            xk = (block_matrix_id - 1i32) * D + k
+        # Only the first D * floor(32 / D) threads in each warp will compute the result
+        if lid <= D * N_W
+            v = 0.0f0
+            for k in 1:D
+                # Load vector element
+                xk = (block_matrix_id - 1i32) * D + k
 
-            logical_idx = (block_matrix_id - 1i32) * D^2 + (col_id - 1i32) * D + k
-            padding = (logical_idx - 1i32) ÷ pad_stride
+                logical_idx = (block_matrix_id - 1i32) * D^2 + (col_id - 1i32) * D + k
+                padding = (logical_idx - 1i32) ÷ pad_stride
 
-            v += shmem_AT[logical_idx + padding] * shmem_x[xk]
+                v += shmem_AT[logical_idx + padding] * shmem_x[xk]
+            end
+
+            # Write result back to shared memory using coalesced writes
+            shmem_y[(block_matrix_id - 1i32) * D + col_id] = v
         end
 
-        # Write result back to shared memory using coalesced writes
-        shmem_y[(block_matrix_id - 1i32) * D + col_id] = v
-    end
+        # if threadIdx().x == 1 && bid == 1
+        #     CUDA.@cuprintln("shmem_y: ", shmem_y[1], " block_matrix_id: $block_matrix_id, col_id: $col_id")
+        # end
 
-    # if threadIdx().x == 1 && bid == 1
-    #     CUDA.@cuprintln("shmem_y: ", shmem_y[1], " block_matrix_id: $block_matrix_id, col_id: $col_id")
-    # end
+        sync_threads()
 
-    sync_threads()
+        offset = 0i32
+        while offset < E_B + align_offset  # check
+            raw_idx = offset + tid - align_offset
+            raw_vec = div(raw_idx - 1i32, D) + 1i32
+            grid_vec_load = raw_vec + (bid - 1i32) * N_B
 
-    offset = 0i32
-    while offset < E_B + align_offset  # check
-        raw_idx = offset + tid - align_offset
-        raw_vec = div(raw_idx - 1i32, D) + 1i32
-        grid_vec_load = raw_vec + (bid - 1i32) * N_B
+            if raw_vec <= N_B && grid_vec_load <= N && raw_idx > 0i32
+                src_idx = (bid - 1i32) * N_B * D + raw_idx
+                dest_idx = raw_idx
+                y[src_idx] = shmem_y[dest_idx]
+            end
 
-        if raw_vec <= N_B && grid_vec_load <= N && raw_idx > 0i32
-            src_idx = (bid - 1i32) * N_B * D + raw_idx
-            dest_idx = raw_idx
-            y[src_idx] = shmem_y[dest_idx]
+            offset += nthreads
         end
-
-        offset += nthreads
     end
 
     return nothing
 end
+
+# @inline function transpose!(shmem_AT, shmem_A, wid, lid, D, N_W, pad_stride, E_W)
+#     offset = 0i32
+#     while offset < E_W  # check
+#         raw_idx = offset + lid
+#         if raw_idx <= E_W  # might be accessing unused shmem but that's fine
+#             # raw_idx already includes warp_matrix_id
+#             logical_idx = (wid - 1i32) * N_W * D^2 + raw_idx
+#             padded_amount = (logical_idx - 1i32) ÷ pad_stride
+#             Aij = shmem_A[logical_idx + padded_amount]
+
+#             # Compute the transposed index
+#             within_matrix_idx = mod1(raw_idx, D^2)
+#             within_warp_matrix_idx = div(raw_idx - 1i32, D^2) + 1i32
+#             raw_row = mod1(within_matrix_idx, D)
+#             raw_col = div(within_matrix_idx - 1i32, D) + 1i32
+#             transposed_idx = (raw_row - 1i32) * D + raw_col
+#             logical_idx = (
+#                 (wid - 1i32) * N_W * D^2 +
+#                 (within_warp_matrix_idx - 1i32) * D^2 +
+#                 transposed_idx
+#             )
+#             padding = (logical_idx - 1i32) ÷ pad_stride
+
+#             shmem_AT[logical_idx + padding] = Aij
+#         end
+
+#         offset += 32i32
+#     end
+# end
 
 # N = Target 1GB with some noise
 N = floor(Int, 1e9 / (D^2 * 4)) * 1 + 783
@@ -222,22 +238,23 @@ CUDA.CUBLAS.gemv_strided_batched!('N', 1.0f0, A, x, 0.0f0, y_truth)
 
 println("Error: ", maximum(abs.(y - y_truth)))
 
-registers = CUDA.registers(@cuda threads = nthreads blocks = nblocks batched_matvec_kernel!(
-    y,
-    A,
-    x,
-    Val(Int32(N)),
-    Val(Int32(D)),
-    Val(Int32(N_W)),
-    Val(Int32(N_B)),
-    Val(Int32(E_W)),
-    Val(Int32(E_B)),
-    Val(Int32(P_W)),
-    Val(Int32(Ē_W)),
-    Val(Int32(Ē_B)),
-    Val(Int32(pad_stride)),
-    Val(Int32(pad_interval)),
-);)
+registers = CUDA.registers(
+    @cuda threads = nthreads blocks = nblocks batched_matvec_kernel!(
+        y,
+        A,
+        x,
+        Val(Int32(N)),
+        Val(Int32(D)),
+        Val(Int32(N_W)),
+        Val(Int32(N_B)),
+        Val(Int32(E_W)),
+        Val(Int32(E_B)),
+        Val(Int32(P_W)),
+        Val(Int32(Ē_W)),
+        Val(Int32(Ē_B)),
+        Val(Int32(pad_stride)),
+        Val(Int32(pad_interval)),
+    );
+)
 
 println("Registers used: ", registers)
-
