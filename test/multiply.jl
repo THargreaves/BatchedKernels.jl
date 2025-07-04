@@ -4,23 +4,29 @@
 
     SEED = 1234
     T = Float32
+    Ns = [1009, 1024]  # test with prime and power of two batch sizes
+    Ds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
     rng = MersenneTwister(SEED)
-    A_base = rand(rng, T, 3, 4, 2)
-    B_base = rand(rng, T, 4, 2, 2)
 
-    for A_trans in (false, true), B_trans in (false, true)
-        A_cpu = A_trans ? permutedims(A_base, (2, 1, 3)) : A_base
-        B_cpu = B_trans ? permutedims(B_base, (2, 1, 3)) : B_base
+    for D in Ds
+        for N in Ns
+            A = rand(rng, T, D, D, N)
+            B = rand(rng, T, D, D, N)
+            C = Array{T}(undef, D, D, N)
 
-        A = cu(A_cpu)
-        B = cu(B_cpu)
+            A_cuda = cu(A)
+            B_cuda = cu(B)
+            C_cuda = CuArray{T}(undef, D, D, N)
 
-        C = batch_matmul(A, B; A_trans, B_trans)
-        @test eltype(C) == T
+            batched_matmul!(C_cuda, A_cuda, B_cuda)
 
-        A_test = A_trans ? transpose(A_cpu[:, :, 1]) : A_cpu[:, :, 1]
-        B_test = B_trans ? transpose(B_cpu[:, :, 1]) : B_cpu[:, :, 1]
-        @test Array(C[:, :, 1]) ≈ A_test * B_test
+            # Compute the expected result on CPU
+            for i in 1:N
+                C[:, :, i] = A[:, :, i] * B[:, :, i]
+            end
+
+            @test Array(C_cuda) ≈ C
+        end
     end
 end
