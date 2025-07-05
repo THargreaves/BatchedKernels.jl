@@ -1,82 +1,165 @@
-export batch_cholesky, batch_trisolve
+export batched_cholesky!, batch_trisolve
 
-function batch_cholesky(A::CuArray{T,3}) where {T}
-    D, N = size(A, 1), size(A, 3)
-    L = CuArray{T}(undef, D, D, N)
-    cholesky_static_shmem_element!(L, A)
-    return L
-end
+function batched_cholesky_kernel!(
+    U, A, ::Val{D}, ::Val{nthreads}, N::Int32
+) where {D,nthreads}
+    # Computed derived constants
+    n_mats_per_warp = 32i32 ÷ D
+    n_warps = nthreads ÷ 32i32
+    n_mats_per_block = n_warps * n_mats_per_warp
+    n_elements_per_warp = n_mats_per_warp * D^2
+    n_elements_per_block = n_mats_per_block * D^2
 
-function cholesky_static_shmem_element!(L::CuArray{T,3}, A::CuArray{T,3}) where {T}
-    D, N = size(A, 1), size(A, 3)
-    if D > 32
-        error("Too many threads required for a $D x $D matrix")
-    end
-    matrices_per_block = div(1024, D^2)
-    threads = matrices_per_block * D^2  # Keep same thread count for coalesced memory ops
-    blocks = ceil(Int, N / matrices_per_block)
-
-    @cuda blocks = blocks threads = threads cholesky_static_shmem_element_kernel!(
-        L, A, Int32(N), Val(Int32(D)), Val(Int32(matrices_per_block))
-    )
-end
-
-function cholesky_static_shmem_element_kernel!(
-    L, A, N::Int32, ::Val{D}, ::Val{M}
-) where {D,M}
+    # Access thread indices
     tid = threadIdx().x
-    local_matrix = div(tid - 1i32, D^2) + 1i32
-    matrix_thread = mod1(tid, D^2)  # Still needed for coalesced memory ops
+    bid = blockIdx().x
+    lid = mod1(tid, 32i32)                # lane id
+    wid = div(tid - 1i32, 32i32) + 1i32   # warp id
 
-    # These positions are used for coalesced memory operations
-    row = mod1(matrix_thread, D)
-    col = div(matrix_thread - 1i32, D) + 1i32
+    # Calculate responsibility for this thread
+    warp_matrix_id = div(lid - 1i32, D) + 1i32
+    block_matrix_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp
+    matrix_thread = mod1(lid, D)  # thread within each matrix operation
 
-    matrix_idx = (blockIdx().x - 1i32) * M + local_matrix
+    # Define padding and stride
+    # Equivalent to div(32, gcd(32, D)) (for D < 64) but avoids using gcd which prevents constant propagation
+    # TODO: Would generated functions be a cleaner approach?
+    pad_interval = div(32i32, D & -D)
+    pad_stride = pad_interval * D
+    padding_per_warp = cld(n_elements_per_warp, pad_interval)
 
-    # Shared memory buffers
-    shmem_a = @cuStaticSharedMem(Float32, (D, D, M))
-    shmem_l = @cuStaticSharedMem(Float32, (D, D, M))
+    # Define shared memory, to be modified in-place
+    shmem_elems = n_elements_per_block + padding_per_warp * n_warps
+    shmem_A = CuStaticSharedArray(Float32, (shmem_elems,))
 
-    # Coalesced load of input matrix A
-    if matrix_idx <= N
-        shmem_a[row, col, local_matrix] = A[row, col, matrix_idx]
-        shmem_l[row, col, local_matrix] = 0.0f0
-    end
+    begin
+        # Load matrices into shared memory using coalesced reads
+        # Warps cooperate and cross matrix boundaries to mask latency
 
-    sync_threads()
+        # Offset global memory addresses so threads are naturally aligned
+        # TODO: the additional indexing logic might not be worth the small savings in L1 cache use
+        base_addr = (bid - 1i32) * n_mats_per_block * D^2 + 1i32
+        align_offset = (base_addr - 1i32) % 32i32
 
-    compute_matrix = (blockIdx().x - 1i32) * M + tid
+        offset = 0i32
+        while offset < n_elements_per_block + align_offset
+            raw_idx = offset + tid - align_offset  # force thread 1 address == 1 (mod1 32)
+            raw_mtrx = div(raw_idx - 1i32, D^2) + 1i32
+            grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block
 
-    # Only the first M threads do computation (one per matrix)
-    if compute_matrix <= N && tid <= M
-        # Sequential Cholesky algorithm for this matrix
-        for i in (1i32):D
-            for j in (1i32):i
-                sum = 0.0f0
-                for k in (1i32):(j - 1)
-                    sum += shmem_l[i, k, tid] * shmem_l[j, k, tid]
-                end
+            if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N && raw_idx > 0i32
+                padded_amount = (raw_idx - 1i32) ÷ pad_stride
 
-                if i == j
-                    shmem_l[i, j, tid] = sqrt(shmem_a[i, i, tid] - sum)
-                else
-                    shmem_l[i, j, tid] = (
-                        1.0f0 / shmem_l[j, j, tid] * (shmem_a[i, j, tid] - sum)
-                    )
+                src_idx = (bid - 1i32) * n_mats_per_block * D^2 + raw_idx
+                dest_idx = raw_idx + padded_amount
+
+                shmem_A[dest_idx] = A[src_idx]
+            end
+
+            offset += nthreads
+        end
+
+        sync_threads()
+
+        # Perform computation
+        # Only the first D * floor(32 / D) threads in each warp will compute the result
+        # Use transpose of column-Cholesky from CS554 to compute upper triangular with parallel
+        # access patterns
+        if lid <= D * n_mats_per_warp
+            j = matrix_thread
+            for i in 1:D
+                # Mask needs to remove j < i else they will never reach the sync line
+                mask = ((1 << (D - (i - 1))) - 1) << (i - 1)
+                mask = mask << ((warp_matrix_id - 1) * D)
+
+                if j >= i
+                    # Load in value from i row
+                    logical_idx = (block_matrix_id - 1) * D^2 + (j - 1) * D + i
+                    padding = (logical_idx - 1) ÷ pad_stride
+                    Ai = shmem_A[logical_idx + padding]
+                    # RMOD STEP
+                    for k in 1:(i - 1)
+                        # Load in value from k row
+                        logical_idx = (block_matrix_id - 1) * D^2 + (j - 1) * D + k
+                        padding = (logical_idx - 1) ÷ pad_stride
+                        Ak = shmem_A[logical_idx + padding]
+                        # Share common value with other threads
+                        Aki = shfl_sync(mask, Ak, i + (warp_matrix_id - 1) * D)
+                        # Compute update
+                        Ai -= Aki * Ak
+                    end
+                    # RDIV STEP
+                    if j == i
+                        Ai = sqrt(Ai)
+                    end
+                    # Share result with other threads
+                    Aii = shfl_sync(mask, Ai, i + (warp_matrix_id - 1) * D)
+                    if j > i
+                        Ai = Ai / Aii
+                    end
+                    # Write result back to shared memory
+                    logical_idx = (block_matrix_id - 1) * D^2 + (j - 1) * D + i
+                    padding = (logical_idx - 1) ÷ pad_stride
+                    shmem_A[logical_idx + padding] = Ai
                 end
             end
         end
-    end
 
-    sync_threads()
+        sync_threads()
 
-    # All threads participate in coalesced write-back
-    if matrix_idx <= N
-        L[row, col, matrix_idx] = shmem_l[row, col, local_matrix]
+        # Write result back to shared memory using coalesced writes
+        # Again, warps cooperate and cross matrix boundaries to mask latency
+        offset = 0i32
+        while offset < n_elements_per_block + align_offset
+            raw_idx = offset + tid - align_offset
+            raw_mtrx = div(raw_idx - 1i32, D^2) + 1i32
+            grid_mtrx_store = raw_mtrx + (bid - 1i32) * n_mats_per_block
+
+            if raw_mtrx <= n_mats_per_block && grid_mtrx_store <= N && raw_idx > 0i32
+                padded_amount = (raw_idx - 1i32) ÷ pad_stride
+
+                dest_idx = (bid - 1i32) * n_mats_per_block * D^2 + raw_idx
+                src_idx = raw_idx + padded_amount
+
+                U[dest_idx] = shmem_A[src_idx]
+            end
+
+            offset += nthreads
+        end
     end
 
     return nothing
+end
+
+function batched_cholesky!(U::CuArray{T,3}, A::CuArray{T,3}; nthreads::Int=256) where {T}
+    # Validate dimensions
+    A_m, A_n, A_b = size(A)
+    U_m, U_n, U_b = size(U)
+
+    # Batch sizes must match
+    if A_b != U_b
+        throw(ArgumentError("Batch sizes of A and U must match."))
+    end
+
+    # Matrix dimensions must match
+    if A_m != A_n || U_m != A_m || U_n != A_n
+        throw(ArgumentError("A must be square and U must match A's dimensions."))
+    end
+
+    nthreads % 32 == 0 ||
+        throw(ArgumentError("Number of threads must be a multiple of 32."))
+
+    D = A_m
+    N = A_b
+    warps_per_block = nthreads ÷ 32
+    matrices_per_warp = div(32, D)
+    matrices_per_block = warps_per_block * matrices_per_warp
+    nblocks = cld(N, matrices_per_block)
+    @cuda threads = nthreads blocks = nblocks batched_cholesky_kernel!(
+        U, A, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
+    )
+
+    return U
 end
 
 function batch_trisolve(L::CuArray{T,3}, B::CuArray{T,3}) where {T}
