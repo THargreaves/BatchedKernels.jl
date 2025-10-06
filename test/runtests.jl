@@ -3,4 +3,4 @@ using TestItemRunner
 
 @run_package_tests
 
-include("multiply.jl")
+include("dual_access_operations.jl")

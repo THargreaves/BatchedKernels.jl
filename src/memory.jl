@@ -1,8 +1,13 @@
+import Base: @propagate_inbounds
+import LinearAlgebra: AdjOrTransAbsMat, wrapperop
+
 export DualAccessMatrix, SingleAccessMatrix
+export intermediate_layout_load!, intermediate_layout_write!
+export interm_to_dual_transfer!, dual_to_interm_transfer!
 
 # TODO: each of these have their own offset which is wasteful of registers
 # Could use a pointer to a shared index information struct but will that use a register too?
-struct DualAccessMatrix{T,stride,n_mats_per_warp} <: AbstractMatrix{T}
+struct DualAccessMatrix{T,D} <: AbstractMatrix{T}
     shmem::CuDeviceVector{T,CUDA.AS.Shared}
     offset::Int32
 end
@@ -14,19 +19,55 @@ function DualAccessMatrix(
     padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
     stride = n_mats_per_warp * D + padding
     offset = (wid - 1i32) * D * stride - stride - n_mats_per_warp + warp_matrix_id
-    return DualAccessMatrix{T,stride,n_mats_per_warp}(shmem, offset)
+    return DualAccessMatrix{T,D}(shmem, offset)
+end
+
+@inline function _compute_stride(::Val{D}) where {D}
+    n_mats_per_warp = 32i32 ÷ D
+    padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+    return n_mats_per_warp * D + padding
+end
+
+@inline function _compute_n_mats_per_warp(::Val{D}) where {D}
+    return 32i32 ÷ D
 end
 
 Base.@propagate_inbounds @inline function Base.getindex(
-    A::DualAccessMatrix{T,stride,n_mats_per_warp}, i::Int32, j::Int32
-) where {T,stride,n_mats_per_warp}
+    A::DualAccessMatrix{T,D}, i::Int32, j::Int32
+) where {T,D}
+    stride = _compute_stride(Val(D))
+    n_mats_per_warp = _compute_n_mats_per_warp(Val(D))
     return A.shmem[A.offset + j * stride + i * n_mats_per_warp]
 end
+
 Base.@propagate_inbounds @inline function Base.setindex!(
-    A::DualAccessMatrix{T,stride,n_mats_per_warp}, v::T, i::Int32, j::Int32
-) where {T,stride,n_mats_per_warp}
+    A::DualAccessMatrix{T,D}, v::T, i::Int32, j::Int32
+) where {T,D}
+    stride = _compute_stride(Val(D))
+    n_mats_per_warp = _compute_n_mats_per_warp(Val(D))
     return A.shmem[A.offset + j * stride + i * n_mats_per_warp] = v
 end
+
+# Wrappers to handle Int32 case
+@propagate_inbounds Base.getindex(A::AdjOrTransAbsMat{T}, i::Int32, j::Int32) where {T} =
+    wrapperop(A)(A.parent[j, i])::T
+
+# Support regular Int indexing (needed for Adjoint and other wrappers)
+@propagate_inbounds @inline function Base.getindex(
+    A::DualAccessMatrix{T,D}, i::Int, j::Int
+) where {T,D}
+    return getindex(A, Int32(i), Int32(j))
+end
+
+@propagate_inbounds @inline function Base.setindex!(
+    A::DualAccessMatrix{T,D}, v::T, i::Int, j::Int
+) where {T,D}
+    return setindex!(A, v, Int32(i), Int32(j))
+end
+
+@inline Base.size(::DualAccessMatrix{T,D}) where {T,D} = (D, D)
+@inline Base.length(::DualAccessMatrix{T,D}) where {T,D} = D * D
+@inline Base.IndexStyle(::Type{<:DualAccessMatrix}) = IndexCartesian()
 
 struct SingleAccessMatrix{T,pad_interval} <: AbstractMatrix{T}
     shmem::CuDeviceVector{T,CUDA.AS.Shared}
@@ -59,14 +100,14 @@ function SingleAccessMatrix(
 end
 
 # TODO: replace div with magic number
-Base.@propagate_inbounds @inline function Base.getindex(
+@propagate_inbounds @inline function Base.getindex(
     A::SingleAccessMatrix{T,pad_interval}, i::Int32
 ) where {T,pad_interval}
     warp_idx = A.inner_offset + i
     padding = (warp_idx - 1i32) ÷ pad_interval
     return A.shmem[A.outer_offset + warp_idx + padding]
 end
-Base.@propagate_inbounds @inline function Base.setindex!(
+@propagate_inbounds @inline function Base.setindex!(
     A::SingleAccessMatrix{T,pad_interval}, v::T, i::Int32
 ) where {T,pad_interval}
     warp_idx = A.inner_offset + i
