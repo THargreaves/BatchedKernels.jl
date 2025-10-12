@@ -5,9 +5,8 @@
     using LinearAlgebra
 
     # Test parameters
-    D = 4
     nthreads = 2^8
-    N = 2^12
+    N = 2^12 + 113
     nblocks = 2^8
 
     function kernel_matmul!(
@@ -15,7 +14,7 @@
     ) where {D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
-        padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
         tid = threadIdx().x
         wid = div(tid - 1i32, 32i32) + 1i32
@@ -53,40 +52,43 @@
         return nothing
     end
 
-    CUDA.seed!(1234)
-    As = CUDA.rand(Float32, D, D, N)
-    Bs = CUDA.rand(Float32, D, D, N)
-    As_cpu = Array(As)
-    Bs_cpu = Array(Bs)
-
     # Test all four combinations
     test_cases = [(false, false), (true, false), (false, true), (true, true)]
 
-    for (A_adj, B_adj) in test_cases
-        Cs = CUDA.zeros(Float32, D, D, N)
+    for D in 2:10
+        CUDA.seed!(1234)
 
-        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matmul!(
-            Cs, As, Bs, A_adj, B_adj, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
-        )
+        As = CUDA.rand(Float32, D, D, N)
+        Bs = CUDA.rand(Float32, D, D, N)
+        As_cpu = Array(As)
+        Bs_cpu = Array(Bs)
 
-        # CPU comparison
-        Cs_cpu = similar(As_cpu)
-        A_cpu_mat = A_adj ? As_cpu : As_cpu
-        B_cpu_mat = B_adj ? Bs_cpu : Bs_cpu
-        for i in 1:N
-            if A_adj && B_adj
-                Cs_cpu[:, :, i] = As_cpu[:, :, i]' * Bs_cpu[:, :, i]'
-            elseif A_adj
-                Cs_cpu[:, :, i] = As_cpu[:, :, i]' * Bs_cpu[:, :, i]
-            elseif B_adj
-                Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]'
-            else
-                Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]
+        for (A_adj, B_adj) in test_cases
+            Cs = CUDA.zeros(Float32, D, D, N)
+
+            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matmul!(
+                Cs, As, Bs, A_adj, B_adj, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
+            )
+
+            # CPU comparison
+            Cs_cpu = similar(As_cpu)
+            A_cpu_mat = A_adj ? As_cpu : As_cpu
+            B_cpu_mat = B_adj ? Bs_cpu : Bs_cpu
+            for i in 1:N
+                if A_adj && B_adj
+                    Cs_cpu[:, :, i] = As_cpu[:, :, i]' * Bs_cpu[:, :, i]'
+                elseif A_adj
+                    Cs_cpu[:, :, i] = As_cpu[:, :, i]' * Bs_cpu[:, :, i]
+                elseif B_adj
+                    Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]'
+                else
+                    Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]
+                end
             end
-        end
 
-        max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
-        @test max_error < 1e-4
+            max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
+            @test max_error < 1e-4
+        end
     end
 end
 
@@ -97,15 +99,14 @@ end
     using LinearAlgebra
 
     # Test parameters
-    D = 4
     nthreads = 2^8
-    N = 2^12
+    N = 2^12 + 113
     nblocks = 2^8
 
     function kernel_sub!(Cs, As, Bs, ::Val{D}, ::Val{nthreads}, N::Int32) where {D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
-        padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
         tid = threadIdx().x
         wid = div(tid - 1i32, 32i32) + 1i32
@@ -141,22 +142,25 @@ end
         return nothing
     end
 
-    CUDA.seed!(1234)
-    As = CUDA.rand(Float32, D, D, N)
-    Bs = CUDA.rand(Float32, D, D, N)
-    Cs = CUDA.zeros(Float32, D, D, N)
+    for D in 2:10
+        CUDA.seed!(1234)
 
-    CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_sub!(
-        Cs, As, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
-    )
+        As = CUDA.rand(Float32, D, D, N)
+        Bs = CUDA.rand(Float32, D, D, N)
+        Cs = CUDA.zeros(Float32, D, D, N)
 
-    # CPU comparison
-    As_cpu = Array(As)
-    Bs_cpu = Array(Bs)
-    Cs_cpu = As_cpu .- Bs_cpu
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_sub!(
+            Cs, As, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
+        )
 
-    max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
-    @test max_error < 1e-5
+        # CPU comparison
+        As_cpu = Array(As)
+        Bs_cpu = Array(Bs)
+        Cs_cpu = As_cpu .- Bs_cpu
+
+        max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
+        @test max_error < 1e-5
+    end
 end
 
 @testitem "Cholesky Decomposition (in-place)" begin
@@ -166,9 +170,8 @@ end
     using LinearAlgebra
 
     # Test parameters
-    D = 4
     nthreads = 2^8
-    N = 2^12
+    N = 2^12 + 113
     nblocks = 2^8
 
     function kernel_cholesky_inplace!(
@@ -176,7 +179,7 @@ end
     ) where {D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
-        padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
         tid = threadIdx().x
         wid = div(tid - 1i32, 32i32) + 1i32
@@ -205,33 +208,36 @@ end
         return nothing
     end
 
-    CUDA.seed!(1234)
-    # Create symmetric positive definite matrices
-    As = CUDA.zeros(Float32, D, D, N)
-    for i in 1:N
-        A_temp = CUDA.rand(Float32, D, D)
-        As[:, :, i] = A_temp * A_temp' + 0.1f0 * I
-    end
-    Us = CUDA.zeros(Float32, D, D, N)
+    for D in 2:10
+        CUDA.seed!(1234)
 
-    CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_cholesky_inplace!(
-        Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
-    )
+        # Create symmetric positive definite matrices
+        As = CUDA.zeros(Float32, D, D, N)
+        for i in 1:N
+            A_temp = CUDA.rand(Float32, D, D)
+            As[:, :, i] = A_temp * A_temp' + 0.1f0 * I
+        end
+        Us = CUDA.zeros(Float32, D, D, N)
 
-    # CPU comparison
-    As_cpu = Array(As)
-    Us_cpu = similar(As_cpu)
-    for i in 1:N
-        Us_cpu[:, :, i] = cholesky(As_cpu[:, :, i]).U
-    end
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_cholesky_inplace!(
+            Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
+        )
 
-    # Replace with upper triangle part
-    Us_result = Array(Us)
-    for i in 1:N
-        Us_result[:, :, i] = UpperTriangular(Us_result[:, :, i])
+        # CPU comparison
+        As_cpu = Array(As)
+        Us_cpu = similar(As_cpu)
+        for i in 1:N
+            Us_cpu[:, :, i] = cholesky(As_cpu[:, :, i]).U
+        end
+
+        # Replace with upper triangle part
+        Us_result = Array(Us)
+        for i in 1:N
+            Us_result[:, :, i] = UpperTriangular(Us_result[:, :, i])
+        end
+        max_error = maximum(abs.(Us_result .- Us_cpu))
+        @test max_error < 1e-4
     end
-    max_error = maximum(abs.(Us_result .- Us_cpu))
-    @test max_error < 1e-4
 end
 
 @testitem "Cholesky Decomposition (out-of-place)" begin
@@ -241,9 +247,8 @@ end
     using LinearAlgebra
 
     # Test parameters
-    D = 4
     nthreads = 2^8
-    N = 2^12
+    N = 2^12 + 113
     nblocks = 2^8
 
     function kernel_cholesky!(
@@ -251,7 +256,7 @@ end
     ) where {D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
-        padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
         tid = threadIdx().x
         wid = div(tid - 1i32, 32i32) + 1i32
@@ -282,33 +287,36 @@ end
         return nothing
     end
 
-    CUDA.seed!(1234)
-    # Create symmetric positive definite matrices
-    As = CUDA.zeros(Float32, D, D, N)
-    for i in 1:N
-        A_temp = CUDA.rand(Float32, D, D)
-        As[:, :, i] = A_temp * A_temp' + 0.1f0 * I
-    end
-    Us = CUDA.zeros(Float32, D, D, N)
+    for D in 2:10
+        CUDA.seed!(1234)
 
-    CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_cholesky!(
-        Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
-    )
+        # Create symmetric positive definite matrices
+        As = CUDA.zeros(Float32, D, D, N)
+        for i in 1:N
+            A_temp = CUDA.rand(Float32, D, D)
+            As[:, :, i] = A_temp * A_temp' + 0.1f0 * I
+        end
+        Us = CUDA.zeros(Float32, D, D, N)
 
-    # CPU comparison
-    As_cpu = Array(As)
-    Us_cpu = similar(As_cpu)
-    for i in 1:N
-        Us_cpu[:, :, i] = cholesky(As_cpu[:, :, i]).U
-    end
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_cholesky!(
+            Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
+        )
 
-    # Replace with upper triangle part
-    Us_result = Array(Us)
-    for i in 1:N
-        Us_result[:, :, i] = UpperTriangular(Us_result[:, :, i])
+        # CPU comparison
+        As_cpu = Array(As)
+        Us_cpu = similar(As_cpu)
+        for i in 1:N
+            Us_cpu[:, :, i] = cholesky(As_cpu[:, :, i]).U
+        end
+
+        # Replace with upper triangle part
+        Us_result = Array(Us)
+        for i in 1:N
+            Us_result[:, :, i] = UpperTriangular(Us_result[:, :, i])
+        end
+        max_error = maximum(abs.(Us_result .- Us_cpu))
+        @test max_error < 1e-4
     end
-    max_error = maximum(abs.(Us_result .- Us_cpu))
-    @test max_error < 1e-4
 end
 
 @testitem "Upper Triangular Backward Solve" begin
@@ -318,9 +326,8 @@ end
     using LinearAlgebra
 
     # Test parameters
-    D = 4
     nthreads = 2^8
-    N = 2^12
+    N = 2^12 + 113
     nblocks = 2^8
 
     function kernel_backward_solve!(
@@ -328,7 +335,7 @@ end
     ) where {D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
-        padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
         tid = threadIdx().x
         wid = div(tid - 1i32, 32i32) + 1i32
@@ -365,30 +372,33 @@ end
         return nothing
     end
 
-    CUDA.seed!(1234)
-    # Create upper triangular matrices
-    Us = CUDA.zeros(Float32, D, D, N)
-    for i in 1:N
-        U_temp = CUDA.rand(Float32, D, D)
-        Us[:, :, i] = UpperTriangular(U_temp) + 0.5f0 * I  # ensure well-conditioned
+    for D in 2:10
+        CUDA.seed!(1234)
+
+        # Create upper triangular matrices
+        Us = CUDA.zeros(Float32, D, D, N)
+        for i in 1:N
+            U_temp = CUDA.rand(Float32, D, D)
+            Us[:, :, i] = UpperTriangular(U_temp) + 0.5f0 * I  # ensure well-conditioned
+        end
+        Bs = CUDA.rand(Float32, D, D, N)
+        Cs = CUDA.zeros(Float32, D, D, N)
+
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_backward_solve!(
+            Cs, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
+        )
+
+        # CPU comparison
+        Us_cpu = Array(Us)
+        Bs_cpu = Array(Bs)
+        Cs_cpu = similar(Bs_cpu)
+        for i in 1:N
+            Cs_cpu[:, :, i] = UpperTriangular(Us_cpu[:, :, i]) \ Bs_cpu[:, :, i]
+        end
+
+        max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
+        @test max_error < 1e-3
     end
-    Bs = CUDA.rand(Float32, D, D, N)
-    Cs = CUDA.zeros(Float32, D, D, N)
-
-    CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_backward_solve!(
-        Cs, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
-    )
-
-    # CPU comparison
-    Us_cpu = Array(Us)
-    Bs_cpu = Array(Bs)
-    Cs_cpu = similar(Bs_cpu)
-    for i in 1:N
-        Cs_cpu[:, :, i] = UpperTriangular(Us_cpu[:, :, i]) \ Bs_cpu[:, :, i]
-    end
-
-    max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
-    @test max_error < 1e-3
 end
 
 @testitem "Lower Triangular Forward Solve" begin
@@ -398,9 +408,8 @@ end
     using LinearAlgebra
 
     # Test parameters
-    D = 4
     nthreads = 2^8
-    N = 2^12
+    N = 2^12 + 113
     nblocks = 2^8
 
     function kernel_forward_solve!(
@@ -408,7 +417,7 @@ end
     ) where {D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
-        padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
         tid = threadIdx().x
         wid = div(tid - 1i32, 32i32) + 1i32
@@ -445,30 +454,33 @@ end
         return nothing
     end
 
-    CUDA.seed!(1234)
-    # Create lower triangular matrices
-    Ls = CUDA.zeros(Float32, D, D, N)
-    for i in 1:N
-        L_temp = CUDA.rand(Float32, D, D)
-        Ls[:, :, i] = LowerTriangular(L_temp) + 0.5f0 * I  # ensure well-conditioned
+    for D in 2:10
+        CUDA.seed!(1234)
+
+        # Create lower triangular matrices
+        Ls = CUDA.zeros(Float32, D, D, N)
+        for i in 1:N
+            L_temp = CUDA.rand(Float32, D, D)
+            Ls[:, :, i] = LowerTriangular(L_temp) + 0.5f0 * I  # ensure well-conditioned
+        end
+        Bs = CUDA.rand(Float32, D, D, N)
+        Cs = CUDA.zeros(Float32, D, D, N)
+
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_forward_solve!(
+            Cs, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
+        )
+
+        # CPU comparison
+        Ls_cpu = Array(Ls)
+        Bs_cpu = Array(Bs)
+        Cs_cpu = similar(Bs_cpu)
+        for i in 1:N
+            Cs_cpu[:, :, i] = LowerTriangular(Ls_cpu[:, :, i]) \ Bs_cpu[:, :, i]
+        end
+
+        max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
+        @test max_error < 1e-3
     end
-    Bs = CUDA.rand(Float32, D, D, N)
-    Cs = CUDA.zeros(Float32, D, D, N)
-
-    CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_forward_solve!(
-        Cs, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
-    )
-
-    # CPU comparison
-    Ls_cpu = Array(Ls)
-    Bs_cpu = Array(Bs)
-    Cs_cpu = similar(Bs_cpu)
-    for i in 1:N
-        Cs_cpu[:, :, i] = LowerTriangular(Ls_cpu[:, :, i]) \ Bs_cpu[:, :, i]
-    end
-
-    max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
-    @test max_error < 1e-3
 end
 
 @testitem "Transpose" begin
@@ -478,9 +490,8 @@ end
     using LinearAlgebra
 
     # Test parameters
-    D = 4
     nthreads = 2^8
-    N = 2^12
+    N = 2^12 + 113
     nblocks = 2^8
 
     function kernel_transpose!(
@@ -488,7 +499,7 @@ end
     ) where {D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
-        padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
         tid = threadIdx().x
         wid = div(tid - 1i32, 32i32) + 1i32
@@ -519,18 +530,21 @@ end
         return nothing
     end
 
-    CUDA.seed!(1234)
-    As = CUDA.rand(Float32, D, D, N)
-    Bs = CUDA.zeros(Float32, D, D, N)
+    for D in 2:10
+        CUDA.seed!(1234)
 
-    CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_transpose!(
-        Bs, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
-    )
+        As = CUDA.rand(Float32, D, D, N)
+        Bs = CUDA.zeros(Float32, D, D, N)
 
-    # CPU comparison
-    As_cpu = Array(As)
-    Bs_cpu = permutedims(As_cpu, (2, 1, 3))
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_transpose!(
+            Bs, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
+        )
 
-    max_error = maximum(abs.(Array(Bs) .- Bs_cpu))
-    @test max_error < 1e-5
+        # CPU comparison
+        As_cpu = Array(As)
+        Bs_cpu = permutedims(As_cpu, (2, 1, 3))
+
+        max_error = maximum(abs.(Array(Bs) .- Bs_cpu))
+        @test max_error < 1e-5
+    end
 end

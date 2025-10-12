@@ -69,6 +69,15 @@ end
     n_mats_per_warp::Int32,
     warp_matrix_id::Int32,
 ) where {T,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D
+
+    if lid > active_lanes
+        return nothing
+    end
+
     # Compute mask for warp-level synchronization
     # The mask ensures threads within the same matrix stay synchronized
     j = d  # column this thread is responsible for
@@ -117,6 +126,15 @@ end
     n_mats_per_warp::Int32,
     warp_matrix_id::Int32,
 ) where {T,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D
+
+    if lid > active_lanes
+        return nothing
+    end
+
     # Compute mask for warp-level synchronization
     j = d
 

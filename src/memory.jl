@@ -16,7 +16,7 @@ function DualAccessMatrix(
     shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, wid::Int32, warp_matrix_id::Int32
 ) where {T,D}
     n_mats_per_warp = 32i32 ÷ D
-    padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     stride = n_mats_per_warp * D + padding
     offset = (wid - 1i32) * D * stride - stride - n_mats_per_warp + warp_matrix_id
     return DualAccessMatrix{T,D}(shmem, offset)
@@ -24,7 +24,7 @@ end
 
 @inline function _compute_stride(::Val{D}) where {D}
     n_mats_per_warp = 32i32 ÷ D
-    padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     return n_mats_per_warp * D + padding
 end
 
@@ -88,7 +88,7 @@ function SingleAccessMatrix(
 ) where {T,D}
     n_mats_per_warp = 32i32 ÷ D
 
-    dual_access_padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+    dual_access_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     dual_access_stride = (n_mats_per_warp * D + dual_access_padding) * D
 
     outer_offset = dual_access_stride * (wid - 1i32)
@@ -123,18 +123,71 @@ end
     shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
-    n_warps = nthreads ÷ 32i32
+    n_warps = nthreads ÷ 32i32  # Works if nthreads is divisible by 32, otherwise needs to be cld(nthreads, 32)
     n_mats_per_block = n_warps * n_mats_per_warp
-    n_elements_per_block = n_mats_per_block * D * D
+    active_lanes = n_mats_per_warp * D
+
     tid = threadIdx().x
     bid = blockIdx().x
-    interm_pad_freq = div(32i32, D & -D) * D
     wid = div(tid - 1i32, 32i32) + 1i32
     lid = mod1(tid, 32i32)
 
-    padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
+    if lid > active_lanes
+        return nothing
+    end
+
+    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+    warp_shmem_size = (n_mats_per_warp * D + padding) * D  # Shared memory covered by one warp
+    warp_shmem_elem = n_mats_per_warp * D * D  # Shared memory used my one warp (excluding padding for dual)
+    interm_pad_freq = (D & (D - 1i32)) == 0i32 ? 32i32 : (warp_shmem_elem + 1i32)  # No padding needed if D is not a power of 2
+    start_raw = (wid - 1i32) * warp_shmem_elem + 1i32  # Global start idx for global memory
+    start_offset = (wid - 1i32) * warp_shmem_size + 1i32  # Global start for shared memory
+
+    # Each thread loads warp_shmem_elems starting from start
+    @inbounds begin
+        offset = 0i32
+        while offset < warp_shmem_elem
+            raw_idx = start_raw + offset + lid - 1i32  # How many-th element to load in the block: [1, n_elements_per_block]
+            raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32  # How many-th matrix to load: [1, n_mats_per_block]
+            grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block  # How many-th global matrix 1 ... N to load
+
+            if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N
+                padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
+
+                src_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
+                dest_idx = start_offset + offset + lid - 1i32 + padded_amount
+
+                shmem[dest_idx] = global_arr[src_idx]
+            end
+
+            offset += active_lanes
+        end
+    end
+
+    return nothing
+end
+
+@inline function intermediate_layout_write!(
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32
+) where {D,nthreads}
+    n_mats_per_warp = 32i32 ÷ D
+    n_warps = nthreads ÷ 32i32
+    n_mats_per_block = n_warps * n_mats_per_warp
+    active_lanes = n_mats_per_warp * D
+
+    tid = threadIdx().x
+    bid = blockIdx().x
+    wid = div(tid - 1i32, 32i32) + 1i32
+    lid = mod1(tid, 32i32)
+
+    if lid > active_lanes
+        return nothing
+    end
+
+    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     warp_shmem_size = (n_mats_per_warp * D + padding) * D
-    warp_shmem_elem = n_mats_per_warp * D^2
+    warp_shmem_elem = n_mats_per_warp * D * D
+    interm_pad_freq = (D & (D - 1i32)) == 0i32 ? 32i32 : (warp_shmem_elem + 1i32)
     start_raw = (wid - 1i32) * warp_shmem_elem + 1i32
     start_offset = (wid - 1i32) * warp_shmem_size + 1i32
 
@@ -143,63 +196,21 @@ end
         offset = 0i32
         while offset < warp_shmem_elem
             raw_idx = start_raw + offset + lid - 1i32
-            raw_mtrx = div(raw_idx - 1i32, D^2) + 1i32
+            raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32
             grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block
 
             if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N
                 padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
 
-                src_idx = (bid - 1i32) * n_mats_per_block * D^2i32 + raw_idx
-                dest_idx = start_offset + offset + lid - 1i32 + padded_amount
-
-                shmem[dest_idx] = global_arr[src_idx]
-            end
-
-            offset += 32i32
-        end
-    end
-
-    return nothing
-end
-
-# TODO: convert this to independent version
-@inline function intermediate_layout_write!(
-    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32
-) where {D,nthreads}
-    n_mats_per_warp = 32i32 ÷ D
-    n_warps = nthreads ÷ 32i32
-    n_mats_per_block = n_warps * n_mats_per_warp
-    n_elements_per_block = n_mats_per_block * D * D
-    tid = threadIdx().x
-    bid = blockIdx().x
-    interm_pad_freq = div(32i32, D & -D) * D
-
-    sync_threads()
-
-    base_addr = (bid - 1i32) * n_mats_per_block * D^2 + 1i32
-    align_offset = (base_addr - 1i32) % 32i32
-
-    @inbounds begin
-        offset = 0i32
-        while offset < n_elements_per_block + align_offset
-            raw_idx = offset + tid - align_offset
-            raw_mtrx = div(raw_idx - 1i32, D^2) + 1i32
-            grid_mtrx_store = raw_mtrx + (bid - 1i32) * n_mats_per_block
-
-            if raw_mtrx <= n_mats_per_block && grid_mtrx_store <= N && raw_idx > 0i32
-                padded_amount = (raw_idx - 1i32) ÷ interm_pad_freq
-
-                dest_idx = (bid - 1i32) * n_mats_per_block * D^2i32 + raw_idx
-                src_idx = raw_idx + padded_amount
+                dest_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
+                src_idx = start_offset + offset + lid - 1i32 + padded_amount
 
                 global_arr[dest_idx] = shmem[src_idx]
             end
 
-            offset += nthreads
+            offset += active_lanes
         end
     end
-
-    sync_threads()
 
     return nothing
 end
@@ -209,27 +220,32 @@ end
 ) where {D,n_threads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = n_threads ÷ 32i32
-    padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
-    stride = n_mats_per_warp * D + padding
-    interm_pad_freq = div(32i32, D & -D) * D
+    n_mats_per_block = n_warps * n_mats_per_warp
+    active_lanes = n_mats_per_warp * D
+
     tid = threadIdx().x
-    lid = mod1(tid, 32i32)
+    bid = blockIdx().x
     wid = div(tid - 1i32, 32i32) + 1i32
+    lid = mod1(tid, 32i32)
+
+    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+    stride = n_mats_per_warp * D + padding
+    warp_shmem_size = (n_mats_per_warp * D + padding) * D
+    warp_shmem_elem = n_mats_per_warp * D * D
+    interm_pad_freq = (D & (D - 1i32)) == 0i32 ? 32i32 : (warp_shmem_elem + 1i32)
+
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     matrix_thread = mod1(lid, D)
     block_matrix_id = (wid - 1i32) * n_mats_per_warp + warp_matrix_id
+    grid_matrix_id = (bid - 1i32) * n_mats_per_block + block_matrix_id
 
-    padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
-    warp_shmem_size = (n_mats_per_warp * D + padding) * D
-    warp_shmem_elem = n_mats_per_warp * D^2
-
-    @inbounds if lid <= D * n_warps
+    @inbounds if lid <= active_lanes && grid_matrix_id <= N
         col = matrix_thread
 
         # Loop over the rows of each matrix
-        for row in 1:D
+        for row in 1i32:D
             # Compute index for intermediate layout
-            logical_idx = (warp_matrix_id - 1i32) * D^2 + (col - 1i32) * D + row
+            logical_idx = (warp_matrix_id - 1i32) * D * D + (col - 1i32) * D + row
             padding = (logical_idx - 1i32) ÷ interm_pad_freq
             padded_idx_interm = logical_idx + padding + (wid - 1i32) * warp_shmem_size
 
@@ -248,29 +264,40 @@ end
     return nothing
 end
 
-# TODO: convert this to independent version
 @inline function dual_to_interm_transfer!(
     shmem_interm, shmem_dual, ::Val{D}, ::Val{n_threads}, N::Int32
 ) where {D,n_threads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = n_threads ÷ 32i32
-    padding = (n_mats_per_warp - ((n_mats_per_warp * D) % 32i32)) % 32i32
-    stride = n_mats_per_warp * D + padding
-    interm_pad_freq = div(32i32, D & -D) * D
+    n_mats_per_block = n_warps * n_mats_per_warp
+    active_lanes = n_mats_per_warp * D
+
     tid = threadIdx().x
-    lid = mod1(tid, 32i32)
+    bid = blockIdx().x
     wid = div(tid - 1i32, 32i32) + 1i32
+    lid = mod1(tid, 32i32)
+
+    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+    stride = n_mats_per_warp * D + padding
+    warp_shmem_size = (n_mats_per_warp * D + padding) * D
+    warp_shmem_elem = n_mats_per_warp * D * D
+    interm_pad_freq = (D & (D - 1i32)) == 0i32 ? 32i32 : (warp_shmem_elem + 1i32)
+
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     matrix_thread = mod1(lid, D)
     block_matrix_id = (wid - 1i32) * n_mats_per_warp + warp_matrix_id
+    grid_matrix_id = (bid - 1i32) * n_mats_per_block + block_matrix_id
 
-    sync_threads()
-
-    @inbounds if lid <= D * n_warps
+    @inbounds if lid <= active_lanes && grid_matrix_id <= N
         col = matrix_thread
 
         # Loop over the rows of each matrix
-        for row in 1:D
+        for row in 1i32:D
+            # Compute index for intermediate layout
+            logical_idx = (warp_matrix_id - 1i32) * D * D + (col - 1i32) * D + row
+            padding = (logical_idx - 1i32) ÷ interm_pad_freq
+            padded_idx_interm = logical_idx + padding + (wid - 1i32) * warp_shmem_size
+
             # Compute index for dual-access layout
             padded_idx_dual = (
                 (col - 1i32 + (wid - 1i32) * D) * stride +
@@ -278,17 +305,10 @@ end
                 warp_matrix_id
             )
 
-            # Compute index for intermediate layout
-            logical_idx = (block_matrix_id - 1i32) * D^2 + (col - 1i32) * D + row
-            padding = (logical_idx - 1i32) ÷ interm_pad_freq
-            padded_idx_interm = logical_idx + padding
-
-            # Load from dual-access layout to intermediate layout
+            # Load from intermediate layout to dual-access layout
             shmem_interm[padded_idx_interm] = shmem_dual[padded_idx_dual]
         end
     end
-
-    sync_threads()
 
     return nothing
 end
