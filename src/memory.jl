@@ -139,7 +139,7 @@ end
     padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     warp_shmem_size = (n_mats_per_warp * D + padding) * D  # Shared memory covered by one warp
     warp_shmem_elem = n_mats_per_warp * D * D  # Shared memory used my one warp (excluding padding for dual)
-    interm_pad_freq = (D & (D - 1i32)) == 0i32 ? 32i32 : (warp_shmem_elem + 1i32)  # No padding needed if D is not a power of 2
+    interm_pad_freq = div(32i32, D & -D) * D
     start_raw = (wid - 1i32) * warp_shmem_elem + 1i32  # Global start idx for global memory
     start_offset = (wid - 1i32) * warp_shmem_size + 1i32  # Global start for shared memory
 
@@ -187,7 +187,7 @@ end
     padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     warp_shmem_size = (n_mats_per_warp * D + padding) * D
     warp_shmem_elem = n_mats_per_warp * D * D
-    interm_pad_freq = (D & (D - 1i32)) == 0i32 ? 32i32 : (warp_shmem_elem + 1i32)
+    interm_pad_freq = div(32i32, D & -D) * D
     start_raw = (wid - 1i32) * warp_shmem_elem + 1i32
     start_offset = (wid - 1i32) * warp_shmem_size + 1i32
 
@@ -231,8 +231,7 @@ end
     padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     stride = n_mats_per_warp * D + padding
     warp_shmem_size = (n_mats_per_warp * D + padding) * D
-    warp_shmem_elem = n_mats_per_warp * D * D
-    interm_pad_freq = (D & (D - 1i32)) == 0i32 ? 32i32 : (warp_shmem_elem + 1i32)
+    interm_pad_freq = div(32i32, D & -D) * D
 
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     matrix_thread = mod1(lid, D)
@@ -280,8 +279,7 @@ end
     padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     stride = n_mats_per_warp * D + padding
     warp_shmem_size = (n_mats_per_warp * D + padding) * D
-    warp_shmem_elem = n_mats_per_warp * D * D
-    interm_pad_freq = (D & (D - 1i32)) == 0i32 ? 32i32 : (warp_shmem_elem + 1i32)
+    interm_pad_freq = div(32i32, D & -D) * D
 
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     matrix_thread = mod1(lid, D)
