@@ -55,6 +55,7 @@
     # Test all four combinations
     test_cases = [(false, false), (true, false), (false, true), (true, true)]
 
+    # Accuracy tests
     for D in 2:10
         CUDA.seed!(1234)
 
