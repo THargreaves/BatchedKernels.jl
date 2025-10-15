@@ -146,11 +146,64 @@
 
         .info {
             margin-top: 10px;
-            padding: 10px;
+            margin-bottom: 20px;
+            padding: 15px;
             background: #e7f3ff;
             border-left: 4px solid #2196F3;
             border-radius: 4px;
             font-size: 14px;
+            line-height: 1.6;
+        }
+
+        .formula-box {
+            background: #f0f0f0;
+            border-left: 4px solid #666;
+            margin-bottom: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            line-height: 1.8;
+        }
+
+        .formula-box h3 {
+            margin-top: 0;
+            margin-bottom: 15px;
+            font-size: 16px;
+            color: #333;
+        }
+
+        .formula-columns {
+            display: flex;
+            gap: 20px;
+        }
+
+        .formula-column {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .formula-column h4 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            font-size: 15px;
+            color: #444;
+        }
+
+        .formula {
+            font-family: 'Courier New', monospace;
+            background: #fff;
+            padding: 8px 12px;
+            margin: 8px 0;
+            border-radius: 3px;
+            border: 1px solid #ddd;
+            display: block;
+            font-size: 13px;
+        }
+
+        .formula-desc {
+            color: #555;
+            font-size: 13px;
+            margin-left: 12px;
+            margin-top: 4px;
         }
     </style>
 </head>
@@ -183,6 +236,33 @@
         </div>
 
         <div class="info" id="info"></div>
+
+        <div class="formula-box">
+            <h3>Memory Layout Formulas</h3>
+
+            <div class="formula-columns">
+                <div class="formula-column">
+                    <h4>Dual-Access Layout</h4>
+                    <div class="formula">address = m + i × M + j × stride + w × (D × stride - padding)</div>
+                    <div class="formula-desc">
+                        where M = floor(32/D)<br>
+                        padding = (M - (M×D % 32)) % 32<br>
+                        stride = M×D + padding
+                    </div>
+                    <div class="formula">Warp size = D × stride - padding</div>
+                    <div class="formula-desc">Total cells per warp (including padding)</div>
+                </div>
+
+                <div class="formula-column">
+                    <h4>Single-Access Layout</h4>
+                    <div class="formula-desc" style="margin-left: 0; margin-top: 0;">
+                        Elements stored in (matrix, column, row) order<br>
+                        Padding every div(32, gcd(32, D)) columns<br>
+                        Final padding added to match dual-access warp size
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <div class="layouts">
             <div class="layout-section">
