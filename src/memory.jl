@@ -125,16 +125,11 @@ end
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32  # Works if nthreads is divisible by 32, otherwise needs to be cld(nthreads, 32)
     n_mats_per_block = n_warps * n_mats_per_warp
-    active_lanes = n_mats_per_warp * D
 
     tid = threadIdx().x
     bid = blockIdx().x
     wid = div(tid - 1i32, 32i32) + 1i32
     lid = mod1(tid, 32i32)
-
-    if lid > active_lanes
-        return nothing
-    end
 
     padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     warp_shmem_size = (n_mats_per_warp * D + padding) * D  # Shared memory covered by one warp
@@ -160,7 +155,7 @@ end
                 shmem[dest_idx] = global_arr[src_idx]
             end
 
-            offset += active_lanes
+            offset += 32i32
         end
     end
 
