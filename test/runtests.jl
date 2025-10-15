@@ -3,4 +3,5 @@ using TestItemRunner
 
 @run_package_tests
 
-include("dual_access_operations.jl")
+include("validity_tests.jl")
+include("throughput_tests.jl")
