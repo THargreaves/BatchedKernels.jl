@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA Shared Memory Layout Visualization</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+
+        .container {
+            max-width: 2400px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .controls {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+
+        .control-group {
+            display: inline-block;
+            margin-right: 20px;
+        }
+
+        label {
+            font-weight: bold;
+            margin-right: 8px;
+        }
+
+        input[type="number"] {
+            width: 60px;
+            padding: 4px 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        .layouts {
+            display: flex;
+            gap: 20px;
+            overflow-x: auto;
+        }
+
+        .layout-section {
+            flex: 1;
+            min-width: 1100px;
+        }
+
+        .layout-section h2 {
+            margin-top: 0;
+            color: #333;
+        }
+
+        .memory-table {
+            border-collapse: collapse;
+            font-size: 12px;
+            table-layout: fixed;
+        }
+
+        .memory-table th {
+            background: #e9ecef;
+            padding: 4px 2px;
+            border: 1px solid #dee2e6;
+            font-weight: bold;
+            text-align: center;
+            width: 32px;
+            height: 32px;
+        }
+
+        .memory-table td {
+            border: 1px solid #dee2e6;
+            padding: 1px;
+            text-align: center;
+            vertical-align: middle;
+            height: 32px;
+            width: 32px;
+            font-size: 10px;
+            line-height: 1.0;
+        }
+
+        .memory-table .row-header {
+            background: #e9ecef;
+            font-weight: bold;
+            padding: 4px 8px;
+            width: 40px;
+        }
+
+        .cell-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            gap: 0px;
+        }
+
+        .cell-indices {
+            font-size: 11px;
+            line-height: 1.0;
+            font-weight: 600;
+        }
+
+        .cell-matrix {
+            font-size: 10px;
+            line-height: 1.0;
+            color: #444;
+            font-weight: 500;
+        }
+
+        .padding-cell {
+            background-color: #d3d3d3 !important;
+        }
+
+        .empty-cell {
+            background-color: #ffffff !important;
+        }
+
+        .warp-boundary-bottom {
+            border-bottom: 4px solid #000000 !important;
+        }
+
+        .warp-boundary-top {
+            border-top: 4px solid #000000 !important;
+        }
+
+        .warp-boundary-right {
+            border-right: 4px solid #000000 !important;
+        }
+
+        .warp-boundary-left {
+            border-left: 4px solid #000000 !important;
+        }
+
+        .info {
+            margin-top: 10px;
+            padding: 10px;
+            background: #e7f3ff;
+            border-left: 4px solid #2196F3;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>CUDA Shared Memory Layout Visualization</h1>
+
+        <div class="controls">
+            <div class="control-group">
+                <label for="dimension">Matrix Dimension (D):</label>
+                <input type="number" id="dimension" min="1" max="10" value="5">
+            </div>
+        </div>
+
+        <div class="info" id="info"></div>
+
+        <div class="layouts">
+            <div class="layout-section">
+                <h2>Dual-Access Layout</h2>
+                <div id="dual-access-table"></div>
+            </div>
+            <div class="layout-section">
+                <h2>Single-Access Layout</h2>
+                <div id="single-access-table"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Proper modulo function that always returns positive result
+        function mod(n, m) {
+            return ((n % m) + m) % m;
+        }
+
+        // Generate HSL color for matrix index
+        function getMatrixColor(matrixIndex, totalMatrices) {
+            const hue = (matrixIndex / totalMatrices) * 360;
+            return `hsl(${hue}, 70%, 75%)`;
+        }
+
+        // Calculate dual-access layout
+        function calculateDualAccessLayout(D) {
+            const M = Math.floor(32 / D);
+            const padding = mod(M - mod(M * D, 32), 32);
+            const stride = M * D + padding;
+            const warpSize = D * stride - padding;
+
+            const elements = [];
+
+            // Generate elements for both warps
+            for (let w = 0; w < 2; w++) {
+                for (let m = 0; m < M; m++) {
+                    for (let j = 0; j < D; j++) {
+                        for (let i = 0; i < D; i++) {
+                            const address = m + i * M + j * stride + w * warpSize;
+                            elements.push({
+                                address,
+                                i, j, m, w,
+                                bank: address % 32,
+                                row: Math.floor(address / 32)
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Calculate total rows needed
+            const maxAddress = Math.max(...elements.map(e => e.address));
+            const numRows = Math.floor(maxAddress / 32) + 1;
+
+            // Create grid
+            const grid = Array(numRows).fill(null).map(() => Array(32).fill(null));
+
+            // Place elements
+            elements.forEach(el => {
+                grid[el.row][el.bank] = el;
+            });
+
+            return { grid, M, padding, stride, warpSize, numRows };
+        }
+
+        // Render dual-access table
+        function renderDualAccessTable(D, numRows) {
+            const layout = calculateDualAccessLayout(D);
+            const { grid, M, padding, stride, warpSize } = layout;
+
+            // Find where warp 0 ends and warp 1 ends
+            const warp0LastAddress = warpSize - 1;
+            const warp1LastAddress = 2 * warpSize - 1;
+            const warpBoundaryRow = Math.floor(warp0LastAddress / 32);
+            const warpBoundaryBank = warp0LastAddress % 32;
+            const lastElementRow = Math.floor(warp1LastAddress / 32);
+            const lastElementBank = warp1LastAddress % 32;
+
+            let html = '<table class="memory-table">';
+
+            // Header row with bank numbers
+            html += '<tr><th>Row</th>';
+            for (let bank = 0; bank < 32; bank++) {
+                html += `<th>${bank}</th>`;
+            }
+            html += '</tr>';
+
+            // Data rows
+            for (let row = 0; row < numRows; row++) {
+                html += `<tr><td class="row-header">${row}</td>`;
+                for (let bank = 0; bank < 32; bank++) {
+                    const cell = grid[row] ? grid[row][bank] : null;
+                    const currentAddress = row * 32 + bank;
+                    let boundaryClasses = '';
+
+                    // Add boundary classes
+                    if (row === warpBoundaryRow) {
+                        if (bank <= warpBoundaryBank) {
+                            // Cells in warp 0: add bottom border
+                            boundaryClasses += ' warp-boundary-bottom';
+                            if (bank === warpBoundaryBank) {
+                                // Last cell of warp 0 in this row: add right border
+                                boundaryClasses += ' warp-boundary-right';
+                            }
+                        } else {
+                            // Cells in warp 1: add top border
+                            boundaryClasses += ' warp-boundary-top';
+                            if (bank === warpBoundaryBank + 1) {
+                                // First cell of warp 1 in this row: add left border
+                                boundaryClasses += ' warp-boundary-left';
+                            }
+                        }
+                    }
+
+                    if (cell) {
+                        const color = getMatrixColor(cell.m, M);
+                        html += `<td class="${boundaryClasses}" style="background-color: ${color}">`;
+                        html += '<div class="cell-content">';
+                        html += `<div class="cell-indices">${cell.i},${cell.j}</div>`;
+                        html += '</div>';
+                        html += '</td>';
+                    } else {
+                        // Distinguish between padding and empty cells after last element
+                        const isAfterLastElement = (row === lastElementRow && bank > lastElementBank) || row > lastElementRow;
+                        const cellClass = isAfterLastElement ? 'empty-cell' : 'padding-cell';
+                        html += `<td class="${cellClass}${boundaryClasses}"></td>`;
+                    }
+                }
+                html += '</tr>';
+            }
+
+            html += '</table>';
+
+            document.getElementById('dual-access-table').innerHTML = html;
+
+            // Update info
+            const totalElements = 2 * M * D * D;
+            const totalCells = grid.length * 32;
+            const paddingCells = totalCells - totalElements;
+
+            document.getElementById('info').innerHTML = `
+                <strong>Configuration:</strong> D=${D}, M=${M}, Padding per column=${padding}, Stride=${stride}, Warp size=${warpSize} cells<br>
+                <strong>Statistics:</strong> ${totalElements} matrix elements, ${paddingCells} padding cells, ${totalCells} total cells (${grid.length} rows × 32 banks)
+            `;
+        }
+
+        // GCD function
+        function gcd(a, b) {
+            while (b !== 0) {
+                const temp = b;
+                b = a % b;
+                a = temp;
+            }
+            return a;
+        }
+
+        // Calculate single-access layout
+        function calculateSingleAccessLayout(D, targetWarpSize) {
+            const M = Math.floor(32 / D);
+            const padInterval = Math.floor(32 / gcd(32, D));
+
+            const elements = [];
+            let currentAddress = 0;
+
+            // Process both warps
+            for (let w = 0; w < 2; w++) {
+                let warpStartAddress = currentAddress;
+                let columnCount = 0;
+
+                // Generate elements in (matrix, column, row, warp) order (column-major within each matrix)
+                for (let m = 0; m < M; m++) {
+                    for (let j = 0; j < D; j++) {
+                        // Add padding if needed before this column
+                        if (columnCount > 0 && columnCount % padInterval === 0) {
+                            currentAddress++; // Skip one cell for padding
+                        }
+
+                        for (let i = 0; i < D; i++) {
+                            elements.push({
+                                address: currentAddress,
+                                i, j, m, w,
+                                bank: currentAddress % 32,
+                                row: Math.floor(currentAddress / 32)
+                            });
+
+                            currentAddress++;
+                        }
+
+                        columnCount++;
+                    }
+                }
+
+                // Pad to match target warp size
+                const warpElementsUsed = currentAddress - warpStartAddress;
+                const paddingNeeded = targetWarpSize - warpElementsUsed;
+                currentAddress += paddingNeeded;
+            }
+
+            // Calculate total rows needed
+            const numRows = Math.floor((currentAddress - 1) / 32) + 1;
+
+            // Create grid
+            const grid = Array(numRows).fill(null).map(() => Array(32).fill(null));
+
+            // Place elements
+            elements.forEach(el => {
+                grid[el.row][el.bank] = el;
+            });
+
+            return { grid, M, padInterval, numRows };
+        }
+
+        // Render single-access table
+        function renderSingleAccessTable(D, targetWarpSize, warpBoundaryRow, warpBoundaryBank, numRows) {
+            const layout = calculateSingleAccessLayout(D, targetWarpSize);
+            const { grid, M } = layout;
+
+            // Find the last element address
+            const warp1LastAddress = 2 * targetWarpSize - 1;
+            const lastElementRow = Math.floor(warp1LastAddress / 32);
+            const lastElementBank = warp1LastAddress % 32;
+
+            let html = '<table class="memory-table">';
+
+            // Header row with bank numbers
+            html += '<tr><th>Row</th>';
+            for (let bank = 0; bank < 32; bank++) {
+                html += `<th>${bank}</th>`;
+            }
+            html += '</tr>';
+
+            // Data rows
+            for (let row = 0; row < numRows; row++) {
+                html += `<tr><td class="row-header">${row}</td>`;
+                for (let bank = 0; bank < 32; bank++) {
+                    const cell = grid[row] ? grid[row][bank] : null;
+                    const currentAddress = row * 32 + bank;
+                    let boundaryClasses = '';
+
+                    // Add boundary classes (same logic as dual-access)
+                    if (row === warpBoundaryRow) {
+                        if (bank <= warpBoundaryBank) {
+                            boundaryClasses += ' warp-boundary-bottom';
+                            if (bank === warpBoundaryBank) {
+                                boundaryClasses += ' warp-boundary-right';
+                            }
+                        } else {
+                            boundaryClasses += ' warp-boundary-top';
+                            if (bank === warpBoundaryBank + 1) {
+                                boundaryClasses += ' warp-boundary-left';
+                            }
+                        }
+                    }
+
+                    if (cell) {
+                        const color = getMatrixColor(cell.m, M);
+                        html += `<td class="${boundaryClasses}" style="background-color: ${color}">`;
+                        html += '<div class="cell-content">';
+                        html += `<div class="cell-indices">${cell.i},${cell.j}</div>`;
+                        html += '</div>';
+                        html += '</td>';
+                    } else {
+                        // Distinguish between padding and empty cells after last element
+                        const isAfterLastElement = (row === lastElementRow && bank > lastElementBank) || row > lastElementRow;
+                        const cellClass = isAfterLastElement ? 'empty-cell' : 'padding-cell';
+                        html += `<td class="${cellClass}${boundaryClasses}"></td>`;
+                    }
+                }
+                html += '</tr>';
+            }
+
+            html += '</table>';
+
+            document.getElementById('single-access-table').innerHTML = html;
+        }
+
+        // Initialize
+        function updateVisualization() {
+            const D = parseInt(document.getElementById('dimension').value);
+            if (D >= 1 && D <= 10) {
+                // Calculate both layouts to get warp size and row counts
+                const dualLayout = calculateDualAccessLayout(D);
+                const singleLayout = calculateSingleAccessLayout(D, dualLayout.warpSize);
+
+                // Use the maximum number of rows from both layouts
+                const numRows = Math.max(dualLayout.numRows, singleLayout.numRows);
+
+                // Calculate warp boundary for both tables
+                const warp0LastAddress = dualLayout.warpSize - 1;
+                const warpBoundaryRow = Math.floor(warp0LastAddress / 32);
+                const warpBoundaryBank = warp0LastAddress % 32;
+
+                // Render both layouts
+                renderDualAccessTable(D, numRows);
+                renderSingleAccessTable(D, dualLayout.warpSize, warpBoundaryRow, warpBoundaryBank, numRows);
+            }
+        }
+
+        document.getElementById('dimension').addEventListener('input', updateVisualization);
+        updateVisualization();
+    </script>
+</body>
+</html>
