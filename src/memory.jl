@@ -205,11 +205,58 @@ end
     return nothing
 end
 
+@inline function intermediate_layout_write_conseq!(
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32
+) where {D,nthreads}
+    n_mats_per_warp = 32i32 ÷ D
+    n_warps = nthreads ÷ 32i32
+    n_mats_per_block = n_warps * n_mats_per_warp
+    n_elements_per_block = n_mats_per_block * D * D
+
+    tid = threadIdx().x
+    bid = blockIdx().x
+
+    sync_threads()
+
+    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+    warp_shmem_size = (n_mats_per_warp * D + padding) * D
+    warp_shmem_elem = n_mats_per_warp * D * D
+    interm_pad_freq = div(32i32, D & -D) * D
+    base_addr = (bid - 1i32) * n_mats_per_block * D * D + 1i32
+    align_offset = (base_addr - 1i32) % 32i32
+
+    @inbounds begin
+        offset = 0i32
+        while offset < n_elements_per_block + align_offset
+            raw_idx = offset + tid - align_offset
+            raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32
+            grid_mtrx_store = raw_mtrx + (bid - 1i32) * n_mats_per_block
+
+            if raw_mtrx <= n_mats_per_block && grid_mtrx_store <= N && raw_idx > 0i32
+                dest_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
+
+                elem_warp_id = (raw_idx - 1i32) % warp_shmem_elem + 1
+                padded_amount = (elem_warp_id - 1i32) ÷ interm_pad_freq
+                warp_offset = ((raw_idx - 1i32) ÷ warp_shmem_elem) * warp_shmem_size
+                src_idx = warp_offset + elem_warp_id + padded_amount
+
+                global_arr[dest_idx] = shmem[src_idx]
+            end
+
+            offset += nthreads
+        end
+    end
+
+    sync_threads()
+
+    return nothing
+end
+
 @inline function intermediate_layout_write!(
     global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32
 ) where {D,nthreads}
-    intermediate_layout_write_indep!(global_arr, shmem, Val(D), Val(nthreads), N)
-    # intermediate_layout_write_conseq!(global_arr, shmem, Val(D), Val(nthreads), N)
+    # intermediate_layout_write_indep!(global_arr, shmem, Val(D), Val(nthreads), N)
+    intermediate_layout_write_conseq!(global_arr, shmem, Val(D), Val(nthreads), N)
 
     return nothing
 end
