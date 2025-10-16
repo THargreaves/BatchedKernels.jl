@@ -146,7 +146,7 @@ end
             raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32  # How many-th matrix to load: [1, n_mats_per_block]
             grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block  # How many-th global matrix 1 ... N to load
 
-            if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N
+            if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N && div(raw_idx - 1, warp_shmem_elem) != wid
                 padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
 
                 src_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
@@ -162,22 +162,17 @@ end
     return nothing
 end
 
-@inline function intermediate_layout_write!(
+@inline function intermediate_layout_write_indep!(
     global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
     n_mats_per_block = n_warps * n_mats_per_warp
-    active_lanes = n_mats_per_warp * D
 
     tid = threadIdx().x
     bid = blockIdx().x
     wid = div(tid - 1i32, 32i32) + 1i32
     lid = mod1(tid, 32i32)
-
-    if lid > active_lanes
-        return nothing
-    end
 
     padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     warp_shmem_size = (n_mats_per_warp * D + padding) * D
@@ -194,7 +189,7 @@ end
             raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32
             grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block
 
-            if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N
+            if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N && div(raw_idx - 1, warp_shmem_elem) != wid
                 padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
 
                 dest_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
@@ -203,9 +198,18 @@ end
                 global_arr[dest_idx] = shmem[src_idx]
             end
 
-            offset += active_lanes
+            offset += 32i32
         end
     end
+
+    return nothing
+end
+
+@inline function intermediate_layout_write!(
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32
+) where {D,nthreads}
+    intermediate_layout_write_indep!(global_arr, shmem, Val(D), Val(nthreads), N)
+    # intermediate_layout_write_conseq!(global_arr, shmem, Val(D), Val(nthreads), N)
 
     return nothing
 end
