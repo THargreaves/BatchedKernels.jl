@@ -16,7 +16,7 @@
     # Set full shared memory usage
     CUDA.cache_config!(CUDA.FUNC_CACHE_PREFER_SHARED)
 
-    function kernel!(
+    function kernel_matmul_n_mats_per_warp!(
         Cs, As, Bs, ::Val{D}, ::Val{nthreads}, N::Int32
     ) where {D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
@@ -48,7 +48,7 @@
         C = DualAccessMatrix(shmem_3, Val(D), wid, warp_matrix_id)
 
         # Perform a trivial operation
-        batch_op!(+, C, A, B, d, Val(D))
+        batch_op!(*, C, A, B, d, Val(D))
 
         # Store C
         dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
@@ -57,11 +57,62 @@
         return nothing
     end
 
+    function kernel_matmul_one_mats_per_warp!(
+        Cs, As, Bs, ::Val{D}, ::Val{nthreads}, N::Int32
+    ) where {D,nthreads}
+        n_mats_per_warp = 1i32
+        n_warps = nthreads ÷ 32i32
+        n_mats_per_block = n_warps * n_mats_per_warp
+        interm_pad_freq = div(32i32, D & -D) * D
+
+        padded_amount_per_warp = (D * D) ÷ interm_pad_freq
+        warp_shmem_size = D * D + padded_amount_per_warp
+
+        tid = threadIdx().x
+        lid = mod1(tid, 32i32)
+
+        block_matrix_id = div(tid - 1i32, 32i32) + 1i32
+        d = mod1(lid, D)
+
+        shmem_elems = warp_shmem_size * n_mats_per_block
+        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
+
+        intermediate_layout_load!(shmem_1, As, Val(D), Val(nthreads), N)
+        intermediate_layout_load!(shmem_2, Bs, Val(D), Val(nthreads), N)
+
+        A = DualAccessMatrix(shmem_1, Val(D), block_matrix_id)
+        B = DualAccessMatrix(shmem_2, Val(D), block_matrix_id)
+        C = DualAccessMatrix(shmem_3, Val(D), block_matrix_id)
+        
+        if block_matrix_id <= n_mats_per_block && lid <= D
+            batch_op!(*, C, A, B, d, Val(D))
+        end
+
+        intermediate_layout_write!(Cs, shmem_3, Val(D), Val(nthreads), N)
+
+        return nothing
+    end
+
+    @static if BatchedKernels.VERSION === :NMatsPerWarp
+        kernel! = kernel_matmul_n_mats_per_warp!
+    elseif BatchedKernels.VERSION === :OneMatPerWarp
+        kernel! = kernel_matmul_one_mats_per_warp!
+    end
+
     # Throughput tests
-    for D in 2:10
+    for D in 2:12
         # Target 1GB of input data to minimise impact of L1 cache
         N_bench = Int32(ceil(1e9 / (4 * 2 * D^2)))
-        nblocks = cld(N_bench, nthreads//32 * (32 ÷ D))
+        if BatchedKernels.VERSION == :NMatsPerWarp
+            nblocks = cld(N_bench, nthreads//32 * (32 ÷ D))
+        elseif BatchedKernels.VERSION == :OneMatPerWarp
+            n_mats_per_warp = 1
+            n_warps = nthreads ÷ 32
+            n_mats_per_block = n_warps * n_mats_per_warp
+            nblocks = cld(N_bench, n_mats_per_block)
+        end
 
         CUDA.seed!(1234)
 
@@ -78,10 +129,10 @@
         # Verify at least 90% of theoretical speed
         bytes_total = 4 * 3 * D^2 * N_bench  # 3 matrices read/written
         achieved_bandwidth = bytes_total / (median(bench_results).time / 1e9)
-        debug = false
+        debug = true
         debug |= !((@test 0.9 < achieved_bandwidth / mem_bandwidth < 1.0) isa Test.Pass)
         if debug
-            @info "Dimension: $D"
+            @info "Dimension: $D, result: $(achieved_bandwidth / mem_bandwidth), time: $(median(bench_results))"
         end
     end
 end

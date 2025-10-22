@@ -6,10 +6,9 @@
 
     # Test parameters
     nthreads = 2^8
-    N = 2^12 + 113
-    nblocks = 2^8
+    N = 2^12
 
-    function kernel_matmul!(
+    function kernel_matmul_n_mats_per_warp!(
         Cs, As, Bs, A_adj, B_adj, ::Val{D}, ::Val{nthreads}, N::Int32
     ) where {D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
@@ -52,11 +51,66 @@
         return nothing
     end
 
+    function kernel_matmul_one_mats_per_warp!(
+        Cs, As, Bs, A_adj, B_adj, ::Val{D}, ::Val{nthreads}, N::Int32
+    ) where {D,nthreads}
+        n_mats_per_warp = 1i32
+        n_warps = nthreads ÷ 32i32
+        n_mats_per_block = n_warps * n_mats_per_warp
+        interm_pad_freq = div(32i32, D & -D) * D
+
+        padded_amount_per_warp = (D * D) ÷ interm_pad_freq
+        warp_shmem_size = D * D + padded_amount_per_warp
+
+        tid = threadIdx().x
+        lid = mod1(tid, 32i32)
+
+        block_matrix_id = div(tid - 1i32, 32i32) + 1i32
+        d = mod1(lid, D)
+
+        shmem_elems = warp_shmem_size * n_mats_per_block
+        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
+
+        intermediate_layout_load!(shmem_1, As, Val(D), Val(nthreads), N)
+        intermediate_layout_load!(shmem_2, Bs, Val(D), Val(nthreads), N)
+
+        A = DualAccessMatrix(shmem_1, Val(D), block_matrix_id)
+        B = DualAccessMatrix(shmem_2, Val(D), block_matrix_id)
+        C = DualAccessMatrix(shmem_3, Val(D), block_matrix_id)
+
+        if block_matrix_id <= n_mats_per_block && lid <= D
+            A_mat = A_adj ? A' : A
+            B_mat = B_adj ? B' : B
+            batch_op!(*, C, A_mat, B_mat, d, Val(D))
+        end
+
+        intermediate_layout_write!(Cs, shmem_3, Val(D), Val(nthreads), N)
+
+        return nothing
+    end
+
+    @static if BatchedKernels.VERSION === :NMatsPerWarp
+        kernel_matmul! = kernel_matmul_n_mats_per_warp!
+    elseif BatchedKernels.VERSION === :OneMatPerWarp
+        kernel_matmul! = kernel_matmul_one_mats_per_warp!
+    end
+
     # Test all four combinations
     test_cases = [(false, false), (true, false), (false, true), (true, true)]
 
     # Accuracy tests
-    for D in 2:10
+    for D in 2:12
+        if BatchedKernels.VERSION == :NMatsPerWarp
+            nblocks = cld(N, nthreads//32 * (32 ÷ D))
+        elseif BatchedKernels.VERSION == :OneMatPerWarp
+            n_mats_per_warp = 1
+            n_warps = nthreads ÷ 32
+            n_mats_per_block = n_warps * n_mats_per_warp
+            nblocks = cld(N, n_mats_per_block)
+        end
+
         CUDA.seed!(1234)
 
         As = CUDA.rand(Float32, D, D, N)
@@ -73,8 +127,6 @@
 
             # CPU comparison
             Cs_cpu = similar(As_cpu)
-            A_cpu_mat = A_adj ? As_cpu : As_cpu
-            B_cpu_mat = B_adj ? Bs_cpu : Bs_cpu
             for i in 1:N
                 if A_adj && B_adj
                     Cs_cpu[:, :, i] = As_cpu[:, :, i]' * Bs_cpu[:, :, i]'

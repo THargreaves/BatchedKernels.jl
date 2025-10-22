@@ -43,12 +43,12 @@ end
 ) where {T,D}
     # Extract column d of B into registers
     B_col = @MVector zeros(T, Int64(D))
-    for k in (1i32):D
+    @inbounds for k in (1i32):D
         B_col[k] = B[k, d]
     end
 
     # Compute each element of column d of C
-    for i in (1i32):D
+    @inbounds for i in (1i32):D
         tot = zero(T)
         for k in (1i32):D
             tot += A[i, k] * B_col[k]
