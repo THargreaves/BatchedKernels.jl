@@ -369,6 +369,7 @@ end
     tid = threadIdx().x
     bid = blockIdx().x
     wid = div(tid - 1i32, 32i32) + 1i32
+    lid = mod1(tid, 32i32)
 
     padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     stride = n_mats_per_warp * D + padding
