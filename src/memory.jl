@@ -8,7 +8,7 @@ export VERSION
 
 
 # NMatsPerWarp, OneMatPerWarp
-const VERSION = :OneMatPerWarp
+const VERSION = :NMatsPerWarp
 
 
 ### DualAccessMatrixNMatsPerWarp ###

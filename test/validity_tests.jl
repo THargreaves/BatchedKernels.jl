@@ -101,7 +101,7 @@
     test_cases = [(false, false), (true, false), (false, true), (true, true)]
 
     # Accuracy tests
-    for D in 2:12
+    for D in 2:15
         if BatchedKernels.VERSION == :NMatsPerWarp
             nblocks = cld(N, nthreads//32 * (32 ÷ D))
         elseif BatchedKernels.VERSION == :OneMatPerWarp
