@@ -5,7 +5,6 @@
     using LinearAlgebra
 
     # Test parameters
-    nthreads = 2^8
     N = 2^12
 
     function kernel_matmul_n_mats_per_warp!(
@@ -51,6 +50,45 @@
         return nothing
     end
 
+    function kernel_matmul_d2_threads_per_warp!(
+        Cs, As, Bs, A_adj, B_adj, ::Val{D}, ::Val{nthreads}, N::Int32
+    ) where {D,nthreads}
+        tid = threadIdx().x
+        bid = blockIdx().x
+
+        n_mats_per_block = nthreads ÷ (D * D)
+        interm_pad_freq = div(32i32, D & -D) * D
+        padded_amount_per_mat = (D * D - 1i32) ÷ interm_pad_freq
+        mat_shmem_size = D * D + padded_amount_per_mat
+        block_mtrx_id = div(tid - 1i32, D * D) + 1i32
+        grid_mtrx_load = (bid - 1i32) * n_mats_per_block + block_mtrx_id
+
+        shmem_elems = mat_shmem_size * n_mats_per_block
+
+        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
+
+        intermediate_layout_load!(shmem_1, As, Val(D), Val(nthreads), N)
+        intermediate_layout_load!(shmem_2, Bs, Val(D), Val(nthreads), N)
+
+        sync_threads()
+        if block_mtrx_id <= n_mats_per_block && grid_mtrx_load <= N
+            A = DualAccessMatrix(shmem_1, Val(D), block_mtrx_id)
+            B = DualAccessMatrix(shmem_2, Val(D), block_mtrx_id)
+            C = DualAccessMatrix(shmem_3, Val(D), block_mtrx_id)
+
+            A_mat = A_adj ? A' : A
+            B_mat = B_adj ? B' : B
+            batch_op!(*, C, A_mat, B_mat, Val(D))
+        end
+        sync_threads()
+
+        intermediate_layout_write!(Cs, shmem_3, Val(D), Val(nthreads), N)
+
+        return nothing
+    end
+
     function kernel_matmul_one_mats_per_warp!(
         Cs, As, Bs, A_adj, B_adj, ::Val{D}, ::Val{nthreads}, N::Int32
     ) where {D,nthreads}
@@ -92,8 +130,13 @@
     end
 
     @static if BatchedKernels.VERSION === :NMatsPerWarp
+        D_upper_limit = 15
         kernel_matmul! = kernel_matmul_n_mats_per_warp!
+    elseif BatchedKernels.VERSION === :D2ThreadsPerMat
+        D_upper_limit = 32
+        kernel_matmul! = kernel_matmul_d2_threads_per_warp!
     elseif BatchedKernels.VERSION === :OneMatPerWarp
+        D_upper_limit = 15
         kernel_matmul! = kernel_matmul_one_mats_per_warp!
     end
 
@@ -101,10 +144,16 @@
     test_cases = [(false, false), (true, false), (false, true), (true, true)]
 
     # Accuracy tests
-    for D in 2:15
+    for D in 2:D_upper_limit
         if BatchedKernels.VERSION == :NMatsPerWarp
+            nthreads = 2^8
             nblocks = cld(N, nthreads//32 * (32 ÷ D))
+        elseif BatchedKernels.VERSION === :D2ThreadsPerMat
+            nthreads = 1 << (ceil(Int, log2(D^2)))
+            n_mats_per_block = nthreads ÷ (D * D)
+            nblocks = cld(N, n_mats_per_block)
         elseif BatchedKernels.VERSION == :OneMatPerWarp
+            nthreads = 2^8
             n_mats_per_warp = 1
             n_warps = nthreads ÷ 32
             n_mats_per_block = n_warps * n_mats_per_warp

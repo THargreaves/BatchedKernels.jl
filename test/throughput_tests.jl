@@ -5,8 +5,6 @@ using CUDA
 using CUDA: i32
 using LinearAlgebra
 
-# Test parameters
-nthreads = 2^8
 
 mem_clock = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE)
 bus_width = attribute(device(), CUDA.DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH)
@@ -15,13 +13,27 @@ mem_bandwidth = 2.0f0 * mem_clock * (bus_width / 8) / 1e6 * 1e9   # in B/s
 # Set full shared memory usage
 CUDA.cache_config!(CUDA.FUNC_CACHE_PREFER_SHARED)
 
+if BatchedKernels.VERSION === :NMatsPerWarp
+    D_upper_limit = 15
+elseif BatchedKernels.VERSION === :D2ThreadsPerMat
+    D_upper_limit = 32
+elseif BatchedKernels.VERSION === :OneMatPerWarp
+    D_upper_limit = 15
+end
+
 # Throughput tests
-for D in 2:15
+for D in 2:D_upper_limit
     # Target 1GB of input data to minimise impact of L1 cache
     N_bench = Int32(ceil(1e9 / (4 * 2 * D^2)))
     if BatchedKernels.VERSION === :NMatsPerWarp
+        nthreads = 2^8
         nblocks = cld(N_bench, nthreads//32 * (32 ÷ D))
+    elseif BatchedKernels.VERSION === :D2ThreadsPerMat
+        nthreads = max(2^8, 1 << (ceil(Int, log2(D^2))))
+        n_mats_per_block = nthreads ÷ (D * D)
+        nblocks = cld(N_bench, n_mats_per_block)    
     elseif BatchedKernels.VERSION === :OneMatPerWarp
+        nthreads = 2^8
         n_mats_per_warp = 1
         n_warps = nthreads ÷ 32
         n_mats_per_block = n_warps * n_mats_per_warp
