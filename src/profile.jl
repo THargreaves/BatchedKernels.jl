@@ -5,16 +5,16 @@ using BenchmarkTools
 
 CUDA.cache_config!(CUDA.FUNC_CACHE_PREFER_SHARED)
 
-D = 31
+D = 28
 N = Int32(ceil(1e9 / (4 * 2 * D^2)))
 
 if BatchedKernels.VERSION === :NMatsPerWarp
     nthreads = 2^8
     nblocks = cld(N, nthreads//32 * (32 ÷ D))
 elseif BatchedKernels.VERSION === :D2ThreadsPerMat
-    nthreads = 1 << (ceil(Int, log2(D^2)))
+    nthreads = max(256, 1 << (ceil(Int, log2(D^2))))
     n_mats_per_block = nthreads ÷ (D * D)
-    nblocks = cld(N, n_mats_per_block)  
+    nblocks = cld(N, n_mats_per_block)
 elseif BatchedKernels.VERSION === :OneMatPerWarp
     nthreads = 2^8
     n_mats_per_warp = 1

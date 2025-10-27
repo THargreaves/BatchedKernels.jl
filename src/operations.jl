@@ -71,14 +71,16 @@ elseif VERSION === :D2ThreadsPerMat
 
         mat_elem_idx = mod1(tid, D * D)
 
-        i = (mat_elem_idx - 1i32) ÷ D + 1i32
-        d = mod1(mat_elem_idx, D)
+        # i = (mat_elem_idx - 1i32) ÷ D + 1i32
+        # d = mod1(mat_elem_idx, D)
+        d = (mat_elem_idx - 1i32) ÷ D + 1i32
+        i = mod1(mat_elem_idx, D)
         tot = zero(T)
-        for k in 1i32:D
+        @inbounds for k in 1i32:D
             tot += A[i, k] * B[k, d]
         end
 
-        C[i, d] = tot
+        @inbounds C[i, d] = tot
 
         return nothing
     end

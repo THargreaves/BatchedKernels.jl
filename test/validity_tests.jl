@@ -58,12 +58,11 @@
 
         n_mats_per_block = nthreads ÷ (D * D)
         interm_pad_freq = div(32i32, D & -D) * D
-        padded_amount_per_mat = (D * D - 1i32) ÷ interm_pad_freq
-        mat_shmem_size = D * D + padded_amount_per_mat
         block_mtrx_id = div(tid - 1i32, D * D) + 1i32
         grid_mtrx_load = (bid - 1i32) * n_mats_per_block + block_mtrx_id
 
-        shmem_elems = mat_shmem_size * n_mats_per_block
+        padded_amount_per_block = (n_mats_per_block * D * D - 1i32) ÷ interm_pad_freq
+        shmem_elems = D * D * n_mats_per_block + padded_amount_per_block
 
         shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
         shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
