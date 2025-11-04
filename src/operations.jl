@@ -10,6 +10,7 @@ using LinearAlgebra
     B::DualAccessMatrix{T},
     d::Int32,
     ::Val{D},
+    ::Val{:small},
 ) where {T,D}
     for i in (1i32):D
         C[i, d] = A[i, d] + B[i, d]
@@ -25,6 +26,7 @@ end
     B::DualAccessMatrix{T},
     d::Int32,
     ::Val{D},
+    ::Val{:small},
 ) where {T,D}
     for i in (1i32):D
         C[i, d] = A[i, d] - B[i, d]
@@ -33,57 +35,58 @@ end
     return nothing
 end
 
-if VERSION === :NMatsPerWarp || VERSION === :OneMatPerWarp
-    @inline function batch_op!(
-        ::typeof(*),
-        C::DualAccessMatrix{T},
-        A::AbstractMatrix{T},
-        B::AbstractMatrix{T},
-        d::Int32,
-        ::Val{D},
-    ) where {T,D}
-        # Extract column d of B into registers
-        B_col = @MVector zeros(T, Int64(D))
-        @inbounds for k in (1i32):D
-            B_col[k] = B[k, d]
-        end
-
-        # Compute each element of column d of C
-        @inbounds for i in (1i32):D
-            tot = zero(T)
-            for k in (1i32):D
-                tot += A[i, k] * B_col[k]
-            end
-            C[i, d] = tot
-        end
-
-        return nothing
+@inline function batch_op!(
+    ::typeof(*),
+    C::DualAccessMatrix{T},
+    A::AbstractMatrix{T},
+    B::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D},
+    ::Val{:small},
+) where {T,D}
+    # Extract column d of B into registers
+    B_col = @MVector zeros(T, Int64(D))
+    @inbounds for k in (1i32):D
+        B_col[k] = B[k, d]
     end
-elseif VERSION === :D2ThreadsPerMat
-    @inline function batch_op!(
-        ::typeof(*),
-        C::DualAccessMatrix{T},
-        A::AbstractMatrix{T},
-        B::AbstractMatrix{T},
-        ::Val{D},
-    ) where {T,D}
-        tid = threadIdx().x
 
-        mat_elem_idx = mod1(tid, D * D)
-
-        # i = (mat_elem_idx - 1i32) ÷ D + 1i32
-        # d = mod1(mat_elem_idx, D)
-        d = (mat_elem_idx - 1i32) ÷ D + 1i32
-        i = mod1(mat_elem_idx, D)
+    # Compute each element of column d of C
+    @inbounds for i in (1i32):D
         tot = zero(T)
-        @inbounds for k in 1i32:D
-            tot += A[i, k] * B[k, d]
+        for k in (1i32):D
+            tot += A[i, k] * B_col[k]
         end
-
-        @inbounds C[i, d] = tot
-
-        return nothing
+        C[i, d] = tot
     end
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(*),
+    C::DualAccessMatrix{T},
+    A::AbstractMatrix{T},
+    B::AbstractMatrix{T},
+    ::Val{D},
+    ::Val{:large},
+    ::Val{:conseq},
+) where {T,D}
+    tid = threadIdx().x
+
+    mat_elem_idx = mod1(tid, D * D)
+
+    # i = (mat_elem_idx - 1i32) ÷ D + 1i32
+    # d = mod1(mat_elem_idx, D)
+    d = (mat_elem_idx - 1i32) ÷ D + 1i32
+    i = mod1(mat_elem_idx, D)
+    tot = zero(T)
+    @inbounds for k in 1i32:D
+        tot += A[i, k] * B[k, d]
+    end
+
+    @inbounds C[i, d] = tot
+
+    return nothing
 end
 
 # Out-of-place Cholesky: U = cholesky(A)

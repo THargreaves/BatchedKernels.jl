@@ -4,76 +4,90 @@ import LinearAlgebra: AdjOrTransAbsMat, wrapperop
 export DualAccessMatrix, SingleAccessMatrix
 export intermediate_layout_load!, intermediate_layout_write!
 export interm_to_dual_transfer!, dual_to_interm_transfer!
-export VERSION
 
 
-# NMatsPerWarp, OneMatPerWarp, D2ThreadsPerMat
-const VERSION = :D2ThreadsPerMat
-
-
-### DualAccessMatrixNMatsPerWarp ###
-# TODO: each of these have their own offset which is wasteful of registers
-# Could use a pointer to a shared index information struct but will that use a register too?
-struct DualAccessMatrixNMatsPerWarp{T,D} <: AbstractMatrix{T}
+"""
+Abstraction of shared memory layout for a matrix accessible both column and row-wise.
+"""
+struct DualAccessMatrix{T,D,V} <: AbstractMatrix{T}
     shmem::CuDeviceVector{T,CUDA.AS.Shared}
     offset::Int32
 end
 
-function DualAccessMatrixNMatsPerWarp(
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, wid::Int32, warp_matrix_id::Int32
+"""
+Constructor for DualAccessMatrix, for memory layout where one warp handles multiple matrices.
+Meant for smaller matrices.
+"""
+function DualAccessMatrix(
+    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, warp_matrix_id::Int32, ::Val{:small}
 ) where {T,D}
+    tid = threadIdx().x
+    wid = div(tid - 1i32, 32i32) + 1i32
+
     n_mats_per_warp = 32i32 ÷ D
     padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     stride = n_mats_per_warp * D + padding
     offset = (wid - 1i32) * D * stride - stride - n_mats_per_warp + warp_matrix_id
-    return DualAccessMatrixNMatsPerWarp{T,D}(shmem, offset)
+
+    return DualAccessMatrix{T,D,Val{:small}}(shmem, offset)
 end
 
+"""
+Constructor for DualAccessMatrix, for memory layout where one matrix is handled by D^2
+threads. Meant for larger matrices, up to D=32.
+"""
+function DualAccessMatrix(
+    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, block_mtrx_id::Int32, ::Val{:large}
+) where {T,D}
+    offset = (block_mtrx_id - 1i32) * D * D
+    return DualAccessMatrix{T,D,Val{:large}}(shmem, offset)
+end
+
+"""
+Function for calculating the stride DualAccessMatrix memory layout where
+one wrap handles multiple matrices.
+"""
 @inline function _compute_stride(::Val{D}) where {D}
     n_mats_per_warp = 32i32 ÷ D
     padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
     return n_mats_per_warp * D + padding
 end
 
+"""
+Function for calculating the number of matrices handled per warp, memory layout
+where one warp handles multiple matrices.
+"""
 @inline function _compute_n_mats_per_warp(::Val{D}) where {D}
     return 32i32 ÷ D
 end
 
+"""
+Get index method for memory layout where one warp handles multiple matrices
+"""
 Base.@propagate_inbounds @inline function Base.getindex(
-    A::DualAccessMatrixNMatsPerWarp{T,D}, i::Int32, j::Int32
+    A::DualAccessMatrix{T,D,Val{:small}}, i::Int32, j::Int32
 ) where {T,D}
     stride = _compute_stride(Val(D))
     n_mats_per_warp = _compute_n_mats_per_warp(Val(D))
     return A.shmem[A.offset + j * stride + i * n_mats_per_warp]
 end
 
+"""
+Set index method for memory layout where one warp handles multiple matrices
+"""
 Base.@propagate_inbounds @inline function Base.setindex!(
-    A::DualAccessMatrixNMatsPerWarp{T,D}, v::T, i::Int32, j::Int32
+    A::DualAccessMatrix{T,D,Val{:small}}, v::T, i::Int32, j::Int32
 ) where {T,D}
     stride = _compute_stride(Val(D))
     n_mats_per_warp = _compute_n_mats_per_warp(Val(D))
     return A.shmem[A.offset + j * stride + i * n_mats_per_warp] = v
 end
 
-### DualAccessMatrixNMatsPerWarp ###
-
-
-### DualAccessMatrixD2ThreadsPerMat ###
-
-struct DualAccessMatrixD2ThreadsPerMat{T,D} <: AbstractMatrix{T}
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}
-    offset::Int32
-end
-
-function DualAccessMatrixD2ThreadsPerMat(
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, block_mtrx_id::Int32
-) where {T,D}
-    offset = (block_mtrx_id - 1i32) * D * D
-    return DualAccessMatrix{T, D}(shmem, offset)
-end
-
+"""
+Get index method for memory layout where one matrix is handled by D^2 threads.
+"""
 Base.@propagate_inbounds @inline function Base.getindex(
-    A::DualAccessMatrixD2ThreadsPerMat{T,D}, i::Int32, j::Int32
+    A::DualAccessMatrix{T,D,Val{:large}}, i::Int32, j::Int32
 ) where {T,D}
     interm_pad_freq = div(32i32, D & -D) * D
     raw_idx = A.offset + (j - 1) * D + i
@@ -82,8 +96,11 @@ Base.@propagate_inbounds @inline function Base.getindex(
     return A.shmem[raw_idx + padded_amount]
 end
 
+"""
+Set index method for memory layout where one matrix is handled by D^2 threads.
+"""
 Base.@propagate_inbounds @inline function Base.setindex!(
-    A::DualAccessMatrixD2ThreadsPerMat{T,D}, v::T, i::Int32, j::Int32
+    A::DualAccessMatrix{T,D,Val{:large}}, v::T, i::Int32, j::Int32
 ) where {T,D}
     interm_pad_freq = div(32i32, D & -D) * D
     raw_idx = A.offset + (j - 1) * D + i
@@ -92,75 +109,26 @@ Base.@propagate_inbounds @inline function Base.setindex!(
     return A.shmem[raw_idx + padded_amount] = v
 end
 
-### DualAccessMatrixD2ThreadsPerMat ###
-
-
-### DualAccessMatrixOneMatPerWarp ###
-
-struct DualAccessMatrixOneMatPerWarp{T,D} <: AbstractMatrix{T}
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}
-    offset::Int32
-    block_matrix_idx::Int32
-end
-
-function DualAccessMatrixOneMatPerWarp(
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, block_matrix_idx::Int32
-) where {T,D}
-    offset = (block_matrix_idx - 1i32) * D * D
-    return DualAccessMatrix{T, D}(shmem, offset, block_matrix_idx)
-end
-
-Base.@propagate_inbounds @inline function Base.getindex(
-    A::DualAccessMatrixOneMatPerWarp{T,D}, i::Int32, j::Int32
-) where {T,D}
-    interm_pad_freq = div(32i32, D & -D) * D
-    padded_amount_per_warp = (D * D - 1i32) ÷ interm_pad_freq
-
-    mat_elem_idx = (j - 1) * D + i
-    padded_amount_local = (mat_elem_idx - 1i32) ÷ interm_pad_freq
-
-    padded_amount = (A.block_matrix_idx - 1i32) * padded_amount_per_warp + padded_amount_local
-
-    return A.shmem[A.offset + mat_elem_idx + padded_amount]
-end
-
-Base.@propagate_inbounds @inline function Base.setindex!(
-    A::DualAccessMatrixOneMatPerWarp{T,D}, v::T, i::Int32, j::Int32
-) where {T,D}
-    interm_pad_freq = div(32i32, D & -D) * D
-    padded_amount_per_warp = (D * D - 1i32) ÷ interm_pad_freq
-
-    mat_elem_idx = (j - 1) * D + i
-    padded_amount_local = (mat_elem_idx - 1i32) ÷ interm_pad_freq
-
-    padded_amount = (A.block_matrix_idx - 1i32) * padded_amount_per_warp + padded_amount_local
-
-    return A.shmem[A.offset + mat_elem_idx + padded_amount] = v
-end
-
-### DualAccessMatrixOneMatPerWarp ###
-
-
 # Wrappers to handle Int32 case
 @propagate_inbounds Base.getindex(A::AdjOrTransAbsMat{T}, i::Int32, j::Int32) where {T} =
     wrapperop(A)(A.parent[j, i])::T
 
 # Support regular Int indexing (needed for Adjoint and other wrappers)
 @propagate_inbounds @inline function Base.getindex(
-    A::DualAccessMatrixNMatsPerWarp{T,D}, i::Int, j::Int
-) where {T,D}
+    A::DualAccessMatrix{T,D,V}, i::Int, j::Int
+) where {T,D,V}
     return getindex(A, Int32(i), Int32(j))
 end
 
 @propagate_inbounds @inline function Base.setindex!(
-    A::DualAccessMatrixNMatsPerWarp{T,D}, v::T, i::Int, j::Int
-) where {T,D}
+    A::DualAccessMatrix{T,D,V}, v::T, i::Int, j::Int
+) where {T,D,V}
     return setindex!(A, v, Int32(i), Int32(j))
 end
 
-@inline Base.size(::DualAccessMatrixNMatsPerWarp{T,D}) where {T,D} = (D, D)
-@inline Base.length(::DualAccessMatrixNMatsPerWarp{T,D}) where {T,D} = D * D
-@inline Base.IndexStyle(::Type{<:DualAccessMatrixNMatsPerWarp}) = IndexCartesian()
+@inline Base.size(::DualAccessMatrix{T,D,V}) where {T,D,V} = (D, D)
+@inline Base.length(::DualAccessMatrix{T,D,V}) where {T,D,V} = D * D
+@inline Base.IndexStyle(::Type{<:DualAccessMatrix}) = IndexCartesian()
 
 struct SingleAccessMatrix{T,pad_interval} <: AbstractMatrix{T}
     shmem::CuDeviceVector{T,CUDA.AS.Shared}
@@ -212,10 +180,13 @@ end
 #### EXPLICIT MEMORY SUB-KERNELS ####
 #####################################
 
-### NMatsPerWarp ###
 
-@inline function intermediate_layout_load_n_mats_per_warp!(
-    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32
+"""
+Function for loading matrices from global memory to shared memory, for the case
+where one warp handles multiple matrices. Meant for small matrices.
+"""
+@inline function intermediate_layout_load!(
+    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32  # Works if nthreads is divisible by 32, otherwise needs to be cld(nthreads, 32)
@@ -257,8 +228,15 @@ end
     return nothing
 end
 
-@inline function intermediate_layout_write_indep_n_mats_per_warp!(
-    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32
+"""
+Function for writing matrices from shared memory to global memory, for the case
+where one warp handles multiple matrices. Meant for small matrices.
+
+This is the warp independent version, where one warp only writes matrices that
+the warp was responsible for in previous calculations.
+"""
+@inline function intermediate_layout_write!(
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{:indep}
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -300,8 +278,16 @@ end
     return nothing
 end
 
-@inline function intermediate_layout_write_conseq_n_mats_per_warp!(
-    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32
+"""
+Function for writing matrices from shared memory to global memory, for the case
+where one warp handles multiple matrices. Meant for small matrices.
+
+This is the consequtive version, threads consequtively read from shared memory
+and write to global memory, therefore also touching matrices that the specific
+warp wasn't responsible in earlier calculations.
+"""
+@inline function intermediate_layout_write!(
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32,  ::Val{:small}, ::Val{:conseq}
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -347,8 +333,12 @@ end
     return nothing
 end
 
-@inline function interm_to_dual_transfer_n_mats_per_warp!(
-    shmem_dual, shmem_interm, ::Val{D}, ::Val{nthreads}, N::Int32
+"""
+Function that transfers matrices from intermediate layout to dual memory layout.
+This is for the case where one warp handles multiple matrices, meant for small matrices.
+"""
+@inline function interm_to_dual_transfer!(
+    shmem_dual, shmem_interm, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -395,8 +385,12 @@ end
     return nothing
 end
 
-@inline function dual_to_interm_transfer_n_mats_per_warp!(
-    shmem_interm, shmem_dual, ::Val{D}, ::Val{nthreads}, N::Int32
+"""
+Function that transfers matrices from dual layout to intermediate memory layout.
+This is for the case where one warp handles multiple matrices, meant for small matrices.
+"""
+@inline function dual_to_interm_transfer!(
+    shmem_interm, shmem_dual, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -443,12 +437,12 @@ end
     return nothing
 end
 
-### NMatsPerWarp ###
-
-### D2ThreadsPerMat ###
-
-@inline function intermediate_layout_load_d2_threads_per_mat!(
-    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32
+"""
+Function for loading matrices from global memory to shared memory, for the case
+where one matrix is handled by D^2 threads. Meant for large matrices up to D=32.
+"""
+@inline function intermediate_layout_load!(
+    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:large}
 ) where {D,nthreads}
     tid = threadIdx().x
     bid = blockIdx().x
@@ -484,8 +478,12 @@ end
     return nothing
 end
 
-@inline function intermediate_layout_write_d2_threads_per_mat!(
-    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32
+"""
+Function for writing matrices from shared memory to global memory, for the case
+where one matrix is handled by D^2 threads. Meant for large matrices up to D=32.
+"""
+@inline function intermediate_layout_write!(
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:large}
 ) where {D,nthreads}
     tid = threadIdx().x
     bid = blockIdx().x
@@ -519,165 +517,4 @@ end
     end
 
     return nothing
-end
-
-### D2ThreadsPerMat ###
-
-
-
-### OneMatPerWarp ###
-
-@inline function intermediate_layout_load_conseq_one_mat_per_warp!(
-    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32
-) where {D,nthreads}
-    n_mats_per_warp = 1i32
-    n_warps = nthreads ÷ 32i32
-    n_mats_per_block = n_warps * n_mats_per_warp
-    n_elements_per_block = n_mats_per_block * D * D
-
-    tid = threadIdx().x
-    bid = blockIdx().x
-
-    sync_threads()
-
-    interm_pad_freq = div(32i32, D & -D) * D
-    base_addr = (bid - 1i32) * n_mats_per_block * D * D + 1i32
-    align_offset = (base_addr - 1i32) % 32i32
-    padded_amount_per_warp = (D * D - 1i32) ÷ interm_pad_freq
-
-    @inbounds begin
-        offset = 0i32
-        while offset < n_elements_per_block + align_offset
-            raw_idx = offset + tid - align_offset
-            raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32
-            grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block
-
-            if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N && raw_idx > 0i32
-                mat_elem_idx = mod1(raw_idx, D * D)
-                padded_amount = (mat_elem_idx - 1i32) ÷ interm_pad_freq
-
-                src_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
-                dest_idx = (raw_mtrx - 1i32) * padded_amount_per_warp + raw_idx + padded_amount
-
-                shmem[dest_idx] = global_arr[src_idx]
-            end
-
-            offset += nthreads
-        end
-    end
-
-    sync_threads()
-
-    return nothing
-end
-
-@inline function intermediate_layout_load_indep_one_mat_per_warp!(
-    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32
-) where {D,nthreads}
-    n_mats_per_warp = 1i32
-    n_warps = nthreads ÷ 32i32
-    n_mats_per_block = n_warps * n_mats_per_warp
-
-    tid = threadIdx().x
-    bid = blockIdx().x
-    wid = div(tid - 1i32, 32i32) + 1i32
-    lid = mod1(tid, 32i32)
-
-    interm_pad_freq = div(32i32, D & -D) * D
-    padded_amount_per_warp = (D * D - 1i32) ÷ interm_pad_freq
-    warp_shmem_size = D * D + padded_amount_per_warp
-
-    @inbounds begin
-        offset = 0i32
-        while offset < D * D
-            mat_elem_idx = offset + lid
-            grid_mtrx_load = wid + (bid - 1i32) * n_mats_per_block
-
-            if grid_mtrx_load <= N && mat_elem_idx <= D * D
-                padded_amount = (mat_elem_idx - 1i32) ÷ interm_pad_freq
-
-                src_idx = (bid - 1i32) * n_mats_per_block * D * D + (wid - 1i32) * D * D + mat_elem_idx
-                dest_idx = (wid - 1i32) * warp_shmem_size + mat_elem_idx + padded_amount
-
-                shmem[dest_idx] = global_arr[src_idx]
-            end
-
-            offset += 32i32
-        end
-    end
-
-    return nothing
-end
-
-@inline function intermediate_layout_write_one_mat_per_warp!(
-    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32
-) where {D,nthreads}
-    n_mats_per_warp = 1i32
-    n_warps = nthreads ÷ 32i32
-    n_mats_per_block = n_warps * n_mats_per_warp
-    n_elements_per_block = n_mats_per_block * D * D
-
-    tid = threadIdx().x
-    bid = blockIdx().x
-
-    sync_threads()
-
-    interm_pad_freq = div(32i32, D & -D) * D
-    base_addr = (bid - 1i32) * n_mats_per_block * D * D + 1i32
-    align_offset = (base_addr - 1i32) % 32i32
-    padded_amount_per_warp = (D * D - 1i32) ÷ interm_pad_freq
-
-    @inbounds begin
-        offset = 0i32
-        while offset < n_elements_per_block + align_offset
-            raw_idx = offset + tid - align_offset
-            raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32
-            grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block
-
-            if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N && raw_idx > 0i32
-                mat_elem_idx = mod1(raw_idx, D * D)
-                padded_amount = (mat_elem_idx - 1i32) ÷ interm_pad_freq
-
-                dest_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
-                src_idx = (raw_mtrx - 1i32) * padded_amount_per_warp + raw_idx + padded_amount
-
-                global_arr[dest_idx] = shmem[src_idx]
-            end
-
-            offset += nthreads
-        end
-    end
-
-    sync_threads()
-
-    return nothing
-end
-
-### OneMatPerWarp ###
-
-
-@static if VERSION === :NMatsPerWarp
-    const intermediate_layout_load! = intermediate_layout_load_n_mats_per_warp!
-
-    const intermediate_layout_write! = intermediate_layout_write_indep_n_mats_per_warp!
-    # const intermediate_layout_write! = intermediate_layout_write_conseq_n_mats_per_warp!
-
-    const interm_to_dual_transfer! = interm_to_dual_transfer_n_mats_per_warp!
-
-    const dual_to_interm_transfer! = dual_to_interm_transfer_n_mats_per_warp!
-
-    const DualAccessMatrix = DualAccessMatrixNMatsPerWarp
-elseif VERSION === :D2ThreadsPerMat
-    const intermediate_layout_load! = intermediate_layout_load_d2_threads_per_mat!
-
-    const intermediate_layout_write! = intermediate_layout_write_d2_threads_per_mat!
-
-    const DualAccessMatrix = DualAccessMatrixD2ThreadsPerMat
-elseif VERSION === :OneMatPerWarp
-    const intermediate_layout_load! = intermediate_layout_load_indep_one_mat_per_warp!
-    # const intermediate_layout_load! = intermediate_layout_load_conseq_one_mat_per_warp!
-
-    const intermediate_layout_write! = intermediate_layout_write_one_mat_per_warp!
-
-    const DualAccessMatrix = DualAccessMatrixOneMatPerWarp
 end

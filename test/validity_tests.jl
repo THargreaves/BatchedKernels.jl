@@ -1,4 +1,60 @@
-@testitem "Matrix Multiplication" begin
+@testitem "Matrix Multiplication (small)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    # Test parameters
+    N = 2^12
+    nthreads = 2^8
+
+    # Test for both independent and consequtive modes
+    modes = (Val(:indep), Val(:conseq))
+
+    # Test all four combinations
+    test_cases = [(false, false), (true, false), (false, true), (true, true)]
+
+    # Accuracy tests
+    for D in 2:15
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
+
+        for mode in modes
+            CUDA.seed!(1234)
+
+            As = CUDA.rand(Float32, D, D, N)
+            Bs = CUDA.rand(Float32, D, D, N)
+            As_cpu = Array(As)
+            Bs_cpu = Array(Bs)
+
+            for (A_adj, B_adj) in test_cases
+                Cs = CUDA.zeros(Float32, D, D, N)
+
+                CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matmul!(
+                    Cs, As, Bs, A_adj, B_adj, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
+                )
+
+                # CPU comparison
+                Cs_cpu = similar(As_cpu)
+                for i in 1:N
+                    if A_adj && B_adj
+                        Cs_cpu[:, :, i] = As_cpu[:, :, i]' * Bs_cpu[:, :, i]'
+                    elseif A_adj
+                        Cs_cpu[:, :, i] = As_cpu[:, :, i]' * Bs_cpu[:, :, i]
+                    elseif B_adj
+                        Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]'
+                    else
+                        Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]
+                    end
+                end
+
+                max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
+                @test max_error < 1e-5
+            end
+        end
+    end
+end
+
+@testitem "Matrix Multiplication (large)" begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -7,188 +63,51 @@
     # Test parameters
     N = 2^12
 
-    function kernel_matmul_n_mats_per_warp!(
-        Cs, As, Bs, A_adj, B_adj, ::Val{D}, ::Val{nthreads}, N::Int32
-    ) where {D,nthreads}
-        n_mats_per_warp = 32i32 ÷ D
-        n_warps = nthreads ÷ 32i32
-        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
-
-        tid = threadIdx().x
-        wid = div(tid - 1i32, 32i32) + 1i32
-        lid = mod1(tid, 32i32)
-        warp_matrix_id = div(lid - 1i32, D) + 1i32
-        d = mod1(lid, D)
-
-        shmem_elems = (n_mats_per_warp * D + padding) * D * n_warps
-        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
-
-        # Load A
-        intermediate_layout_load!(shmem_3, As, Val(D), Val(nthreads), N)
-        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
-
-        # Load B
-        intermediate_layout_load!(shmem_3, Bs, Val(D), Val(nthreads), N)
-        interm_to_dual_transfer!(shmem_2, shmem_3, Val(D), Val(nthreads), N)
-
-        # Create dual-access matrices
-        A = DualAccessMatrix(shmem_1, Val(D), wid, warp_matrix_id)
-        B = DualAccessMatrix(shmem_2, Val(D), wid, warp_matrix_id)
-        C = DualAccessMatrix(shmem_3, Val(D), wid, warp_matrix_id)
-
-        # Perform operation with optional adjoints
-        A_mat = A_adj ? A' : A
-        B_mat = B_adj ? B' : B
-        batch_op!(*, C, A_mat, B_mat, d, Val(D))
-
-        # Store C
-        dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
-        intermediate_layout_write!(Cs, shmem_1, Val(D), Val(nthreads), N)
-
-        return nothing
-    end
-
-    function kernel_matmul_d2_threads_per_warp!(
-        Cs, As, Bs, A_adj, B_adj, ::Val{D}, ::Val{nthreads}, N::Int32
-    ) where {D,nthreads}
-        tid = threadIdx().x
-        bid = blockIdx().x
-
-        n_mats_per_block = nthreads ÷ (D * D)
-        interm_pad_freq = div(32i32, D & -D) * D
-        block_mtrx_id = div(tid - 1i32, D * D) + 1i32
-        grid_mtrx_load = (bid - 1i32) * n_mats_per_block + block_mtrx_id
-
-        padded_amount_per_block = (n_mats_per_block * D * D - 1i32) ÷ interm_pad_freq
-        shmem_elems = D * D * n_mats_per_block + padded_amount_per_block
-
-        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
-
-        intermediate_layout_load!(shmem_1, As, Val(D), Val(nthreads), N)
-        intermediate_layout_load!(shmem_2, Bs, Val(D), Val(nthreads), N)
-
-        sync_threads()
-        if block_mtrx_id <= n_mats_per_block && grid_mtrx_load <= N
-            A = DualAccessMatrix(shmem_1, Val(D), block_mtrx_id)
-            B = DualAccessMatrix(shmem_2, Val(D), block_mtrx_id)
-            C = DualAccessMatrix(shmem_3, Val(D), block_mtrx_id)
-
-            A_mat = A_adj ? A' : A
-            B_mat = B_adj ? B' : B
-            batch_op!(*, C, A_mat, B_mat, Val(D))
-        end
-        sync_threads()
-
-        intermediate_layout_write!(Cs, shmem_3, Val(D), Val(nthreads), N)
-
-        return nothing
-    end
-
-    function kernel_matmul_one_mats_per_warp!(
-        Cs, As, Bs, A_adj, B_adj, ::Val{D}, ::Val{nthreads}, N::Int32
-    ) where {D,nthreads}
-        n_mats_per_warp = 1i32
-        n_warps = nthreads ÷ 32i32
-        n_mats_per_block = n_warps * n_mats_per_warp
-        interm_pad_freq = div(32i32, D & -D) * D
-
-        padded_amount_per_warp = (D * D) ÷ interm_pad_freq
-        warp_shmem_size = D * D + padded_amount_per_warp
-
-        tid = threadIdx().x
-        lid = mod1(tid, 32i32)
-
-        block_matrix_id = div(tid - 1i32, 32i32) + 1i32
-        d = mod1(lid, D)
-
-        shmem_elems = warp_shmem_size * n_mats_per_block
-        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
-
-        intermediate_layout_load!(shmem_1, As, Val(D), Val(nthreads), N)
-        intermediate_layout_load!(shmem_2, Bs, Val(D), Val(nthreads), N)
-
-        A = DualAccessMatrix(shmem_1, Val(D), block_matrix_id)
-        B = DualAccessMatrix(shmem_2, Val(D), block_matrix_id)
-        C = DualAccessMatrix(shmem_3, Val(D), block_matrix_id)
-
-        if block_matrix_id <= n_mats_per_block && lid <= D
-            A_mat = A_adj ? A' : A
-            B_mat = B_adj ? B' : B
-            batch_op!(*, C, A_mat, B_mat, d, Val(D))
-        end
-
-        intermediate_layout_write!(Cs, shmem_3, Val(D), Val(nthreads), N)
-
-        return nothing
-    end
-
-    @static if BatchedKernels.VERSION === :NMatsPerWarp
-        D_upper_limit = 15
-        kernel_matmul! = kernel_matmul_n_mats_per_warp!
-    elseif BatchedKernels.VERSION === :D2ThreadsPerMat
-        D_upper_limit = 32
-        kernel_matmul! = kernel_matmul_d2_threads_per_warp!
-    elseif BatchedKernels.VERSION === :OneMatPerWarp
-        D_upper_limit = 15
-        kernel_matmul! = kernel_matmul_one_mats_per_warp!
-    end
+    # Test for both independent and consequtive modes
+    # modes = (Val(:indep), Val(:conseq))
+    modes = (Val(:conseq),)  # independent version not done yet
 
     # Test all four combinations
     test_cases = [(false, false), (true, false), (false, true), (true, true)]
 
     # Accuracy tests
-    for D in 2:D_upper_limit
-        if BatchedKernels.VERSION == :NMatsPerWarp
-            nthreads = 2^8
-            nblocks = cld(N, nthreads//32 * (32 ÷ D))
-        elseif BatchedKernels.VERSION === :D2ThreadsPerMat
-            nthreads = 1 << (ceil(Int, log2(D^2)))
-            n_mats_per_block = nthreads ÷ (D * D)
-            nblocks = cld(N, n_mats_per_block)
-        elseif BatchedKernels.VERSION == :OneMatPerWarp
-            nthreads = 2^8
-            n_mats_per_warp = 1
-            n_warps = nthreads ÷ 32
-            n_mats_per_block = n_warps * n_mats_per_warp
-            nblocks = cld(N, n_mats_per_block)
-        end
+    for D in 2:32
+        nthreads = max(256, 1 << (ceil(Int, log2(D^2))))
+        n_mats_per_block = nthreads ÷ (D * D)
+        nblocks = cld(N, n_mats_per_block)
 
-        CUDA.seed!(1234)
+        for mode in modes
+            CUDA.seed!(1234)
 
-        As = CUDA.rand(Float32, D, D, N)
-        Bs = CUDA.rand(Float32, D, D, N)
-        As_cpu = Array(As)
-        Bs_cpu = Array(Bs)
+            As = CUDA.rand(Float32, D, D, N)
+            Bs = CUDA.rand(Float32, D, D, N)
+            As_cpu = Array(As)
+            Bs_cpu = Array(Bs)
 
-        for (A_adj, B_adj) in test_cases
-            Cs = CUDA.zeros(Float32, D, D, N)
+            for (A_adj, B_adj) in test_cases
+                Cs = CUDA.zeros(Float32, D, D, N)
 
-            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matmul!(
-                Cs, As, Bs, A_adj, B_adj, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
-            )
+                CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matmul!(
+                    Cs, As, Bs, A_adj, B_adj, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:large), mode,
+                )
 
-            # CPU comparison
-            Cs_cpu = similar(As_cpu)
-            for i in 1:N
-                if A_adj && B_adj
-                    Cs_cpu[:, :, i] = As_cpu[:, :, i]' * Bs_cpu[:, :, i]'
-                elseif A_adj
-                    Cs_cpu[:, :, i] = As_cpu[:, :, i]' * Bs_cpu[:, :, i]
-                elseif B_adj
-                    Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]'
-                else
-                    Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]
+                # CPU comparison
+                Cs_cpu = similar(As_cpu)
+                for i in 1:N
+                    if A_adj && B_adj
+                        Cs_cpu[:, :, i] = As_cpu[:, :, i]' * Bs_cpu[:, :, i]'
+                    elseif A_adj
+                        Cs_cpu[:, :, i] = As_cpu[:, :, i]' * Bs_cpu[:, :, i]
+                    elseif B_adj
+                        Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]'
+                    else
+                        Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]
+                    end
                 end
-            end
 
-            max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
-            @test max_error < 1e-4
+                max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
+                @test max_error < 1e-5
+            end
         end
     end
 end
