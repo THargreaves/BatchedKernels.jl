@@ -26,13 +26,15 @@ function kernel_matmul_n_mats_per_warp!(
     intermediate_layout_load!(shmem_3, Bs, Val(D), Val(nthreads), N)
     interm_to_dual_transfer!(shmem_2, shmem_3, Val(D), Val(nthreads), N)
 
-    # Create dual-access matrices
-    A = DualAccessMatrix(shmem_1, Val(D), wid, warp_matrix_id)
-    B = DualAccessMatrix(shmem_2, Val(D), wid, warp_matrix_id)
-    C = DualAccessMatrix(shmem_3, Val(D), wid, warp_matrix_id)
+    if warp_matrix_id <= n_mats_per_warp
+        # Create dual-access matrices
+        A = DualAccessMatrix(shmem_1, Val(D), wid, warp_matrix_id)
+        B = DualAccessMatrix(shmem_2, Val(D), wid, warp_matrix_id)
+        C = DualAccessMatrix(shmem_3, Val(D), wid, warp_matrix_id)
 
-    # Perform operation with optional adjoints
-    batch_op!(*, C, A, B, d, Val(D))
+        # Perform operation with optional adjoints
+        batch_op!(*, C, A, B, d, Val(D))
+    end
 
     # Store C
     dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
