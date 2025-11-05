@@ -30,7 +30,7 @@
                 Cs = CUDA.zeros(Float32, D, D, N)
 
                 CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matmul!(
-                    Cs, As, Bs, A_adj, B_adj, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
+                    Cs, As, Bs, Val(A_adj), Val(B_adj), Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
                 )
 
                 # CPU comparison
@@ -64,19 +64,28 @@ end
     N = 2^12
 
     # Test for both independent and consequtive modes
-    # modes = (Val(:indep), Val(:conseq))
-    modes = (Val(:conseq),)  # independent version not done yet
+    modes = (Val(:indep), Val(:conseq))
 
     # Test all four combinations
     test_cases = [(false, false), (true, false), (false, true), (true, true)]
 
     # Accuracy tests
     for D in 2:32
-        nthreads = max(256, 1 << (ceil(Int, log2(D^2))))
-        n_mats_per_block = nthreads ÷ (D * D)
-        nblocks = cld(N, n_mats_per_block)
-
         for mode in modes
+
+            # Calculating nthreads and nblocks
+            if mode === Val(:conseq)
+                nthreads = max(256, 1 << (ceil(Int, log2(D^2))))
+                n_mats_per_block = nthreads ÷ (D * D)
+                nblocks = cld(N, n_mats_per_block)
+            elseif mode === Val(:indep)
+                n_cols_per_warp = max(1, prevpow(2, 32 ÷ D))
+                n_elems_per_mat = D ÷ n_cols_per_warp * 32 + (D % n_cols_per_warp) * D
+                n_mats_per_block = 1
+                nthreads = ((n_mats_per_block * n_elems_per_mat + 31) ÷ 32) * 32
+                nblocks = cld(N, n_mats_per_block)
+            end
+
             CUDA.seed!(1234)
 
             As = CUDA.rand(Float32, D, D, N)
@@ -88,7 +97,7 @@ end
                 Cs = CUDA.zeros(Float32, D, D, N)
 
                 CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matmul!(
-                    Cs, As, Bs, A_adj, B_adj, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:large), mode,
+                    Cs, As, Bs, Val(A_adj), Val(B_adj), Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:large), mode,
                 )
 
                 # CPU comparison

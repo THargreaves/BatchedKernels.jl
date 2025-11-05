@@ -18,7 +18,7 @@ CUDA.cache_config!(CUDA.FUNC_CACHE_PREFER_SHARED)
 V = Val(:large)
 
 # Val{:conseq}, Val{:indep}
-mode = Val(:conseq)
+mode = Val(:indep)
 
 # TODO: Make the selection between small/large, conseq/indep neater, rather than with if statements
 if V === Val(:small)
@@ -31,16 +31,24 @@ results = Vector{Tuple{Int, Float64}}()
 ninety_percent_limits = Vector{Float64}()
 
 # Throughput tests
-for D in 2:2
+for D in 2:32
     # Target 1GB of input data to minimise impact of L1 cache
     N_bench = Int32(ceil(1e9 / (4 * 2 * D^2)))
     if V === Val(:small)
         nthreads = 2^8
         nblocks = cld(N_bench, nthreads//32 * (32 ÷ D))
     elseif V === Val(:large)
-        nthreads = max(2^8, 1 << (ceil(Int, log2(D^2))))
-        n_mats_per_block = nthreads ÷ (D * D)
-        nblocks = cld(N_bench, n_mats_per_block)    
+        if mode === Val(:conseq)
+            nthreads = max(2^8, 1 << (ceil(Int, log2(D^2))))
+            n_mats_per_block = nthreads ÷ (D * D)
+            nblocks = cld(N_bench, n_mats_per_block)    
+        elseif mode === Val(:indep)
+            n_cols_per_warp = max(1, prevpow(2, 32 ÷ D))
+            n_elems_per_mat = D ÷ n_cols_per_warp * 32 + (D % n_cols_per_warp) * D
+            n_mats_per_block = 1
+            nthreads = ((n_mats_per_block * n_elems_per_mat + 31) ÷ 32) * 32
+            nblocks = cld(N_bench, n_mats_per_block)
+        end
     end
 
     CUDA.seed!(1234)

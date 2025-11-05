@@ -75,10 +75,38 @@ end
 
     mat_elem_idx = mod1(tid, D * D)
 
-    # i = (mat_elem_idx - 1i32) ÷ D + 1i32
-    # d = mod1(mat_elem_idx, D)
     d = (mat_elem_idx - 1i32) ÷ D + 1i32
     i = mod1(mat_elem_idx, D)
+
+    tot = zero(T)
+    @inbounds for k in 1i32:D
+        tot += A[i, k] * B[k, d]
+    end
+
+    @inbounds C[i, d] = tot
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(*),
+    C::DualAccessMatrix{T},
+    A::AbstractMatrix{T},
+    B::AbstractMatrix{T},
+    ::Val{D},
+    ::Val{:large},
+    ::Val{:indep},
+) where {T,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    wid = div(tid - 1i32, 32i32) + 1i32
+
+    n_cols_per_warp = max(1i32, prevpow(2i32, 32i32 ÷ D))
+    lanes_per_slot = 32i32 ÷ n_cols_per_warp
+    global_d = (wid - 1i32) * n_cols_per_warp + div(lid - 1i32, lanes_per_slot) + 1i32
+    d = mod1(global_d, D)
+    i = mod1(lid, lanes_per_slot)
+
     tot = zero(T)
     @inbounds for k in 1i32:D
         tot += A[i, k] * B[k, d]

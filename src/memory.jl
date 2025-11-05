@@ -437,17 +437,25 @@ This is for the case where one warp handles multiple matrices, meant for small m
     return nothing
 end
 
+@inline function _get_large_n_mats_per_block(::Val{D}, ::Val{nthreads}, ::Val{:conseq}) where {D,nthreads}
+    return nthreads ÷ (D * D)
+end
+
+@inline function _get_large_n_mats_per_block(::Val{D}, ::Val{nthreads}, ::Val{:indep}) where {D,nthreads}
+    return 1i32
+end
+
 """
 Function for loading matrices from global memory to shared memory, for the case
 where one matrix is handled by D^2 threads. Meant for large matrices up to D=32.
 """
 @inline function intermediate_layout_load!(
-    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:large}
-) where {D,nthreads}
+    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:large}, ::Val{mode}
+) where {D,nthreads,mode}
     tid = threadIdx().x
     bid = blockIdx().x
 
-    n_mats_per_block = nthreads ÷ (D * D)
+    n_mats_per_block = _get_large_n_mats_per_block(Val(D), Val(nthreads), Val(mode))
 
     interm_pad_freq = div(32i32, D & -D) * D
     padded_amount_per_block = (n_mats_per_block * D * D - 1i32) ÷ interm_pad_freq
@@ -483,12 +491,12 @@ Function for writing matrices from shared memory to global memory, for the case
 where one matrix is handled by D^2 threads. Meant for large matrices up to D=32.
 """
 @inline function intermediate_layout_write!(
-    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:large}
-) where {D,nthreads}
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:large}, ::Val{mode}
+) where {D,nthreads,mode}
     tid = threadIdx().x
     bid = blockIdx().x
 
-    n_mats_per_block = nthreads ÷ (D * D)
+    n_mats_per_block = _get_large_n_mats_per_block(Val(D), Val(nthreads), Val(mode))
 
     interm_pad_freq = div(32i32, D & -D) * D
     padded_amount_per_block = (n_mats_per_block * D * D - 1i32) ÷ interm_pad_freq
