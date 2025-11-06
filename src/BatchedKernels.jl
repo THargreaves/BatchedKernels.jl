@@ -6,5 +6,6 @@ using StaticArrays: @MVector
 
 include("memory.jl")
 include("operations.jl")
+include("multiply.jl")
 
 end
