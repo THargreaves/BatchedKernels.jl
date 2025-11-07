@@ -5,7 +5,6 @@ export DualAccessMatrix, SingleAccessMatrix
 export intermediate_layout_load!, intermediate_layout_write!
 export interm_to_dual_transfer!, dual_to_interm_transfer!
 
-
 """
 Abstraction of shared memory layout for a matrix accessible both column and row-wise.
 """
@@ -166,20 +165,84 @@ end
 ) where {T,pad_interval}
     warp_idx = A.inner_offset + i
     padding = (warp_idx - 1i32) ÷ pad_interval
-    return A.shmem[A.outer_offset + warp_idx + padding]
+    return A.shmem[A.outer_offset + warp_idx + padding] = v
+end
+
+#######################
+#### SHARED MATRIX ####
+#######################
+
+struct SharedMatrix{T,D,pad_interval} <: AbstractMatrix{T}
+    shmem::CuDeviceVector{T,CUDA.AS.Shared}
+end
+
+"""
+A matrix that is shared across batches and backed by shared memory.
+
+Since there is only one matrix, both rows and columns can be accessed in parallel using the
+usual single access padding.
+"""
+function SharedMatrix(shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}) where {T,D}
+    pad_interval = div(32i32, D & -D) * D
+    return SharedMatrix{T,D,pad_interval}(shmem)
+end
+
+@propagate_inbounds @inline function Base.getindex(
+    A::SharedMatrix{T,D,pad_interval}, i::Int32, j::Int32
+) where {T,D,pad_interval}
+    raw_idx = (j - 1i32) * D + i
+    padding = (raw_idx - 1i32) ÷ pad_interval
+    return A.shmem[raw_idx + padding]
 end
 @propagate_inbounds @inline function Base.setindex!(
-    A::SingleAccessMatrix{T,pad_interval}, v::T, i::Int32
-) where {T,pad_interval}
-    warp_idx = A.inner_offset + i
-    padding = (warp_idx - 1i32) ÷ pad_interval
-    return A.shmem[A.outer_offset + warp_idx + padding] = v
+    A::SharedMatrix{T,D,pad_interval}, v::T, i::Int32, j::Int32
+) where {T,D,pad_interval}
+    raw_idx = (j - 1i32) * D + i
+    padding = (raw_idx - 1i32) ÷ pad_interval
+    return A.shmem[raw_idx + padding] = v
+end
+
+# Support regular Int indexing (needed for Adjoint and other wrappers)
+@propagate_inbounds @inline function Base.getindex(A::SharedMatrix, i::Int, j::Int)
+    return getindex(A, Int32(i), Int32(j))
+end
+
+"""
+Load a single matrix from global memory into shared memory using a single warp. Global
+memory is accessed linearly and then padding is introduced in shared memory to avoid bank
+conflicts.
+
+Uses of this function (either individually or multiple uses across warps) should be followed
+by a sync_threads() call.
+"""
+@inline function shared_matrix_load!(shmem, global_arr, ::Val{D}) where {D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+
+    pad_interval = div(32i32, D & -D) * D
+    @inbounds begin
+        offset = 0i32
+        while offset < D * D
+            raw_idx = offset + lid - 1i32
+            if raw_idx < D * D
+                padded_amount = raw_idx ÷ pad_interval
+
+                src_idx = raw_idx + 1i32
+                dest_idx = raw_idx + 1i32 + padded_amount
+
+                shmem[dest_idx] = global_arr[src_idx]
+            end
+
+            offset += 32i32
+        end
+    end
+
+    return nothing
 end
 
 #####################################
 #### EXPLICIT MEMORY SUB-KERNELS ####
 #####################################
-
 
 """
 Function for loading matrices from global memory to shared memory, for the case
@@ -212,7 +275,9 @@ where one warp handles multiple matrices. Meant for small matrices.
             raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32  # How many-th matrix to load: [1, n_mats_per_block]
             grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block  # How many-th global matrix 1 ... N to load
 
-            if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N && raw_idx <= warp_shmem_elem * wid  # div(raw_idx - 1, warp_shmem_elem) != wid
+            if raw_mtrx <= n_mats_per_block &&
+                grid_mtrx_load <= N &&
+                raw_idx <= warp_shmem_elem * wid  # div(raw_idx - 1, warp_shmem_elem) != wid
                 padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
 
                 src_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
@@ -262,7 +327,9 @@ the warp was responsible for in previous calculations.
             raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32
             grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block
 
-            if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N && raw_idx <= warp_shmem_elem * wid  # div(raw_idx - 1, warp_shmem_elem) != wid
+            if raw_mtrx <= n_mats_per_block &&
+                grid_mtrx_load <= N &&
+                raw_idx <= warp_shmem_elem * wid  # div(raw_idx - 1, warp_shmem_elem) != wid
                 padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
 
                 dest_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
@@ -287,7 +354,7 @@ and write to global memory, therefore also touching matrices that the specific
 warp wasn't responsible in earlier calculations.
 """
 @inline function intermediate_layout_write!(
-    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32,  ::Val{:small}, ::Val{:conseq}
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{:conseq}
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -364,7 +431,7 @@ This is for the case where one warp handles multiple matrices, meant for small m
         col = matrix_thread
 
         # Loop over the rows of each matrix
-        for row in 1i32:D
+        for row in (1i32):D
             # Compute index for intermediate layout
             logical_idx = (warp_matrix_id - 1i32) * D * D + (col - 1i32) * D + row
             padding = (logical_idx - 1i32) ÷ interm_pad_freq
@@ -416,7 +483,7 @@ This is for the case where one warp handles multiple matrices, meant for small m
         col = matrix_thread
 
         # Loop over the rows of each matrix
-        for row in 1i32:D
+        for row in (1i32):D
             # Compute index for intermediate layout
             logical_idx = (warp_matrix_id - 1i32) * D * D + (col - 1i32) * D + row
             padding = (logical_idx - 1i32) ÷ interm_pad_freq
@@ -437,11 +504,15 @@ This is for the case where one warp handles multiple matrices, meant for small m
     return nothing
 end
 
-@inline function _get_large_n_mats_per_block(::Val{D}, ::Val{nthreads}, ::Val{:conseq}) where {D,nthreads}
+@inline function _get_large_n_mats_per_block(
+    ::Val{D}, ::Val{nthreads}, ::Val{:conseq}
+) where {D,nthreads}
     return nthreads ÷ (D * D)
 end
 
-@inline function _get_large_n_mats_per_block(::Val{D}, ::Val{nthreads}, ::Val{:indep}) where {D,nthreads}
+@inline function _get_large_n_mats_per_block(
+    ::Val{D}, ::Val{nthreads}, ::Val{:indep}
+) where {D,nthreads}
     return 1i32
 end
 
@@ -470,7 +541,7 @@ where one matrix is handled by D^2 threads. Meant for large matrices up to D=32.
         raw_idx = offset + tid - align_offset
         raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32
         grid_mtrx_load = (bid - 1i32) * n_mats_per_block + raw_mtrx
-        
+
         if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N && raw_idx > 0i32
             padded_amount = (raw_idx - 1i32) ÷ interm_pad_freq
 
@@ -511,7 +582,7 @@ where one matrix is handled by D^2 threads. Meant for large matrices up to D=32.
         raw_idx = offset + tid - align_offset
         raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32
         grid_mtrx_load = (bid - 1i32) * n_mats_per_block + raw_mtrx
-        
+
         if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N && raw_idx > 0i32
             padded_amount = (raw_idx - 1i32) ÷ interm_pad_freq
 
