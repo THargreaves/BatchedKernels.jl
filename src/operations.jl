@@ -5,9 +5,9 @@ using LinearAlgebra
 
 @inline function batch_op!(
     ::typeof(+),
-    C::DualAccessMatrix{T},
-    A::DualAccessMatrix{T},
-    B::DualAccessMatrix{T},
+    C::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    B::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
     ::Val{:small},
@@ -21,9 +21,9 @@ end
 
 @inline function batch_op!(
     ::typeof(-),
-    C::DualAccessMatrix{T},
-    A::DualAccessMatrix{T},
-    B::DualAccessMatrix{T},
+    C::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    B::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
     ::Val{:small},
@@ -37,7 +37,7 @@ end
 
 @inline function batch_op!(
     ::typeof(*),
-    C::DualAccessMatrix{T},
+    C::AbstractMatrix{T},
     A::AbstractMatrix{T},
     B::AbstractMatrix{T},
     d::Int32,
@@ -64,7 +64,7 @@ end
 
 @inline function batch_op!(
     ::typeof(*),
-    C::DualAccessMatrix{T},
+    C::AbstractMatrix{T},
     A::AbstractMatrix{T},
     B::AbstractMatrix{T},
     ::Val{D},
@@ -90,7 +90,7 @@ end
 
 @inline function batch_op!(
     ::typeof(*),
-    C::DualAccessMatrix{T},
+    C::AbstractMatrix{T},
     A::AbstractMatrix{T},
     B::AbstractMatrix{T},
     ::Val{D},
@@ -120,8 +120,8 @@ end
 # Out-of-place Cholesky: U = cholesky(A)
 @inline function batch_op!(
     ::typeof(cholesky),
-    U::DualAccessMatrix{T},
-    A::DualAccessMatrix{T},
+    U::AbstractMatrix{T},
+    A::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
     n_mats_per_warp::Int32,
@@ -178,7 +178,7 @@ end
 # In-place Cholesky: A = cholesky(A)
 @inline function batch_op!(
     ::typeof(cholesky),
-    A::DualAccessMatrix{T},
+    A::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
     n_mats_per_warp::Int32,
@@ -229,9 +229,9 @@ end
 # Upper triangular backward solve: C = U \ A
 @inline function batch_op!(
     ::typeof(\),
-    C::DualAccessMatrix{T},
-    U::UpperTriangular{T,<:DualAccessMatrix{T}},
-    A::DualAccessMatrix{T},
+    C::AbstractMatrix{T},
+    U::UpperTriangular{T,<:AbstractMatrix{T}},
+    A::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
 ) where {T,D}
@@ -262,9 +262,9 @@ end
 # Lower triangular forward solve: C = L \ A
 @inline function batch_op!(
     ::typeof(\),
-    C::DualAccessMatrix{T},
-    L::LowerTriangular{T,<:DualAccessMatrix{T}},
-    A::DualAccessMatrix{T},
+    C::AbstractMatrix{T},
+    L::LowerTriangular{T,<:AbstractMatrix{T}},
+    A::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
 ) where {T,D}
@@ -295,8 +295,8 @@ end
 # Transpose: B = transpose(A)
 @inline function batch_op!(
     ::typeof(transpose),
-    B::DualAccessMatrix{T},
-    A::DualAccessMatrix{T},
+    B::AbstractMatrix{T},
+    A::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
 ) where {T,D}
