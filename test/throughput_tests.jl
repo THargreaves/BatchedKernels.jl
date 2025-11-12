@@ -6,7 +6,6 @@ using CUDA: i32
 using LinearAlgebra
 using Plots
 
-
 mem_clock = attribute(device(), CUDA.DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE)
 bus_width = attribute(device(), CUDA.DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH)
 mem_bandwidth = 2.0f0 * mem_clock * (bus_width / 8) / 1e6 * 1e9   # in B/s
@@ -27,7 +26,7 @@ elseif V === Val(:large)
     D_upper_limit = 32
 end
 
-results = Vector{Tuple{Int, Float64}}()
+results = Vector{Tuple{Int,Float64}}()
 ninety_percent_limits = Vector{Float64}()
 
 # Throughput tests
@@ -41,7 +40,7 @@ for D in 2:32
         if mode === Val(:conseq)
             nthreads = max(2^8, 1 << (ceil(Int, log2(D^2))))
             n_mats_per_block = nthreads ÷ (D * D)
-            nblocks = cld(N_bench, n_mats_per_block)    
+            nblocks = cld(N_bench, n_mats_per_block)
         elseif mode === Val(:indep)
             n_cols_per_warp = max(1, prevpow(2, 32 ÷ D))
             n_elems_per_mat = D ÷ n_cols_per_warp * 32 + (D % n_cols_per_warp) * D
@@ -58,7 +57,7 @@ for D in 2:32
 
     bench_results = @benchmark begin
         CUDA.@sync @cuda threads = $nthreads blocks = $nblocks kernel_matmul!(
-            $Cs, $As, $Bs, Val(Int32($D)), Val(Int32($nthreads)), Int32($N_bench), $V, $mode,
+            $Cs, $As, $Bs, Val(Int32($D)), Val(Int32($nthreads)), Int32($N_bench), $V, $mode
         )
     end
 
@@ -89,24 +88,17 @@ gr()
 bar(
     Ds,
     times;
-    label = "runtime",
-    title = "Runtime vs D ($V_name, $mode_name)",
-    xlabel = "\$D\$",
-    ylabel = "\$t\$ (ms)",
-    legend = true,
-    grid = true,
-    size = (800, 500),
+    label="runtime",
+    title="Runtime vs D ($V_name, $mode_name)",
+    xlabel="\$D\$",
+    ylabel="\$t\$ (ms)",
+    legend=true,
+    grid=true,
+    size=(800, 500),
 )
 
 # Plot the 90% memory bandwidth limits
-plot!(
-    Ds,
-    ninety_percent_limits;
-    label = "90% limit",
-    lw = 2,
-    color = :red,
-    marker = :circle,
-)
+plot!(Ds, ninety_percent_limits; label="90% limit", lw=2, color=:red, marker=:circle)
 
 filename = "runtime_vs_D_$(V_name)_$(mode_name).png"
 path = joinpath(@__DIR__, "..", "benchmark_plots", filename)

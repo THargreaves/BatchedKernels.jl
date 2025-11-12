@@ -30,7 +30,16 @@
                 Cs = CUDA.zeros(Float32, D, D, N)
 
                 CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matmul!(
-                    Cs, As, Bs, Val(A_adj), Val(B_adj), Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
+                    Cs,
+                    As,
+                    Bs,
+                    Val(A_adj),
+                    Val(B_adj),
+                    Val(Int32(D)),
+                    Val(Int32(nthreads)),
+                    Int32(N),
+                    Val(:small),
+                    mode,
                 )
 
                 # CPU comparison
@@ -97,7 +106,16 @@ end
                 Cs = CUDA.zeros(Float32, D, D, N)
 
                 CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matmul!(
-                    Cs, As, Bs, Val(A_adj), Val(B_adj), Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:large), mode,
+                    Cs,
+                    As,
+                    Bs,
+                    Val(A_adj),
+                    Val(B_adj),
+                    Val(Int32(D)),
+                    Val(Int32(nthreads)),
+                    Int32(N),
+                    Val(:large),
+                    mode,
                 )
 
                 # CPU comparison

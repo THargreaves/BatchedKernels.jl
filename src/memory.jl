@@ -110,8 +110,11 @@ Base.@propagate_inbounds @inline function Base.setindex!(
 end
 
 # Wrappers to handle Int32 case
-@propagate_inbounds Base.getindex(A::AdjOrTransAbsMat{T}, i::Int32, j::Int32) where {T} =
-    wrapperop(A)(A.parent[j, i])::T
+@propagate_inbounds Base.getindex(A::AdjOrTransAbsMat{T}, i::Int32, j::Int32) where {T} = wrapperop(
+    A
+)(
+    A.parent[j, i]
+)::T
 
 # Support regular Int indexing (needed for Adjoint and other wrappers)
 @propagate_inbounds @inline function Base.getindex(

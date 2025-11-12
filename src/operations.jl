@@ -294,11 +294,7 @@ end
 
 # Transpose: B = transpose(A)
 @inline function batch_op!(
-    ::typeof(transpose),
-    B::AbstractMatrix{T},
-    A::AbstractMatrix{T},
-    d::Int32,
-    ::Val{D},
+    ::typeof(transpose), B::AbstractMatrix{T}, A::AbstractMatrix{T}, d::Int32, ::Val{D}
 ) where {T,D}
     # Each thread reads column d of A and writes it as row d of B
     for i in (1i32):D

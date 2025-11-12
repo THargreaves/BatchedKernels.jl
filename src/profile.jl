@@ -35,12 +35,10 @@ CUDA.@profile begin
     )
 end
 
-
 # Print SASS
 # @device_code_sass @cuda threads=nthreads blocks=nblocks kernel_matmul!(
 #     Cs, As, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
 # )
-
 
 # ncu \
 #   --set full \
