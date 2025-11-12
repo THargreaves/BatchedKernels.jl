@@ -1,9 +1,10 @@
 import Base: @propagate_inbounds
 import LinearAlgebra: AdjOrTransAbsMat, wrapperop
 
-export DualAccessMatrix, SingleAccessMatrix
+export DualAccessMatrix, SingleAccessMatrix, SharedMatrix
 export intermediate_layout_load!, intermediate_layout_write!
 export interm_to_dual_transfer!, dual_to_interm_transfer!
+export shared_matrix_load!
 
 """
 Abstraction of shared memory layout for a matrix accessible both column and row-wise.
