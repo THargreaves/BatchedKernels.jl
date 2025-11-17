@@ -34,35 +34,6 @@ Q_gpu = CuArray(Q_elem)
 H_gpu = CuArray(H_elem)
 R_gpu = CuArray(R_elem)
 
-# Specialized operation: C = I - A*B
-@inline function batch_op_i_minus_mult!(
-    C::AbstractMatrix{T},
-    A::AbstractMatrix{T},
-    B::AbstractMatrix{T},
-    d::Int32,
-    ::Val{D},
-    ::Val{:small},
-) where {T,D}
-    # Extract column d of B into registers
-    B_col = @MVector zeros(T, Int64(D))
-    @inbounds for k in (1i32):D
-        B_col[k] = B[k, d]
-    end
-
-    # Compute each element of column d of A*B
-    @inbounds for i in (1i32):D
-        tot = zero(T)
-        for k in (1i32):D
-            tot += A[i, k] * B_col[k]
-        end
-        # Write I - A*B (add identity, negate product)
-        C[i, d] = (i == d ? one(T) : zero(T)) - tot
-        T(i == d) - tot
-    end
-
-    return nothing
-end
-
 # Incremental kernel - uncomment sections to test progressively
 @inline function kernel_kalman!(
     Ps_out,
@@ -178,7 +149,7 @@ end
 
         # Use P_new = (I - K*H) * P_pred form of update
 
-        batch_op_i_minus_mult!(B4, B1, H, d, Val(D), Val(:small))
+        batch_op!(*, SetterWrapperMatrix(B4, i_minus), B1, H, d, Val(D), Val(:small))
         batch_op!(*, B2, B4, B3, d, Val(D), Val(:small))
         # B2 now contains P_new = (I - K*H) * P_pred
     end
@@ -221,6 +192,7 @@ function cpu_kalman_cov(P, A, Q, H, R)
 end
 
 for i in 1:n_tested
+    global max_error_P
     P_new_ref, P_pred_ref, K_ref = cpu_kalman_cov(
         P_cpu[:, :, i], A_elem, Q_elem, H_elem, R_elem
     )

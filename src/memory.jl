@@ -1,7 +1,8 @@
 import Base: @propagate_inbounds
 import LinearAlgebra: AdjOrTransAbsMat, wrapperop
 
-export DualAccessMatrix, SingleAccessMatrix, SharedMatrix
+export i_minus
+export DualAccessMatrix, SingleAccessMatrix, SharedMatrix, SetterWrapperMatrix, GetterWrapperMatrix
 export intermediate_layout_load!, intermediate_layout_write!
 export interm_to_dual_transfer!, dual_to_interm_transfer!
 export shared_matrix_load!
@@ -210,6 +211,59 @@ end
 @propagate_inbounds @inline function Base.getindex(A::SharedMatrix, i::Int, j::Int)
     return getindex(A, Int32(i), Int32(j))
 end
+
+####################################
+#### WRAPPER OPERATION MATRICES ####
+####################################
+
+"""
+Wrapper struct for DualAccessMatrix for custom specialised setters
+"""
+struct SetterWrapperMatrix{T,D,V,F} <: AbstractMatrix{T}
+    A::DualAccessMatrix{T,D,V}
+    op::F
+end
+
+Base.@propagate_inbounds @inline function Base.getindex(
+    A::SetterWrapperMatrix{T,D,V,F}, i::Int32, j::Int32
+) where {T,D,V,F}
+    return A.A[i, j];
+end
+
+Base.@propagate_inbounds @inline function Base.setindex!(
+    A::SetterWrapperMatrix{T,D,V,F}, v::T, i::Int32, j::Int32,
+) where {T,D,V,F}
+    return A.A[i, j] = A.op(i, j, v)
+end
+
+"""
+Wrapper struct for DualAccessMatrix for custom specialised getters
+"""
+struct GetterWrapperMatrix{T,D,V,F} <: AbstractMatrix{T}
+    A::DualAccessMatrix{T,D,V}
+    op::F
+end
+
+Base.@propagate_inbounds @inline function Base.getindex(
+    A::GetterWrapperMatrix{T,D,V,F}, i::Int32, j::Int32
+) where {T,D,V,F}
+    return A.op(i, j, A.A[i, j]);
+end
+
+Base.@propagate_inbounds @inline function Base.setindex!(
+    A::GetterWrapperMatrix{T,D,V,F}, v::T, i::Int32, j::Int32,
+) where {T,D,V,F}
+    return A.A[i, j] = v
+end
+
+#####################################
+#### WRAPPER OPERATION FUNCTIONS ####
+#####################################
+
+@inline function i_minus(i::Ti, j::Ti, v::T) where {Ti<:Integer, T<:Number}
+    return (i == j) * one(T) - v;
+end
+
 
 """
 Load a single matrix from global memory into shared memory using a single warp. Global
