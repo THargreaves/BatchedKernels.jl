@@ -2,7 +2,7 @@ import Base: @propagate_inbounds
 import LinearAlgebra: AdjOrTransAbsMat, wrapperop
 
 export i_minus
-export DualAccessMatrix, SingleAccessMatrix, SharedMatrix, SetterWrapperMatrix, GetterWrapperMatrix
+export DualAccessMatrix, SingleAccessMatrix, SharedMatrix, IMinusSetterMatrix
 export intermediate_layout_load!, intermediate_layout_write!
 export interm_to_dual_transfer!, dual_to_interm_transfer!
 export shared_matrix_load!
@@ -217,51 +217,51 @@ end
 ####################################
 
 """
-Wrapper struct for DualAccessMatrix for custom specialised setters
+Abstract DualAccessMatrix wrapper type
 """
-struct SetterWrapperMatrix{T,D,V,F} <: AbstractMatrix{T}
-    A::DualAccessMatrix{T,D,V}
-    op::F
+abstract type DualAccessMatrixWrapper{T,D,V} <: AbstractMatrix{T} end
+
+Base.parent(A::DualAccessMatrixWrapper{T,D,V}) where {T,D,V} = A.parent
+Base.size(A::DualAccessMatrixWrapper{T,D,V}) where {T,D,V} = size(parent(A))
+
+"""
+Default getters and setters, no-ops
+"""
+@inline function wrapper_get(
+    A::DualAccessMatrixWrapper{T,D,V}, v::T, i::Int32, j::Int32,
+) where {T,D,V}
+    return v
+end
+
+@inline function wrapper_set(
+    A::DualAccessMatrixWrapper{T,D,V}, v::T, i::Int32, j::Int32,
+) where {T,D,V}
+    return v
 end
 
 Base.@propagate_inbounds @inline function Base.getindex(
-    A::SetterWrapperMatrix{T,D,V,F}, i::Int32, j::Int32
-) where {T,D,V,F}
-    return A.A[i, j];
+    A::DualAccessMatrixWrapper{T,D,V}, i::Int32, j::Int32,
+) where {T,D,V}
+    return wrapper_get(A, parent(A)[i, j], i, j)
 end
 
 Base.@propagate_inbounds @inline function Base.setindex!(
-    A::SetterWrapperMatrix{T,D,V,F}, v::T, i::Int32, j::Int32,
-) where {T,D,V,F}
-    return A.A[i, j] = A.op(i, j, v)
+    A::DualAccessMatrixWrapper{T,D,V}, v::T, i::Int32, j::Int32,
+) where {T,D,V}
+    return parent(A)[i, j] = wrapper_set(A, v, i, j)
 end
 
 """
-Wrapper struct for DualAccessMatrix for custom specialised getters
+Wrapper op for I - A
 """
-struct GetterWrapperMatrix{T,D,V,F} <: AbstractMatrix{T}
-    A::DualAccessMatrix{T,D,V}
-    op::F
+struct IMinusSetterMatrix{T,D,V} <: DualAccessMatrixWrapper{T,D,V}
+    parent::DualAccessMatrix{T,D,V}
 end
 
-Base.@propagate_inbounds @inline function Base.getindex(
-    A::GetterWrapperMatrix{T,D,V,F}, i::Int32, j::Int32
-) where {T,D,V,F}
-    return A.op(i, j, A.A[i, j]);
-end
-
-Base.@propagate_inbounds @inline function Base.setindex!(
-    A::GetterWrapperMatrix{T,D,V,F}, v::T, i::Int32, j::Int32,
-) where {T,D,V,F}
-    return A.A[i, j] = v
-end
-
-#####################################
-#### WRAPPER OPERATION FUNCTIONS ####
-#####################################
-
-@inline function i_minus(i::Ti, j::Ti, v::T) where {Ti<:Integer, T<:Number}
-    return (i == j) * one(T) - v;
+Base.@propagate_inbounds @inline function wrapper_set(
+    A::IMinusSetterMatrix{T,D,V}, v::T, i::Int32, j::Int32,
+) where {T,D,V}
+    return (i == j) * one(T) - v
 end
 
 

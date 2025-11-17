@@ -149,7 +149,7 @@ R_gpu = CuArray(R_elem)
 
         # Use P_new = (I - K*H) * P_pred form of update
 
-        batch_op!(*, SetterWrapperMatrix(B4, i_minus), B1, H, d, Val(D), Val(:small))
+        batch_op!(*, IMinusSetterMatrix(B4), B1, H, d, Val(D), Val(:small))
         batch_op!(*, B2, B4, B3, d, Val(D), Val(:small))
         # B2 now contains P_new = (I - K*H) * P_pred
     end
