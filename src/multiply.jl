@@ -25,12 +25,15 @@ Matrix multiplication kernel for the case where one warp handles multiple matric
 ) where {D,nthreads,A_adj,B_adj,mode}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
+    n_mats_per_block = n_warps * n_mats_per_warp
     padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
     tid = threadIdx().x
+    bid = blockIdx().x
     lid = mod1(tid, 32i32)
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     d = mod1(lid, D)
+    grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
 
     shmem_elems = (n_mats_per_warp * D + padding) * D * n_warps
     shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
@@ -45,7 +48,7 @@ Matrix multiplication kernel for the case where one warp handles multiple matric
     intermediate_layout_load!(shmem_3, Bs, Val(D), Val(nthreads), N, Val(:small))
     interm_to_dual_transfer!(shmem_2, shmem_3, Val(D), Val(nthreads), N, Val(:small))
 
-    if warp_matrix_id <= n_mats_per_warp
+    if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         # Create dual-access matrices
         A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
         B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))

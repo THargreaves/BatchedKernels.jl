@@ -20,6 +20,23 @@ using LinearAlgebra
 end
 
 @inline function batch_op!(
+    ::typeof(+),
+    C::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    B::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D},
+    ::Val{:large},
+) where {T,D}
+    i = mod1(mat_elem_idx, D)
+    j = (mat_elem_idx - 1i32) ÷ D + 1i32
+
+    C[i, j] = A[i, j] + B[i, j]
+
+    return nothing
+end
+
+@inline function batch_op!(
     ::typeof(-),
     C::AbstractMatrix{T},
     A::AbstractMatrix{T},
@@ -31,6 +48,23 @@ end
     for i in (1i32):D
         C[i, d] = A[i, d] - B[i, d]
     end
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(-),
+    C::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    B::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D},
+    ::Val{:large},
+) where {T,D}
+    i = mod1(mat_elem_idx, D)
+    j = (mat_elem_idx - 1i32) ÷ D + 1i32
+
+    C[i, j] = A[i, j] - B[i, j]
 
     return nothing
 end
@@ -126,6 +160,7 @@ end
     ::Val{D},
     n_mats_per_warp::Int32,
     warp_matrix_id::Int32,
+    ::Val{:small},
 ) where {T,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -183,6 +218,7 @@ end
     ::Val{D},
     n_mats_per_warp::Int32,
     warp_matrix_id::Int32,
+    ::Val{:small},
 ) where {T,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -234,6 +270,7 @@ end
     A::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
+    ::Val{:small},
 ) where {T,D}
     # Store column d in registers
     x = @MVector zeros(T, Int64(D))
@@ -267,6 +304,7 @@ end
     A::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
+    ::Val{:small},
 ) where {T,D}
     # Store column d in registers
     y = @MVector zeros(T, Int64(D))
@@ -294,7 +332,12 @@ end
 
 # Transpose: B = transpose(A)
 @inline function batch_op!(
-    ::typeof(transpose), B::AbstractMatrix{T}, A::AbstractMatrix{T}, d::Int32, ::Val{D}
+    ::typeof(transpose),
+    B::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    d::Int32, 
+    ::Val{D},
+    ::Val{:small},
 ) where {T,D}
     # Each thread reads column d of A and writes it as row d of B
     for i in (1i32):D
