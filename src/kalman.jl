@@ -1,40 +1,5 @@
-using CUDA
-using CUDA: i32
-using LinearAlgebra
-using BatchedKernels
-import StaticArrays: @MVector
+export kernel_kalman!
 
-# Test configuration
-test_D = 5
-test_nthreads = 256  # 8 warps
-test_N = 2^20
-test_nblocks = cld(test_N, test_nthreads ÷ test_D * (32 ÷ test_D))
-
-# Generate test data
-A_elem = rand(Float32, test_D, test_D) / Float32(test_D)
-Q_elem = rand(Float32, test_D, test_D) / Float32(test_D)^2
-Q_elem = Q_elem * Q_elem' + 0.01f0 * I
-
-H_elem = rand(Float32, test_D, test_D) / Float32(test_D)
-R_elem = rand(Float32, test_D, test_D) / Float32(test_D)^2
-R_elem = R_elem * R_elem' + 0.01f0 * I
-
-P_cpu = Array{Float32}(undef, test_D, test_D, test_N)
-for i in 1:test_N
-    P_i = rand(Float32, test_D, test_D) / Float32(test_D)
-    P_i = P_i * P_i' + 0.1f0 * I
-    P_cpu[:, :, i] = P_i
-end
-
-P_in = CuArray(P_cpu)
-P_out = CuArray{Float32}(undef, test_D, test_D, test_N)
-
-A_gpu = CuArray(A_elem)
-Q_gpu = CuArray(Q_elem)
-H_gpu = CuArray(H_elem)
-R_gpu = CuArray(R_elem)
-
-# Incremental kernel - uncomment sections to test progressively
 @inline function kernel_kalman!(
     Ps_out,
     Ps_in,
@@ -46,7 +11,8 @@ R_gpu = CuArray(R_elem)
     ::Val{nthreads},
     N::Int32,
     ::Val{:small},
-) where {D,nthreads}
+    ::Val{mode},
+) where {D,nthreads,mode}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
     padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
@@ -157,48 +123,8 @@ R_gpu = CuArray(R_elem)
     # Write P_new (final output) - B2/shmem_2 contains P_new
     dual_to_interm_transfer!(shmem_4, shmem_2, Val(D), Val(nthreads), N, Val(:small))
     intermediate_layout_write!(
-        Ps_out, shmem_4, Val(D), Val(nthreads), N, Val(:small), Val(:indep)
+        Ps_out, shmem_4, Val(D), Val(nthreads), N, Val(:small), Val(mode),
     )
 
     return nothing
 end
-
-CUDA.@sync @cuda threads = test_nthreads blocks = test_nblocks kernel_kalman!(
-    P_out,
-    P_in,
-    A_gpu,
-    Q_gpu,
-    H_gpu,
-    R_gpu,
-    Val(Int32(test_D)),
-    Val(Int32(test_nthreads)),
-    Int32(test_N),
-    Val(:small),
-)
-
-# Validate P_new (complete Kalman filter output)
-P_out_cpu = Array(P_out)
-max_error_P = 0.0
-n_tested = min(10000, test_N)
-
-function cpu_kalman_cov(P, A, Q, H, R)
-    # Predict step
-    P_pred = A * P * A' + Q
-    # Update step
-    S = H * P_pred * H' + R
-    K = P_pred * H' / S
-    P_new = P_pred - K * S * K'
-    return P_new, P_pred, K
-end
-
-for i in 1:n_tested
-    global max_error_P
-    P_new_ref, P_pred_ref, K_ref = cpu_kalman_cov(
-        P_cpu[:, :, i], A_elem, Q_elem, H_elem, R_elem
-    )
-    P_new_gpu = P_out_cpu[:, :, i]
-    error = maximum(abs.(P_new_ref - P_new_gpu))
-    max_error_P = max(max_error_P, error)
-end
-
-println("  P_new max error: $max_error_P")

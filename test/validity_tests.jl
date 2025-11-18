@@ -1,3 +1,89 @@
+@testitem "Kalman (small)" begin
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+    using BatchedKernels
+    import StaticArrays: @MVector
+
+    # Test parameters
+    nthreads = 2^8
+    N = 2^20
+
+    # Test for both independent and consequtive modes
+    modes = (Val(:indep), Val(:conseq))
+
+    function cpu_kalman_cov(P, A, Q, H, R)
+        # Predict step
+        P_pred = A * P * A' + Q
+        # Update step
+        S = H * P_pred * H' + R
+        K = P_pred * H' / S
+        P_new = P_pred - K * S * K'
+        return P_new, P_pred, K
+    end
+
+    for D in 2:10
+        nblocks = cld(N, nthreads ÷ D * (32 ÷ D))
+
+        # Generate test data
+        A_elem = rand(Float32, D, D) / Float32(D)
+        Q_elem = rand(Float32, D, D) / Float32(D)^2
+        Q_elem = Q_elem * Q_elem' + 0.01f0 * I
+
+        H_elem = rand(Float32, D, D) / Float32(D)
+        R_elem = rand(Float32, D, D) / Float32(D)^2
+        R_elem = R_elem * R_elem' + 0.01f0 * I
+
+        P_cpu = Array{Float32}(undef, D, D, N)
+        for i in 1:N
+            P_i = rand(Float32, D, D) / Float32(D)
+            P_i = P_i * P_i' + 0.1f0 * I
+            P_cpu[:, :, i] = P_i
+        end
+
+        P_in = CuArray(P_cpu)
+
+        A_gpu = CuArray(A_elem)
+        Q_gpu = CuArray(Q_elem)
+        H_gpu = CuArray(H_elem)
+        R_gpu = CuArray(R_elem)
+
+        for mode in modes
+            P_out = CuArray{Float32}(undef, D, D, N)
+
+            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_kalman!(
+                P_out,
+                P_in,
+                A_gpu,
+                Q_gpu,
+                H_gpu,
+                R_gpu,
+                Val(Int32(D)),
+                Val(Int32(nthreads)),
+                Int32(N),
+                Val(:small),
+                mode,
+            )
+
+            # Validate P_new (complete Kalman filter output)
+            P_out_cpu = Array(P_out)
+            max_error_P = 0.0
+            n_tested = min(10000, N)
+
+            for i in 1:n_tested
+                P_new_ref, P_pred_ref, K_ref = cpu_kalman_cov(
+                    P_cpu[:, :, i], A_elem, Q_elem, H_elem, R_elem
+                )
+                P_new_gpu = P_out_cpu[:, :, i]
+                error = maximum(abs.(P_new_ref - P_new_gpu))
+                max_error_P = max(max_error_P, error)
+            end
+
+            @test max_error_P < 1e-5
+        end
+    end
+end
+
 @testitem "Matrix Multiplication (small)" begin
     using BatchedKernels
     using CUDA
