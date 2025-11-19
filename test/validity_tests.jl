@@ -22,8 +22,8 @@
         return P_new, P_pred, K
     end
 
-    for D in 2:10
-        nblocks = cld(N, nthreads ÷ D * (32 ÷ D))
+    for D in 2:14
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
         # Generate test data
         A_elem = rand(Float32, D, D) / Float32(D)

@@ -20,11 +20,11 @@ results = Vector{Tuple{Int,Float64}}()
 ninety_percent_limits = Vector{Float64}()
 
 # Throughput tests
-for D in 2:10
+for D in 2:14
     # Target 1GB of input data to minimise impact of L1 cache
     N_bench = Int32(ceil(1e9 / (4 * 2 * D^2)))
     nthreads = 2^8
-    nblocks = cld(N_bench, nthreads ÷ D * (32 ÷ D))
+    nblocks = cld(N_bench, nthreads//32 * (32 ÷ D))
 
     CUDA.seed!(1234)
    
