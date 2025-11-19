@@ -262,7 +262,7 @@ end
     return nothing
 end
 
-# Upper triangular backward solve: C = U \ A
+# Out-of-place upper triangular backward solve: C = U \ A
 @inline function batch_op!(
     ::typeof(\),
     C::AbstractMatrix{T},
@@ -296,7 +296,19 @@ end
     return nothing
 end
 
-# Lower triangular forward solve: C = L \ A
+# In-place upper triangular backward solve wrapper: A = U \ A
+@inline function batch_op!(
+    ::typeof(\),
+    U::UpperTriangular{T,<:AbstractMatrix{T}},
+    A::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D},
+    ::Val{:small},
+) where {T,D}
+    return batch_op!(\, A, U, A, d, Val(D), Val(:small))
+end
+
+# Out-of-place lower triangular forward solve: C = L \ A
 @inline function batch_op!(
     ::typeof(\),
     C::AbstractMatrix{T},
@@ -328,6 +340,18 @@ end
     end
 
     return nothing
+end
+
+# In-place lower triangular forward solve wrapper: A = L \ A
+@inline function batch_op!(
+    ::typeof(\),
+    L::LowerTriangular{T,<:AbstractMatrix{T}},
+    A::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D},
+    ::Val{:small},
+) where {T,D}
+    return batch_op!(\, A, L, A, d, Val(D), Val(:small))
 end
 
 # Transpose: B = transpose(A)

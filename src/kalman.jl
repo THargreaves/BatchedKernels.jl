@@ -97,14 +97,12 @@ export kernel_kalman!
         # In-place Cholesky of S (B2 becomes U where S = U'*U)
         batch_op!(cholesky, B2, d, Val(D), n_mats_per_warp, warp_matrix_id, Val(:small))
 
-        # TODO: make a dedicated in-place wrapper and verify correctness
         # In-place forward solve U' \ B1 → B1 (X = (U')^{-1} * H*P_pred)
-        # batch_op!(\, B1, LowerTriangular(B2), B1, d, Val(D), Val(:small))
         # We need U' for forward solve
-        batch_op!(\, B1, LowerTriangular(B2'), B1, d, Val(D), Val(:small))
+        batch_op!(\, LowerTriangular(B2'), B1, d, Val(D), Val(:small))
 
-        # Backward solve U \ B1 → B2 (K' = U^{-1} * X = S^{-1} * H * P_pred)
-        batch_op!(\, B2, UpperTriangular(B2), B1, d, Val(D), Val(:small))
+        # Backward solve U \ B1 → B1 (K' = U^{-1} * X = S^{-1} * H * P_pred)
+        batch_op!(\, UpperTriangular(B2), B1, d, Val(D), Val(:small))
 
         #####################
         #### UPDATE STEP ####
@@ -113,15 +111,15 @@ export kernel_kalman!
         # Use P_new = (I - K*H) * P_pred form of update
 
         # Transpose K' in B2 to get K = P_pred * H' / S
-        batch_op!(*, IMinusSetterMatrix(B1), B2', H, d, Val(D), Val(:small))
-        batch_op!(*, B2, B1, B3, d, Val(D), Val(:small))
+        batch_op!(*, IMinusSetterMatrix(B2), B1', H, d, Val(D), Val(:small))
+        batch_op!(*, B1, B2, B3, d, Val(D), Val(:small))
         # B2 now contains P_new = (I - K*H) * P_pred
     end
 
     # Write P_new (final output) - B2/shmem_2 contains P_new
-    dual_to_interm_transfer!(shmem_1, shmem_2, Val(D), Val(nthreads), N, Val(:small))
+    dual_to_interm_transfer!(shmem_2, shmem_1, Val(D), Val(nthreads), N, Val(:small))
     intermediate_layout_write!(
-        Ps_out, shmem_1, Val(D), Val(nthreads), N, Val(:small), Val(mode),
+        Ps_out, shmem_2, Val(D), Val(nthreads), N, Val(:small), Val(mode),
     )
 
     return nothing
