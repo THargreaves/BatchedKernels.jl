@@ -30,7 +30,6 @@ export kernel_kalman!
     shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
     shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
     shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
-    shmem_4 = CuStaticSharedArray(Float32, (shmem_elems,))
 
     pad_interval = div(32i32, D & -D) * D
     shmem_size_fixed = D * D + (D * D - 1i32) ÷ pad_interval
@@ -68,7 +67,6 @@ export kernel_kalman!
         B1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
         B2 = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
         B3 = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
-        B4 = DualAccessMatrix(shmem_4, Val(D), warp_matrix_id, Val(:small))
 
         ######################
         #### PREDICT STEP ####
@@ -99,19 +97,14 @@ export kernel_kalman!
         # In-place Cholesky of S (B2 becomes U where S = U'*U)
         batch_op!(cholesky, B2, d, Val(D), n_mats_per_warp, warp_matrix_id, Val(:small))
 
-        # First we need U' for forward solve
-        # batch_op!(transpose, B4, B2, d, Val(D), Val(:small))
-
         # TODO: make a dedicated in-place wrapper and verify correctness
         # In-place forward solve U' \ B1 → B1 (X = (U')^{-1} * H*P_pred)
-        # batch_op!(\, B1, LowerTriangular(B4), B1, d, Val(D), Val(:small))
+        # batch_op!(\, B1, LowerTriangular(B2), B1, d, Val(D), Val(:small))
+        # We need U' for forward solve
         batch_op!(\, B1, LowerTriangular(B2'), B1, d, Val(D), Val(:small))
 
-        # Backward solve U \ B1 → B4 (K' = U^{-1} * X = S^{-1} * H * P_pred)
-        batch_op!(\, B4, UpperTriangular(B2), B1, d, Val(D), Val(:small))
-
-        # Transpose K' → B1 to get K = P_pred * H' / S
-        # batch_op!(transpose, B1, B4, d, Val(D), Val(:small))
+        # Backward solve U \ B1 → B2 (K' = U^{-1} * X = S^{-1} * H * P_pred)
+        batch_op!(\, B2, UpperTriangular(B2), B1, d, Val(D), Val(:small))
 
         #####################
         #### UPDATE STEP ####
@@ -119,18 +112,16 @@ export kernel_kalman!
 
         # Use P_new = (I - K*H) * P_pred form of update
 
-        # batch_op!(*, IMinusSetterMatrix(B4), B1, H, d, Val(D), Val(:small))
-        # batch_op!(*, B2, B4, B3, d, Val(D), Val(:small))
-
-        batch_op!(*, IMinusSetterMatrix(B1), B4', H, d, Val(D), Val(:small))
+        # Transpose K' in B2 to get K = P_pred * H' / S
+        batch_op!(*, IMinusSetterMatrix(B1), B2', H, d, Val(D), Val(:small))
         batch_op!(*, B2, B1, B3, d, Val(D), Val(:small))
         # B2 now contains P_new = (I - K*H) * P_pred
     end
 
     # Write P_new (final output) - B2/shmem_2 contains P_new
-    dual_to_interm_transfer!(shmem_4, shmem_2, Val(D), Val(nthreads), N, Val(:small))
+    dual_to_interm_transfer!(shmem_1, shmem_2, Val(D), Val(nthreads), N, Val(:small))
     intermediate_layout_write!(
-        Ps_out, shmem_4, Val(D), Val(nthreads), N, Val(:small), Val(mode),
+        Ps_out, shmem_1, Val(D), Val(nthreads), N, Val(:small), Val(mode),
     )
 
     return nothing
