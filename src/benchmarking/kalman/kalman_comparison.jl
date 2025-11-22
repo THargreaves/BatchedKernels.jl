@@ -32,7 +32,7 @@ function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, Strin
             method_sanitised = String(typeof(method).parameters[1])
             cache_file = joinpath(
                 cache_dir,
-                "matmul_$(string(T))_$(method_sanitised)_D_$(D).jld2",
+                "kalman_$(string(T))_$(method_sanitised)_D_$(D).jld2",
             )
             if isfile(cache_file)
                 @load cache_file time
@@ -47,10 +47,24 @@ function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, Strin
                     P_i = P_i * P_i' + 0.1f0 * I
                     P_in[:, :, i] = P_i
                 end
+
                 A = rand(T, D, D, N)
-                Q = rand(T, D, D, N)
+
+                Q = zeros(T, D, D, N)
+                for i in 1:N
+                    Q_i = rand(T, D, D) / T(D)
+                    Q_i = Q_i * Q_i' + 0.1f0 * I
+                    Q[:, :, i] = Q_i
+                end
+
                 H = rand(T, D, D, N)
-                R = rand(T, D, D, N)
+
+                R = zeros(T, D, D, N)
+                for i in 1:N
+                    R_i = rand(T, D, D) / T(D)
+                    R_i = R_i * R_i' + 0.1f0 * I
+                    R[:, :, i] = R_i
+                end
 
                 time = kalman_timing(P_out, P_in, A, Q, H, R, queue_ptr, method)
 
@@ -73,6 +87,7 @@ methods = Dict{Val, String}(
     Val(:cpu_mt) => "CPU (multithreaded)",
     Val(:ours) => "Ours",
     Val(:gpu_mem_bound) => "SOL",
+    Val(:magma_non_strided) => "MAGMA (non-strided)",
 )
 
 generate_plots(2, 14, methods, Float32)

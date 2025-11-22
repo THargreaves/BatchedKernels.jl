@@ -35,7 +35,7 @@ function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, Strin
             method_sanitised = String(typeof(method).parameters[1])
             cache_file = joinpath(
                 cache_dir,
-                "matmul_$(string(T))_$(method_sanitised)_D_$(D).jld2",
+                "solve_$(string(T))_$(method_sanitised)_D_$(D).jld2",
             )
             if isfile(cache_file)
                 @load cache_file time

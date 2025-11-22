@@ -2,7 +2,7 @@ using CUDA
 using Magma
 using BenchmarkTools
 
-function magmablas_sgemm_batched(
+function magmablas_sgemm_batched!(
     transA,
     transB,
     m,
@@ -60,7 +60,7 @@ end
 function magma_matmul_non_strided!(
     C, A, B, D, N, queue_ptr,
 )
-    magmablas_sgemm_batched(
+    magmablas_sgemm_batched!(
         Magma.MagmaNoTrans,
         Magma.MagmaNoTrans,
         D,
