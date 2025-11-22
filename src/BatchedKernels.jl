@@ -8,5 +8,7 @@ include("memory.jl")
 include("operations.jl")
 include("multiply.jl")
 include("kalman.jl")
+include("cholesky.jl")
+include("solve.jl")
 
 end

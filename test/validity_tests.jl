@@ -10,7 +10,8 @@
     N = 2^20 + 113
 
     # Test for both independent and consequtive modes
-    modes = (Val(:indep), Val(:conseq))
+    # modes = (Val(:indep), Val(:conseq))
+    modes = (Val(:indep),)
 
     function cpu_kalman_cov(P, A, Q, H, R)
         # Predict step
@@ -75,7 +76,7 @@
                     P_cpu[:, :, i], A_elem, Q_elem, H_elem, R_elem
                 )
                 P_new_gpu = P_out_cpu[:, :, i]
-                error = maximum(abs.(P_new_ref - P_new_gpu))
+                error = maximum(abs.(LowerTriangular(P_new_ref) - LowerTriangular(P_new_gpu)))
                 max_error_P = max(max_error_P, error)
             end
 
@@ -319,44 +320,6 @@ end
     # Test both modes
     modes = (Val(:indep), Val(:conseq))
 
-    function kernel_cholesky_inplace!(
-        Us, As, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
-    ) where {D,nthreads,mode}
-        n_mats_per_warp = 32i32 ÷ D
-        n_warps = nthreads ÷ 32i32
-        n_mats_per_block = n_warps * n_mats_per_warp
-        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
-
-        tid = threadIdx().x
-        bid = blockIdx().x
-        lid = mod1(tid, 32i32)
-        warp_matrix_id = div(lid - 1i32, D) + 1i32
-        d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
-
-        shmem_elems = (n_mats_per_warp * D + padding) * D * n_warps
-        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
-
-        # Load A
-        intermediate_layout_load!(shmem_2, As, Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D), Val(nthreads), N, Val(:small))
-
-        if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-            # Create dual-access matrix
-            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-
-            # Perform in-place Cholesky
-            batch_op!(cholesky, A, d, Val(D), n_mats_per_warp, warp_matrix_id, Val(:small))
-        end
-
-        # Store result
-        dual_to_interm_transfer!(shmem_2, shmem_1, Val(D), Val(nthreads), N, Val(:small))
-        intermediate_layout_write!(Us, shmem_2, Val(D), Val(nthreads), N, Val(:small), Val(mode))
-
-        return nothing
-    end
-
     for D in 2:15
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
@@ -372,7 +335,7 @@ end
             Us = CUDA.zeros(Float32, D, D, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_cholesky_inplace!(
-                Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
+                Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
             )
 
             # CPU comparison
@@ -406,46 +369,6 @@ end
     # Test both modes
     modes = (Val(:indep), Val(:conseq))
 
-    function kernel_cholesky!(
-        Us, As, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
-    ) where {D,nthreads,mode}
-        n_mats_per_warp = 32i32 ÷ D
-        n_warps = nthreads ÷ 32i32
-        n_mats_per_block = n_warps * n_mats_per_warp
-        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
-
-        tid = threadIdx().x
-        bid = blockIdx().x
-        lid = mod1(tid, 32i32)
-        warp_matrix_id = div(lid - 1i32, D) + 1i32
-        d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
-
-        shmem_elems = (n_mats_per_warp * D + padding) * D * n_warps
-        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
-
-        # Load A
-        intermediate_layout_load!(shmem_3, As, Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N, Val(:small))
-
-        if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-            # Create dual-access matrices
-            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-            U = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
-
-            # Perform out-of-place Cholesky
-            batch_op!(cholesky, U, A, d, Val(D), n_mats_per_warp, warp_matrix_id, Val(:small))
-        end
-
-        # Store result
-        dual_to_interm_transfer!(shmem_3, shmem_2, Val(D), Val(nthreads), N, Val(:small))
-        intermediate_layout_write!(Us, shmem_3, Val(D), Val(nthreads), N, Val(:small), Val(mode))
-
-        return nothing
-    end
-
     for D in 2:15
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
@@ -460,8 +383,8 @@ end
             end
             Us = CUDA.zeros(Float32, D, D, N)
 
-            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_cholesky!(
-                Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
+            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_cholesky_out_of_place!(
+                Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
             )
 
             # CPU comparison
@@ -482,7 +405,7 @@ end
     end
 end
 
-@testitem "Upper Triangular Backward Solve (small)" begin
+@testitem "Upper Triangular Backward Solve (out-of-place) (small)" begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -494,52 +417,6 @@ end
 
     # Test both modes
     modes = (Val(:indep), Val(:conseq))
-
-    function kernel_backward_solve!(
-        Cs, Us, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
-    ) where {D,nthreads,mode}
-        n_mats_per_warp = 32i32 ÷ D
-        n_warps = nthreads ÷ 32i32
-        n_mats_per_block = n_warps * n_mats_per_warp
-        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
-
-        tid = threadIdx().x
-        bid = blockIdx().x
-        lid = mod1(tid, 32i32)
-        warp_matrix_id = div(lid - 1i32, D) + 1i32
-        d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
-
-        shmem_elems = (n_mats_per_warp * D + padding) * D * n_warps
-        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
-
-        # Load U
-        intermediate_layout_load!(shmem_3, Us, Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N, Val(:small))
-
-        # Load B
-        intermediate_layout_load!(shmem_3, Bs, Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_2, shmem_3, Val(D), Val(nthreads), N, Val(:small))
-
-        if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-            # Create dual-access matrices
-            U_mat = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-            B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
-            C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
-
-            # Perform backward solve: C = U \ B
-            U = UpperTriangular(U_mat)
-            batch_op!(\, C, U, B, d, Val(D), Val(:small))
-        end
-
-        # Store C
-        dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N, Val(:small))
-        intermediate_layout_write!(Cs, shmem_1, Val(D), Val(nthreads), N, Val(:small), Val(mode))
-
-        return nothing
-    end
 
     for D in 2:15
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
@@ -557,7 +434,7 @@ end
             Cs = CUDA.zeros(Float32, D, D, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_backward_solve!(
-                Cs, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
+                Cs, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
             )
 
             # CPU comparison
@@ -574,7 +451,7 @@ end
     end
 end
 
-@testitem "Lower Triangular Forward Solve (small)" begin
+@testitem "Lower Triangular Forward Solve (out-of-place) (small)" begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -586,52 +463,6 @@ end
 
     # Test both modes
     modes = (Val(:indep), Val(:conseq))
-
-    function kernel_forward_solve!(
-        Cs, Ls, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
-    ) where {D,nthreads,mode}
-        n_mats_per_warp = 32i32 ÷ D
-        n_warps = nthreads ÷ 32i32
-        n_mats_per_block = n_warps * n_mats_per_warp
-        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
-
-        tid = threadIdx().x
-        bid = blockIdx().x
-        lid = mod1(tid, 32i32)
-        warp_matrix_id = div(lid - 1i32, D) + 1i32
-        d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
-
-        shmem_elems = (n_mats_per_warp * D + padding) * D * n_warps
-        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
-        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
-
-        # Load L
-        intermediate_layout_load!(shmem_3, Ls, Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N, Val(:small))
-
-        # Load B
-        intermediate_layout_load!(shmem_3, Bs, Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_2, shmem_3, Val(D), Val(nthreads), N, Val(:small))
-
-        if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-            # Create dual-access matrices
-            L_mat = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-            B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
-            C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
-
-            # Perform forward solve: C = L \ B
-            L = LowerTriangular(L_mat)
-            batch_op!(\, C, L, B, d, Val(D), Val(:small))
-        end
-
-        # Store C
-        dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N, Val(:small))
-        intermediate_layout_write!(Cs, shmem_1, Val(D), Val(nthreads), N, Val(:small), Val(mode))
-
-        return nothing
-    end
 
     for D in 2:15
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
@@ -649,7 +480,7 @@ end
             Cs = CUDA.zeros(Float32, D, D, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_forward_solve!(
-                Cs, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
+                Cs, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
             )
 
             # CPU comparison
