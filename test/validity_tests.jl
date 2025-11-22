@@ -10,8 +10,7 @@
     N = 2^20 + 113
 
     # Test for both independent and consequtive modes
-    # modes = (Val(:indep), Val(:conseq))
-    modes = (Val(:indep),)
+    modes = (Val(:indep), Val(:conseq))
 
     function cpu_kalman_cov(P, A, Q, H, R)
         # Predict step

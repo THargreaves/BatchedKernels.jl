@@ -60,7 +60,7 @@ export kernel_kalman!
     R = SharedMatrix(shmem_R, Val(D))
 
     # Load P
-    intermediate_layout_load!(shmem_1, Ps_in, Val(D), Val(nthreads), N, Val(:small), Val(:lower))
+    intermediate_layout_load!(shmem_1, Ps_in, Val(D), Val(nthreads), N, Val(:small))#, Val(:lower))
     interm_to_dual_transfer!(shmem_3, shmem_1, Val(D), Val(nthreads), N, Val(:small))
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
@@ -119,7 +119,7 @@ export kernel_kalman!
     # Write P_new (final output) - B2/shmem_2 contains P_new
     dual_to_interm_transfer!(shmem_2, shmem_1, Val(D), Val(nthreads), N, Val(:small))
     intermediate_layout_write!(
-        Ps_out, shmem_2, Val(D), Val(nthreads), N, Val(:small), Val(mode), Val(:lower),
+        Ps_out, shmem_2, Val(D), Val(nthreads), N, Val(:small), Val(mode)#, Val(:lower),
     )
 
     return nothing
