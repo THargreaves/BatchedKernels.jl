@@ -5,6 +5,7 @@ include("../plot_benchmarks.jl")
 include("cpu_mt.jl")
 include("ours.jl")
 include("gpu_mem_bound.jl")
+include("jax_vmap.jl")
 
 function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, String}, T::Type)
     results =  Dict{String, Vector{Float64}}()
@@ -88,6 +89,7 @@ methods = Dict{Val, String}(
     Val(:ours) => "Ours",
     Val(:gpu_mem_bound) => "SOL",
     Val(:magma_non_strided) => "MAGMA (non-strided)",
+    Val(:jax_vmap) => "JAX (vmap)",
 )
 
 generate_plots(2, 14, methods, Float32)

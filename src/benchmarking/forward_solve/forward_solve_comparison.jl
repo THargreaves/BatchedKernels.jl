@@ -69,7 +69,7 @@ end
 methods = Dict{Val, String}(
     Val(:cpu_mt) => "CPU (multithreaded)",
     Val(:ours) => "Ours",
-    Val(:magma_non_strided) => "MAGMA (non-strided, INV)",
+    Val(:magma_non_strided) => "MAGMA (non-strided)",
     Val(:gpu_mem_bound) => "SOL",
     Val(:cublas_non_strided) => "cuBLAS (non-strided)",
 )
