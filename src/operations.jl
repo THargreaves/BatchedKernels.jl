@@ -79,7 +79,7 @@ end
     i = mod1(mat_elem_idx, D)
 
     tot = zero(T)
-    @inbounds for k in 1i32:D
+    @inbounds for k in (1i32):D
         tot += A[i, k] * B[k, d]
     end
 
@@ -108,7 +108,7 @@ end
     i = mod1(lid, lanes_per_slot)
 
     tot = zero(T)
-    @inbounds for k in 1i32:D
+    @inbounds for k in (1i32):D
         tot += A[i, k] * B[k, d]
     end
 
@@ -300,6 +300,80 @@ end
     for i in (1i32):D
         B[d, i] = A[i, d]
     end
+
+    return nothing
+end
+
+###########################
+#### VECTOR OPERATIONS ####
+###########################
+
+@inline function batch_op!(
+    ::typeof(*),
+    y::AbstractVector{T},
+    A::AbstractMatrix{T},
+    x::AbstractVector{T},
+    d::Int32,
+    ::Val{D},
+) where {T,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D
+
+    if lid > active_lanes
+        return nothing
+    end
+
+    tot = zero(T)
+    for k in (1i32):D
+        tot += A[d, k] * x[k]
+    end
+    y[d] = tot
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(+),
+    z::AbstractVector{T},
+    x::AbstractVector{T},
+    y::AbstractVector{T},
+    d::Int32,
+    ::Val{D},
+) where {T,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D
+
+    if lid > active_lanes
+        return nothing
+    end
+
+    z[d] = x[d] + y[d]
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(-),
+    z::AbstractVector{T},
+    x::AbstractVector{T},
+    y::AbstractVector{T},
+    d::Int32,
+    ::Val{D},
+) where {T,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D
+
+    if lid > active_lanes
+        return nothing
+    end
+
+    z[d] = x[d] - y[d]
 
     return nothing
 end
