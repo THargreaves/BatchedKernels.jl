@@ -1,11 +1,11 @@
 import Base: @propagate_inbounds
 import LinearAlgebra: AdjOrTransAbsMat, wrapperop
 
-export i_minus
-export DualAccessMatrix, SingleAccessMatrix, SharedMatrix, IMinusSetterMatrix
+export DualAccessMatrix, SingleAccessMatrix, SharedMatrix, IMinusSetterMatrix, SharedVector, BatchedVector
 export intermediate_layout_load!, intermediate_layout_write!
 export interm_to_dual_transfer!, dual_to_interm_transfer!
-export shared_matrix_load!
+export shared_matrix_load!, shared_vector_load!
+export vector_load!, vector_write!
 
 """
 Abstraction of shared memory layout for a matrix accessible both column and row-wise.
@@ -111,11 +111,8 @@ Base.@propagate_inbounds @inline function Base.setindex!(
 end
 
 # Wrappers to handle Int32 case
-@propagate_inbounds Base.getindex(A::AdjOrTransAbsMat{T}, i::Int32, j::Int32) where {T} = wrapperop(
-    A
-)(
-    A.parent[j, i]
-)::T
+@propagate_inbounds Base.getindex(A::AdjOrTransAbsMat{T}, i::Int32, j::Int32) where {T} =
+    wrapperop(A)(A.parent[j, i])::T
 
 # Support regular Int indexing (needed for Adjoint and other wrappers)
 @propagate_inbounds @inline function Base.getindex(
@@ -133,6 +130,109 @@ end
 @inline Base.size(::DualAccessMatrix{T,D,V}) where {T,D,V} = (D, D)
 @inline Base.length(::DualAccessMatrix{T,D,V}) where {T,D,V} = D * D
 @inline Base.IndexStyle(::Type{<:DualAccessMatrix}) = IndexCartesian()
+
+########################
+#### BATCHED VECTOR ####
+########################
+
+"""
+Abstraction of shared memory layout for a vector in a batch.
+Vectors are stored contiguously without padding.
+"""
+struct BatchedVector{T,D} <: AbstractVector{T}
+    shmem::CuDeviceVector{T,CUDA.AS.Shared}
+    offset::Int32
+end
+
+function BatchedVector(
+    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, warp_vector_id::Int32
+) where {T,D}
+    tid = threadIdx().x
+    wid = div(tid - 1i32, 32i32) + 1i32
+
+    n_vecs_per_warp = 32i32 ÷ D
+    offset = ((wid - 1i32) * n_vecs_per_warp + (warp_vector_id - 1i32)) * D
+
+    return BatchedVector{T,D}(shmem, offset)
+end
+
+Base.@propagate_inbounds @inline function Base.getindex(
+    v::BatchedVector{T,D}, i::Int32
+) where {T,D}
+    return v.shmem[v.offset + i]
+end
+
+Base.@propagate_inbounds @inline function Base.setindex!(
+    v::BatchedVector{T,D}, val::T, i::Int32
+) where {T,D}
+    return v.shmem[v.offset + i] = val
+end
+
+@inline Base.size(::BatchedVector{T,D}) where {T,D} = (D,)
+@inline Base.length(::BatchedVector{T,D}) where {T,D} = D
+@inline Base.IndexStyle(::Type{<:BatchedVector}) = IndexLinear()
+
+@inline function vector_load!(
+    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32
+) where {D,nthreads}
+    n_vecs_per_warp = 32i32 ÷ D
+    n_warps = nthreads ÷ 32i32
+    n_vecs_per_block = n_warps * n_vecs_per_warp
+
+    tid = threadIdx().x
+    bid = blockIdx().x
+    wid = div(tid - 1i32, 32i32) + 1i32
+    lid = mod1(tid, 32i32)
+
+    global_offset = (bid - 1i32) * n_vecs_per_block * D
+    shmem_offset = (wid - 1i32) * n_vecs_per_warp * D
+
+    if lid <= n_vecs_per_warp * D
+        raw_idx = shmem_offset + lid
+        raw_vec = div(raw_idx - 1i32, D) + 1i32
+        grid_vec_load = raw_vec + (bid - 1i32) * n_vecs_per_block
+
+        if grid_vec_load <= N
+            dest_idx = raw_idx
+            src_idx = global_offset + raw_idx
+
+            shmem[dest_idx] = global_arr[src_idx]
+        end
+    end
+
+    return nothing
+end
+
+@inline function vector_write!(
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32
+) where {D,nthreads}
+    n_vecs_per_warp = 32i32 ÷ D
+    n_warps = nthreads ÷ 32i32
+    n_vecs_per_block = n_warps * n_vecs_per_warp
+
+    tid = threadIdx().x
+    bid = blockIdx().x
+    wid = div(tid - 1i32, 32i32) + 1i32
+    lid = mod1(tid, 32i32)
+
+    global_offset = (bid - 1i32) * n_vecs_per_block * D
+    shmem_offset = (wid - 1i32) * n_vecs_per_warp * D
+
+    if lid <= n_vecs_per_warp * D
+        raw_idx = shmem_offset + lid
+        raw_vec = div(raw_idx - 1i32, D) + 1i32
+        grid_vec_store = raw_vec + (bid - 1i32) * n_vecs_per_block
+
+        if grid_vec_store <= N
+            src_idx = raw_idx
+            dest_idx = global_offset + raw_idx
+
+            global_arr[dest_idx] = shmem[src_idx]
+        end
+    end
+
+    return nothing
+end
 
 struct SingleAccessMatrix{T,pad_interval} <: AbstractMatrix{T}
     shmem::CuDeviceVector{T,CUDA.AS.Shared}
@@ -298,6 +398,51 @@ by a sync_threads() call.
     return nothing
 end
 
+#######################
+#### SHARED VECTOR ####
+#######################
+
+struct SharedVector{T,D} <: AbstractVector{T}
+    shmem::CuDeviceVector{T,CUDA.AS.Shared}
+end
+
+"""A vector that is shared across batches and backed by shared memory."""
+function SharedVector(shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}) where {T,D}
+    return SharedVector{T,D}(shmem)
+end
+
+@propagate_inbounds @inline function Base.getindex(
+    v::SharedVector{T,D}, i::Int32
+) where {T,D}
+    return v.shmem[i]
+end
+@propagate_inbounds @inline function Base.setindex!(
+    v::SharedVector{T,D}, val::T, i::Int32
+) where {T,D}
+    return v.shmem[i] = val
+end
+
+@inline Base.size(::SharedVector{T,D}) where {T,D} = (D,)
+@inline Base.length(::SharedVector{T,D}) where {T,D} = D
+@inline Base.IndexStyle(::Type{<:SharedVector}) = IndexLinear()
+
+"""
+Load a single vector from global memory into shared memory using a single warp.
+
+Uses of this function (either individually or multiple uses across warps) should be followed
+by a sync_threads() call.
+"""
+@inline function shared_vector_load!(shmem, global_arr, ::Val{D}) where {D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+
+    @inbounds if lid <= D
+        shmem[lid] = global_arr[lid]
+    end
+
+    return nothing
+end
+
 #####################################
 #### EXPLICIT MEMORY SUB-KERNELS ####
 #####################################
@@ -333,9 +478,11 @@ where one warp handles multiple matrices. Meant for small matrices.
             raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32  # How many-th matrix to load: [1, n_mats_per_block]
             grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block  # How many-th global matrix 1 ... N to load
 
-            if raw_mtrx <= n_mats_per_block &&
+            if (
+                raw_mtrx <= n_mats_per_block &&
                 grid_mtrx_load <= N &&
-                raw_idx <= warp_shmem_elem * wid  # div(raw_idx - 1, warp_shmem_elem) != wid
+                raw_idx <= warp_shmem_elem * wid
+            )  # div(raw_idx - 1, warp_shmem_elem) != wid
                 padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
 
                 src_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
