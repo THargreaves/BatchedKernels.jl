@@ -1,10 +1,10 @@
 import Base: @propagate_inbounds
 import LinearAlgebra: AdjOrTransAbsMat, wrapperop
 
-export DualAccessMatrix, SingleAccessMatrix, SharedMatrix, BatchedVector
+export DualAccessMatrix, SingleAccessMatrix, SharedMatrix, SharedVector, BatchedVector
 export intermediate_layout_load!, intermediate_layout_write!
 export interm_to_dual_transfer!, dual_to_interm_transfer!
-export shared_matrix_load!
+export shared_matrix_load!, shared_vector_load!
 export vector_load!, vector_write!
 
 """
@@ -340,6 +340,51 @@ by a sync_threads() call.
 
             offset += 32i32
         end
+    end
+
+    return nothing
+end
+
+#######################
+#### SHARED VECTOR ####
+#######################
+
+struct SharedVector{T,D} <: AbstractVector{T}
+    shmem::CuDeviceVector{T,CUDA.AS.Shared}
+end
+
+"""A vector that is shared across batches and backed by shared memory."""
+function SharedVector(shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}) where {T,D}
+    return SharedVector{T,D}(shmem)
+end
+
+@propagate_inbounds @inline function Base.getindex(
+    v::SharedVector{T,D}, i::Int32
+) where {T,D}
+    return v.shmem[i]
+end
+@propagate_inbounds @inline function Base.setindex!(
+    v::SharedVector{T,D}, val::T, i::Int32
+) where {T,D}
+    return v.shmem[i] = val
+end
+
+@inline Base.size(::SharedVector{T,D}) where {T,D} = (D,)
+@inline Base.length(::SharedVector{T,D}) where {T,D} = D
+@inline Base.IndexStyle(::Type{<:SharedVector}) = IndexLinear()
+
+"""
+Load a single vector from global memory into shared memory using a single warp.
+
+Uses of this function (either individually or multiple uses across warps) should be followed
+by a sync_threads() call.
+"""
+@inline function shared_vector_load!(shmem, global_arr, ::Val{D}) where {D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+
+    @inbounds if lid <= D
+        shmem[lid] = global_arr[lid]
     end
 
     return nothing
