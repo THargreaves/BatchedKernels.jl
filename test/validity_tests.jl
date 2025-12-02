@@ -75,8 +75,204 @@
                     P_cpu[:, :, i], A_elem, Q_elem, H_elem, R_elem
                 )
                 P_new_gpu = P_out_cpu[:, :, i]
-                error = maximum(abs.(LowerTriangular(P_new_ref) - LowerTriangular(P_new_gpu)))
+                error = maximum(abs.(P_new_ref - P_new_gpu))
                 max_error_P = max(max_error_P, error)
+            end
+
+            @test max_error_P < 1e-5
+        end
+    end
+end
+
+@testitem "Kalman predict (small)" begin
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+    using BatchedKernels
+    import StaticArrays: @MVector
+
+    # Test parameters
+    nthreads = 2^8
+    N = 2^20 + 113
+
+    # Test for both independent and consequtive modes
+    modes = (Val(:indep), Val(:conseq))
+
+    function cpu_kalman_predict(P, A, Q, µ, b)
+        P_pred = A * P * A' + Q
+        x = A * µ + b
+
+        return P_pred, x
+    end
+
+    for D in 2:14
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
+
+        # Generate test data
+        A_elem = rand(Float32, D, D) / Float32(D)
+        Q_elem = rand(Float32, D, D) / Float32(D)^2
+        Q_elem = Q_elem * Q_elem' + 0.01f0 * I
+
+        P_cpu = Array{Float32}(undef, D, D, N)
+        for i in 1:N
+            P_i = rand(Float32, D, D) / Float32(D)
+            P_i = P_i * P_i' + 0.1f0 * I
+            P_cpu[:, :, i] = P_i
+        end
+
+        P_in = CuArray(P_cpu)
+
+        A_gpu = CuArray(A_elem)
+        Q_gpu = CuArray(Q_elem)
+
+        µ_cpu = rand(Float32, D, N)
+        b_cpu = rand(Float32, D)
+        µ_gpu = cu(µ_cpu)
+        b_gpu = cu(b_cpu)
+
+        for mode in modes
+            P_out = CuArray{Float32}(undef, D, D, N)
+            x_out = CuArray{Float32}(undef, D, N)
+
+            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_kalman_predict!(
+                P_out,
+                P_in,
+                A_gpu,
+                Q_gpu,
+                µ_gpu,
+                b_gpu,
+                x_out,
+                Val(Int32(D)),
+                Val(Int32(nthreads)),
+                Int32(N),
+                Val(:small),
+                mode,
+            )
+
+            # Validate P_new (complete Kalman filter output)
+            P_out_cpu = Array(P_out)
+            x_out_cpu = Array(x_out)
+            max_error_P = 0.0
+            n_tested = min(10000, N)
+
+            for i in 1:n_tested
+                P_new_ref, x_ref = cpu_kalman_predict(
+                    P_cpu[:, :, i], A_elem, Q_elem, µ_cpu[:, i], b_cpu,
+                )
+                P_new_cpu = P_out_cpu[:, :, i]
+                error_mat = maximum(abs.(P_new_ref - P_new_cpu))
+
+                x_new_cpu = x_out_cpu[:, i]
+                error_vec = maximum(abs.(x_ref - x_new_cpu))
+
+                max_error_P = max(max_error_P, error_mat, error_vec)
+            end
+
+            @test max_error_P < 1e-5
+        end
+    end
+end
+
+@testitem "Kalman update (small)" begin
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+    using BatchedKernels
+    import StaticArrays: @MVector
+
+    # Test parameters
+    nthreads = 2^8
+    N = 2^20 + 113
+
+    # Test for both independent and consequtive modes
+    modes = (Val(:indep), Val(:conseq))
+
+    function cpu_kalman_update(P_pred, H, R, x, z)
+        # Update step
+        S = H * P_pred * H' + R
+        K = P_pred * H' / S
+        P_new = P_pred - K * S * K'
+
+        x_kk = (I - K * H) * x + K * z
+        y = z - H * x_kk
+
+        return P_new, y
+    end
+
+    for D in 2:14
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
+
+        # Generate test data
+        A_elem = rand(Float32, D, D) / Float32(D)
+        Q_elem = rand(Float32, D, D) / Float32(D)^2
+        Q_elem = Q_elem * Q_elem' + 0.01f0 * I
+
+        P_cpu = Array{Float32}(undef, D, D, N)
+        for i in 1:N
+            P_i = rand(Float32, D, D) / Float32(D)
+            P_i = P_i * P_i' + 0.1f0 * I
+            P_cpu[:, :, i] = P_i
+        end
+
+        P_in = CuArray(P_cpu)
+
+        H_elem = rand(Float32, D, D) / Float32(D)
+        R_elem = rand(Float32, D, D) / Float32(D)^2
+        R_elem = R_elem * R_elem' + 0.01f0 * I
+
+        H_gpu = CuArray(H_elem)
+        R_gpu = CuArray(R_elem)
+
+        x_cpu = rand(Float32, D, N)
+        z_cpu = rand(Float32, D, N)
+        x_gpu = cu(x_cpu)
+        z_gpu = cu(z_cpu)
+
+        for mode in modes
+            P_out = CuArray{Float32}(undef, D, D, N)
+            y_out = CuArray{Float32}(undef, D, N)
+
+            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_kalman_update!(
+                P_out,
+                P_in,
+                H_gpu,
+                R_gpu,
+                y_out,
+                x_gpu,
+                z_gpu,
+                Val(Int32(D)),
+                Val(Int32(nthreads)),
+                Int32(N),
+                Val(:small),
+                mode,
+            )
+
+            # Validate P_new (complete Kalman filter output)
+            P_out_cpu = Array(P_out)
+            y_out_cpu = Array(y_out)
+            max_error_P = 0.0
+            n_tested = min(10000, N)
+
+            for i in 1:n_tested
+                P_new_ref, y_ref = cpu_kalman_update(
+                    P_cpu[:, :, i], H_elem, R_elem, x_cpu[:, i], z_cpu[:, i],
+                )
+                P_new_cpu = P_out_cpu[:, :, i]
+                error_mat = maximum(abs.(P_new_ref - P_new_cpu))
+
+                y_new_cpu = y_out_cpu[:, i]
+                error_vec = maximum(abs.(y_ref - y_new_cpu))
+                if any(isnan, P_new_ref)
+                    println("P_new_ref")
+                elseif any(isnan, P_new_cpu)
+                    println("P_new_cpu")
+                elseif any(isnan, y_ref)
+                    println("y_ref")
+                elseif any(isnan, y_new_cpu)
+                    println("y_new_cpu")
+                end
+
+                max_error_P = max(max_error_P, error_mat, error_vec)
             end
 
             @test max_error_P < 1e-5
