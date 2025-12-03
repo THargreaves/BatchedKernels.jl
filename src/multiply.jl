@@ -11,7 +11,7 @@ end
 """
 Matrix multiplication kernel for the case where one warp handles multiple matrices.
 """
-@inline function kernel_matmul!(
+function kernel_matmul!(
     Cs,
     As,
     Bs,
@@ -118,7 +118,7 @@ end
 """
 Matrix multiplication kernel for the case where D^2 threads handle one matrix
 """
-@inline function kernel_matmul!(
+function kernel_matmul!(
     Cs,
     As,
     Bs,

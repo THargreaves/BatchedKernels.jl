@@ -1,6 +1,6 @@
 export kernel_kalman!, kernel_kalman_predict!, kernel_kalman_update!
 
-@inline function kernel_kalman!(
+function kernel_kalman!(
     Ps_out,
     Ps_in,
     A_global,
