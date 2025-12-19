@@ -1,6 +1,7 @@
 using BatchedKernels
 using BenchmarkTools
 using CUDA
+using CUDA: i32
 
 @inline function kernel_kalman!(
     Ps_out,
