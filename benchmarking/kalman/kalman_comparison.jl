@@ -2,11 +2,13 @@ using Magma
 using JLD2
 
 include("../plot_benchmarks.jl")
+include("../generate_tables.jl")
 include("cpu_mt.jl")
 include("ours.jl")
 include("gpu_mem_bound.jl")
 include("jax_vmap.jl")
 include("magma_non_strided.jl")
+include("ours_vmap.jl")
 
 function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, String}, T::Type)
     results =  Dict{String, Vector{Float64}}()
@@ -36,6 +38,7 @@ function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, Strin
                 cache_dir,
                 "kalman_$(string(T))_$(method_sanitised)_D_$(D).jld2",
             )
+            # println(cache_file)
             if isfile(cache_file)
                 @load cache_file time
                 # println("  Using cached result for $label, D = $D: $time s")
@@ -50,7 +53,7 @@ function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, Strin
                     P_in[:, :, i] = P_i
                 end
 
-                A = rand(T, D, D)
+                A = rand(T, D, D) / Float32(D)
 
                 Q_elem = rand(Float32, D, D) / Float32(D)^2
                 Q = Q_elem * Q_elem' + 0.01f0 * I
@@ -74,6 +77,7 @@ function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, Strin
     Magma.LibMagma.magma_finalize()
 
     plot_benchmarks(results, D_min, D_max, "Kalman", "kalman")
+    write_results_csv(results, D_min, D_max, "kalman")
 end
 
 methods = Dict{Val, String}(
@@ -82,6 +86,7 @@ methods = Dict{Val, String}(
     Val(:gpu_mem_bound) => "SOL",
     Val(:magma_non_strided) => "MAGMA (non-strided)",
     Val(:jax_vmap) => "JAX (vmap)",
+    Val(:ours_vmap) => "Ours (vmap)",
 )
 
 generate_plots(2, 14, methods, Float32)

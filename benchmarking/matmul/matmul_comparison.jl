@@ -2,6 +2,7 @@ using Magma
 using JLD2
 
 include("../plot_benchmarks.jl")
+include("../generate_tables.jl")
 include("cpu_mt.jl")
 include("ours.jl")
 include("magma_strided.jl")
@@ -9,6 +10,8 @@ include("magma_non_strided.jl")
 include("gpu_mem_bound.jl")
 include("cublas_strided.jl")
 include("cublas_non_strided.jl")
+include("jax_vmap.jl")
+include("ours_vmap.jl")
 
 function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, String}, T::Type)
     results =  Dict{String, Vector{Float64}}()
@@ -63,6 +66,7 @@ function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, Strin
     Magma.LibMagma.magma_finalize()
 
     plot_benchmarks(results, D_min, D_max, "Matmul", "matmul")
+    write_results_csv(results, D_min, D_max, "matmul")
 end
 
 methods = Dict{Val, String}(
@@ -72,6 +76,8 @@ methods = Dict{Val, String}(
     Val(:magma_non_strided) => "MAGMA (non-strided)",
     Val(:gpu_mem_bound) => "SOL",
     Val(:cublas_strided) => "cuBLAS (strided)",
+    Val(:jax_vmap) => "JAX (vmap)",
+    Val(:ours_vmap) => "Ours (vmap)",
 )
 
 generate_plots(2, 15, methods, Float32)

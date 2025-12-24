@@ -12,7 +12,7 @@ using LinearAlgebra
     ::Val{D},
     ::Val{:small},
 ) where {T,D}
-    for i in (1i32):D
+    @inbounds for i in (1i32):D
         C[i, d] = A[i, d] + B[i, d]
     end
 
@@ -31,7 +31,7 @@ end
     i = mod1(mat_elem_idx, D)
     j = (mat_elem_idx - 1i32) ÷ D + 1i32
 
-    C[i, j] = A[i, j] + B[i, j]
+    @inbounds C[i, j] = A[i, j] + B[i, j]
 
     return nothing
 end
@@ -45,7 +45,7 @@ end
     ::Val{D},
     ::Val{:small},
 ) where {T,D}
-    for i in (1i32):D
+    @inbounds for i in (1i32):D
         C[i, d] = A[i, d] - B[i, d]
     end
 
@@ -64,7 +64,7 @@ end
     i = mod1(mat_elem_idx, D)
     j = (mat_elem_idx - 1i32) ÷ D + 1i32
 
-    C[i, j] = A[i, j] - B[i, j]
+    @inbounds C[i, j] = A[i, j] - B[i, j]
 
     return nothing
 end
@@ -180,7 +180,7 @@ end
         mask = ((1 << (D - (i - 1))) - 1) << (i - 1)
         mask = mask << ((warp_matrix_id - 1) * D)
 
-        if j >= i
+        @inbounds if j >= i
             # Load element from column j, row i
             Ai = A[i, j]
 
@@ -236,7 +236,7 @@ end
         mask = ((1 << (D - (i - 1))) - 1) << (i - 1)
         mask = mask << ((warp_matrix_id - 1) * D)
 
-        if j >= i
+        @inbounds if j >= i
             Ai = A[i, j]
 
             # RMOD STEP
@@ -276,7 +276,7 @@ end
     x = @MVector zeros(T, Int64(D))
 
     # Backward substitution from bottom to top
-    for i in D:(-1i32):(1i32)
+    @inbounds for i in D:(-1i32):(1i32)
         x[i] = A[i, d]
 
         # Subtract contributions from already-computed elements
@@ -289,7 +289,7 @@ end
     end
 
     # Write result back to C
-    for i in (1i32):D
+    @inbounds for i in (1i32):D
         C[i, d] = x[i]
     end
 
@@ -322,7 +322,7 @@ end
     y = @MVector zeros(T, Int64(D))
 
     # Forward substitution from top to bottom
-    for i in (1i32):D
+    @inbounds for i in (1i32):D
         y[i] = A[i, d]
 
         # Subtract contributions from already-computed elements
@@ -335,7 +335,7 @@ end
     end
 
     # Write result back to C
-    for i in (1i32):D
+    @inbounds for i in (1i32):D
         C[i, d] = y[i]
     end
 
@@ -354,7 +354,6 @@ end
     return batch_op!(\, A, L, A, d, Val(D), Val(:small))
 end
 
-# Transpose: B = transpose(A)
 @inline function batch_op!(
     ::typeof(transpose),
     B::AbstractMatrix{T},
@@ -363,9 +362,17 @@ end
     ::Val{D},
     ::Val{:small},
 ) where {T,D}
-    # Each thread reads column d of A and writes it as row d of B
-    for i in (1i32):D
-        B[d, i] = A[i, d]
+    if A === B
+        # Each thread reads column d of A and writes it as row d of B
+        @inbounds for i in (d + 1i32):D
+            tmp = A[d, i]
+            A[d, i] = A[i, d]
+            A[i, d] = tmp
+        end
+    else
+        @inbounds for i in (1i32):D
+            B[d, i] = A[i, d]
+        end
     end
 
     return nothing
@@ -382,6 +389,7 @@ end
     x::AbstractVector{T},
     d::Int32,
     ::Val{D},
+    ::Val{:small},
 ) where {T,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -393,10 +401,11 @@ end
     end
 
     tot = zero(T)
-    for k in (1i32):D
+    @inbounds for k in (1i32):D
         tot += A[d, k] * x[k]
     end
-    y[d] = tot
+    
+    @inbounds y[d] = tot
 
     return nothing
 end
@@ -408,6 +417,7 @@ end
     y::AbstractVector{T},
     d::Int32,
     ::Val{D},
+    ::Val{:small},
 ) where {T,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -418,7 +428,7 @@ end
         return nothing
     end
 
-    z[d] = x[d] + y[d]
+    @inbounds z[d] = x[d] + y[d]
 
     return nothing
 end
@@ -430,6 +440,7 @@ end
     y::AbstractVector{T},
     d::Int32,
     ::Val{D},
+    ::Val{:small},
 ) where {T,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -440,7 +451,7 @@ end
         return nothing
     end
 
-    z[d] = x[d] - y[d]
+    @inbounds z[d] = x[d] - y[d]
 
     return nothing
 end

@@ -1,7 +1,7 @@
 import Base: @propagate_inbounds
 import LinearAlgebra: AdjOrTransAbsMat, wrapperop
 
-export DualAccessMatrix, SingleAccessMatrix, SharedMatrix, IMinusSetterMatrix, SharedVector, BatchedVector
+export DualAccessMatrix, SingleAccessMatrix, SharedMatrix, IAddSubSetterMatrix, IAddSubGetterMatrix, SharedVector, BatchedVector
 export intermediate_layout_load!, intermediate_layout_write!
 export interm_to_dual_transfer!, dual_to_interm_transfer!
 export shared_matrix_load!, shared_vector_load!
@@ -354,14 +354,28 @@ end
 """
 Wrapper op for I - A
 """
-struct IMinusSetterMatrix{T,D,V} <: DualAccessMatrixWrapper{T,D,V}
+struct IAddSubGetterMatrix{T,D,V} <: DualAccessMatrixWrapper{T,D,V}
     parent::DualAccessMatrix{T,D,V}
+    a::T
+    b::T
+end
+
+Base.@propagate_inbounds @inline function wrapper_get(
+    A::IAddSubGetterMatrix{T,D,V}, v::T, i::Int32, j::Int32,
+) where {T,D,V}
+    return (i == j) * one(T) * A.a + A.b * v
+end
+
+struct IAddSubSetterMatrix{T,D,V} <: DualAccessMatrixWrapper{T,D,V}
+    parent::DualAccessMatrix{T,D,V}
+    a::T
+    b::T
 end
 
 Base.@propagate_inbounds @inline function wrapper_set(
-    A::IMinusSetterMatrix{T,D,V}, v::T, i::Int32, j::Int32,
+    A::IAddSubSetterMatrix{T,D,V}, v::T, i::Int32, j::Int32,
 ) where {T,D,V}
-    return (i == j) * one(T) - v
+    return (i == j) * one(T) * A.a + A.b * v
 end
 
 

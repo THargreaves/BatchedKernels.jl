@@ -67,7 +67,7 @@ function matmul_timing(C_cpu, A_cpu, B_cpu, _, ::Val{:ours})
     nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
     bench_results = @benchmark begin
-        CUDA.@sync @cuda threads = $nthreads blocks = $nblocks kernel_matmul!(
+        CUDA.@sync @cuda threads = $nthreads blocks = $nblocks $kernel_matmul!(
             $C, $A, $B, Val(Int32($D)), Val(Int32($nthreads)), Int32($N), $Val(:small), $Val(:indep),
         )
     end

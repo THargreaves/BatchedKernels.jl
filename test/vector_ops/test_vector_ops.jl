@@ -33,8 +33,10 @@
         y = BatchedVector(shmem_2, Val(D), warp_vector_id)
         z = BatchedVector(shmem_3, Val(D), warp_vector_id)
 
-        # Perform operation
-        batch_op!(+, z, x, y, d, Val(D))
+        if warp_vector_id <= n_vecs_per_warp
+            # Perform operation
+            batch_op!(+, z, x, y, d, Val(D), Val(:small))
+        end
 
         # Store z
         vector_write!(zs, shmem_3, Val(D), Val(nthreads), N)
@@ -99,9 +101,11 @@ end
         y = BatchedVector(shmem_2, Val(D), warp_vector_id)
         z = BatchedVector(shmem_3, Val(D), warp_vector_id)
 
-        # Perform operation
-        batch_op!(-, z, x, y, d, Val(D))
-
+        if warp_vector_id <= n_vecs_per_warp
+            # Perform operation
+            batch_op!(-, z, x, y, d, Val(D), Val(:small))
+        end
+        
         # Store z
         vector_write!(zs, shmem_3, Val(D), Val(nthreads), N)
 
@@ -175,9 +179,9 @@ end
 
             # Perform operation: y = A * x or y = A' * x
             if A_adj
-                batch_op!(*, y, A', x, d, Val(D))
+                batch_op!(*, y, A', x, d, Val(D), Val(:small))
             else
-                batch_op!(*, y, A, x, d, Val(D))
+                batch_op!(*, y, A, x, d, Val(D), Val(:small))
             end
         end
 

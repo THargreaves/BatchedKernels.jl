@@ -140,7 +140,7 @@
         # Use P_new = (I - K*H) * P_pred form of update
 
         # Transpose K' in B2 to get K = P_pred * H' / S
-        batch_op!(*, IMinusSetterMatrix(B2), B1', H, d, Val(D), Val(:small))
+        batch_op!(*, IAddSubSetterMatrix(B2, 1.0f0, -1.0f0), B1', H, d, Val(D), Val(:small))
         # B2 now contains (I - K*H)
 
         # (I - K * H) * x → v3
@@ -375,7 +375,7 @@ end
 
         # Use P_new = (I - K*H) * P_pred form of update
         # Transpose K' in B2 to get K = P_pred * H' / S
-        batch_op!(*, IMinusSetterMatrix(B2), B1', H, d, Val(D), Val(:small))
+        batch_op!(*, IAddSubSetterMatrix(B2, 1.0f0, -1.0f0), B1', H, d, Val(D), Val(:small))
         # B2 now contains (I - K*H)
 
         # (I - K * H) * x → v3

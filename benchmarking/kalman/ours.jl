@@ -114,7 +114,7 @@ using CUDA: i32
         # Use P_new = (I - K*H) * P_pred form of update
 
         # Transpose K' in B2 to get K = P_pred * H' / S
-        batch_op!(*, IMinusSetterMatrix(B2), B1', H, d, Val(D), Val(:small))
+        batch_op!(*, IAddSubSetterMatrix(B2, 1.0f0, -1.0f0), B1', H, d, Val(D), Val(:small))
         batch_op!(*, B1, B2, B3, d, Val(D), Val(:small))
         # B2 now contains P_new = (I - K*H) * P_pred
     end
