@@ -37,6 +37,23 @@ end
 end
 
 @inline function batch_op!(
+    ::typeof(+),
+    C::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    B::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val{:small},
+) where {T,D1,D2}
+    @inbounds for i in (1i32):D1
+        C[i, d] = A[i, d] + B[i, d]
+    end
+
+    return nothing
+end
+
+@inline function batch_op!(
     ::typeof(-),
     C::AbstractMatrix{T},
     A::AbstractMatrix{T},
@@ -46,6 +63,23 @@ end
     ::Val{:small},
 ) where {T,D}
     @inbounds for i in (1i32):D
+        C[i, d] = A[i, d] - B[i, d]
+    end
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(-),
+    C::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    B::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val{:small},
+) where {T,D1,D2}
+    @inbounds for i in (1i32):D1
         C[i, d] = A[i, d] - B[i, d]
     end
 
@@ -88,6 +122,34 @@ end
     @inbounds for i in (1i32):D
         tot = zero(T)
         for k in (1i32):D
+            tot += A[i, k] * B_col[k]
+        end
+        C[i, d] = tot
+    end
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(*),
+    C::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    B::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val{:small},
+) where {T,D1,D2}
+    # Extract column d of B into registers
+    B_col = @MVector zeros(T, Int64(D2))
+    @inbounds for k in (1i32):D2
+        B_col[k] = B[k, d]
+    end
+
+    # Compute each element of column d of C
+    @inbounds for i in (1i32):D1
+        tot = zero(T)
+        for k in (1i32):D2
             tot += A[i, k] * B_col[k]
         end
         C[i, d] = tot
@@ -371,6 +433,40 @@ end
         end
     else
         @inbounds for i in (1i32):D
+            B[d, i] = A[i, d]
+        end
+    end
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(transpose),
+    B::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    d::Int32, 
+    ::Val{D1},
+    ::Val{D2},
+    ::Val{:small},
+) where {T,D1,D2}
+    if A === B
+        @inbounds for i in (d + 1i32):min(D1, D2)
+            tmp = A[d, i]
+            A[d, i] = A[i, d]
+            A[i, d] = tmp
+        end
+
+        if D1 < D2
+            @inbounds for i in (D1 + 1i32):D2
+                A[i, d] = A[d, i]
+            end
+        elseif D1 > D2
+            @inbounds for i in (D2 + 1i32):D1
+                A[d, i] = A[i, d]
+            end
+        end
+    else
+        @inbounds for i in (1i32):D1
             B[d, i] = A[i, d]
         end
     end

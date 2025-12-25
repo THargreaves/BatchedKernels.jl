@@ -103,10 +103,6 @@
                 error_vec = maximum(abs.(µ_new_ref - µ_new_cpu))
 
                 max_error_P = max(max_error_P, error_mat, error_vec)
-
-                # P_new_gpu = P_out_cpu[:, :, i]
-                # error = maximum(abs.(P_new_ref - P_new_gpu))
-                # max_error_P = max(max_error_P, error)
             end
 
             @test max_error_P < 1e-5

@@ -4,7 +4,7 @@
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
     n_mats_per_block = n_warps * n_mats_per_warp
-    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+    dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
     tid = threadIdx().x
     bid = blockIdx().x
@@ -13,7 +13,8 @@
     d = mod1(lid, D)
     grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
 
-    shmem_elems = (n_mats_per_warp * D + padding) * D * n_warps
+    warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
+    shmem_elems = warp_shmem_size * n_warps
     shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
     shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
     shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
@@ -50,7 +51,7 @@ end
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
     n_mats_per_block = n_warps * n_mats_per_warp
-    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+    dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
     tid = threadIdx().x
     bid = blockIdx().x
@@ -59,7 +60,8 @@ end
     d = mod1(lid, D)
     grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
 
-    shmem_elems = (n_mats_per_warp * D + padding) * D * n_warps
+    warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
+    shmem_elems = warp_shmem_size * n_warps
     shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
     shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
     shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))

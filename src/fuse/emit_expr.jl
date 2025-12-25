@@ -289,13 +289,14 @@ function emit_kernel_expr(
     push!(stmts, :(n_mats_per_warp = 32i32 ÷ D_i32))
     push!(stmts, :(n_warps = nthreads_i32 ÷ 32i32))
     push!(stmts, :(n_mats_per_block = n_warps * n_mats_per_warp))
-    push!(stmts, :(padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D_i32, 32i32), 32i32)))
+    push!(stmts, :(dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D_i32, 32i32), 32i32)))
 
     # Calculating matrix shared memory size
     push!(stmts, :(warp_matrix_id = div(lid - 1i32, D_i32) + 1i32))
     push!(stmts, :(d = mod1(lid, D_i32)))
     push!(stmts, :(grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block))
-    push!(stmts, :(mat_shmem_elems = (n_mats_per_warp * D_i32 + padding) * D_i32 * n_warps))
+    push!(stmts, :(warp_shmem_size = n_mats_per_warp * D_i32 * D_i32 + dual_padding * (D_i32 - 1i32)))
+    push!(stmts, :(mat_shmem_elems = warp_shmem_size * n_warps))
 
     # Calculating shared matrix memory size
     push!(stmts, :(pad_interval = div(32i32, D_i32 & -D_i32) * D_i32))
