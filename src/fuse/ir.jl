@@ -41,10 +41,12 @@ struct ScalarKind <: SymKind end
 abstract type SharedKind <: SymKind end
 struct SharedMatKind <: SharedKind end
 struct SharedVecKind <: SharedKind end
+struct SharedScalarKind <: SharedKind end
 
 # Union types
-const MatLike = Union{MatKind, SharedMatKind}
-const VecLike = Union{VecKind, SharedVecKind}
+const MatLike = Union{MatKind,SharedMatKind}
+const VecLike = Union{VecKind,SharedVecKind}
+const ScalLike = Union{ScalarKind,SharedScalarKind}
 
 #########################
 ### IR PROGRAM STRUCT ###

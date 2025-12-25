@@ -1,5 +1,7 @@
 export vmap
 
+const InType = Union{Val{:batched}, Val{:shared}}
+
 @inline function infer_from_input(x)
     nd = ndims(x)
     T = x isa Number ? typeof(x) : Base.eltype(x)
@@ -58,23 +60,21 @@ function infer_D_N(inputs...)
     return D_inferred::Int, N_inferred::Int, T_inferred::DataType
 end
 
-function get_spec(input, i)
+function get_spec(input, i::Int, in_type::Union{Nothing,Tuple{Vararg{InType}}})
     dims = ndims(input)
-    if dims == 3
-        return Mat(Symbol(:_param, i))
-    elseif dims == 2
-        D1, D2 = size(input)
-        if D1 == D2  # Assume shared matrix
-            return SharedMat(Symbol(:_param, i))
-        else
-            return Vec(Symbol(:_param, i))
-        end
-    elseif dims == 1
-        return SharedVec(Symbol(:_param, i))
-    elseif dims == 0
-        return Scal(Symbol(:_param, i))
+    sym = Symbol(:_param, i)
+    tag = in_type === nothing ? Val(:batched) : in_type[i]
+
+    if tag === Val(:batched)
+        dims == 3 && return Mat(sym)
+        dims == 2 && return Vec(sym)
+        dims == 1 && return Scal(sym)
+        error("Each input must have 1 <= ndims <= 3")
     else
-        error("All inputs must be have 3 dimensions or less")
+        dims <= 2 || error("Non-batched shared input must have ndims <= 2")
+        dims == 2 && return SharedMat(sym)
+        dims == 1 && return SharedVec(sym)
+        return SharedScal(sym)
     end
 end
 
@@ -100,13 +100,24 @@ end
 mutable struct VMap{F}
     f::F
     fid::UInt
+    in_type::Union{Nothing,Tuple{Vararg{InType}}}
     debug::Bool
     cache::Dict{KernelKey, Tuple{UInt64, Tuple}}  # Values are (pid, out_kinds)
 end
 
 "Returns a callable object that launches a fused batched kernel for `f`."
-function vmap(f; debug::Bool = false)
-    return VMap(f, UInt(objectid(f)), debug, Dict{KernelKey,Tuple{UInt64, Tuple}}())
+function vmap(
+    f;
+    in_type::Union{Nothing,Tuple{Vararg{Symbol}}} = nothing,
+    debug::Bool = false,
+)
+    in_type_tags = in_type === nothing ? nothing :
+        Tuple(map(in_type) do in_axis::Symbol
+            in_axis === :batched && return Val(:batched)
+            in_axis === :shared && return Val(:shared)
+            error("in_type must either be nothing or entries must be :batched or :shared")
+        end)
+    return VMap(f, UInt(objectid(f)), in_type_tags, debug, Dict{KernelKey,Tuple{UInt64, Tuple}}())
 end
 
 "Entry point of the vmapped function."
@@ -119,7 +130,7 @@ function (g::VMap)(inputs...; threads::Int = 256)
     nblocks = cld(N, (threads ÷ 32) * (32 ÷ D))
 
     (pid, out_kinds) = get!(g.cache, key) do 
-        specs = ntuple(i -> get_spec(getfield(inputs, i), i), length(inputs))
+        specs = ntuple(i -> get_spec(getfield(inputs, i), i, g.in_type), length(inputs))
         prog = trace(g.f, specs; T=T, D=D, nthreads=threads)
 
         out_kinds = Tuple(prog.kinds[vid] for vid in prog.outputs)

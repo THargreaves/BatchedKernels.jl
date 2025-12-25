@@ -192,11 +192,45 @@ end
         raw_vec = div(raw_idx - 1i32, D) + 1i32
         grid_vec_load = raw_vec + (bid - 1i32) * n_vecs_per_block
 
-        if grid_vec_load <= N
+        @inbounds if grid_vec_load <= N
             dest_idx = raw_idx
             src_idx = global_offset + raw_idx
 
             shmem[dest_idx] = global_arr[src_idx]
+        end
+    end
+
+    return nothing
+end
+
+@inline function vector_load!(
+    shmem, global_arr, ::Val{D1}, ::Val{D}, ::Val{nthreads}, N::Int32
+) where {D1,D,nthreads}
+    n_vecs_per_warp = 32i32 ÷ D
+    n_warps = nthreads ÷ 32i32
+    n_vecs_per_block = n_warps * n_vecs_per_warp
+
+    tid = threadIdx().x
+    bid = blockIdx().x
+    wid = div(tid - 1i32, 32i32) + 1i32
+    lid = mod1(tid, 32i32)
+
+    warp_shmem_elem = n_vecs_per_warp * D1
+
+    global_offset = (bid - 1i32) * n_vecs_per_block * D1
+
+    if lid <= n_vecs_per_warp * D1
+        raw_idx = (wid - 1i32) * warp_shmem_elem + lid
+        vec_idx = mod1(lid, D1)
+
+        raw_vec = div(raw_idx - 1i32, D1) + 1i32
+        grid_vec_load = raw_vec + (bid - 1i32) * n_vecs_per_block
+
+        if grid_vec_load <= N
+            dest_idx = (raw_vec - 1i32) * D + vec_idx
+            src_idx = global_offset + raw_idx
+
+            @inbounds shmem[dest_idx] = global_arr[src_idx]
         end
     end
 
@@ -223,11 +257,45 @@ end
         raw_vec = div(raw_idx - 1i32, D) + 1i32
         grid_vec_store = raw_vec + (bid - 1i32) * n_vecs_per_block
 
-        if grid_vec_store <= N
+        @inbounds if grid_vec_store <= N
             src_idx = raw_idx
             dest_idx = global_offset + raw_idx
 
             global_arr[dest_idx] = shmem[src_idx]
+        end
+    end
+
+    return nothing
+end
+
+@inline function vector_write!(
+    global_arr, shmem, ::Val{D1}, ::Val{D}, ::Val{nthreads}, N::Int32
+) where {D1,D,nthreads}
+    n_vecs_per_warp = 32i32 ÷ D
+    n_warps = nthreads ÷ 32i32
+    n_vecs_per_block = n_warps * n_vecs_per_warp
+
+    tid = threadIdx().x
+    bid = blockIdx().x
+    wid = div(tid - 1i32, 32i32) + 1i32
+    lid = mod1(tid, 32i32)
+
+    warp_shmem_elem = n_vecs_per_warp * D1
+
+    global_offset = (bid - 1i32) * n_vecs_per_block * D1
+
+    if lid <= n_vecs_per_warp * D1
+        raw_idx = (wid - 1i32) * warp_shmem_elem + lid
+        vec_idx = mod1(lid, D1)
+
+        raw_vec = div(raw_idx - 1i32, D1) + 1i32
+        grid_vec_store = raw_vec + (bid - 1i32) * n_vecs_per_block
+
+        if grid_vec_store <= N
+            src_idx = (raw_vec - 1i32) * D + vec_idx
+            dest_idx = global_offset + raw_idx
+
+            @inbounds global_arr[dest_idx] = shmem[src_idx]
         end
     end
 

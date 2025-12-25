@@ -170,16 +170,17 @@ end
         b_gpu = cu(b_cpu)
         z_gpu = cu(z_cpu)
 
-        kalman_vmap = BatchedKernels.vmap(kalman_filter)
+        kalman_vmap = BatchedKernels.vmap(
+            kalman_filter,
+            in_type = (:batched, :shared, :shared, :shared, :shared, :batched, :shared, :batched),
+        )
 
         P_out, µ_out = kalman_vmap(P_in, A_gpu, Q_gpu, H_gpu, R_gpu, µ_gpu, b_gpu, z_gpu)
         P_out_cpu = Array(P_out)
         µ_out_cpu = Array(µ_out)
 
         max_error_P = 0.0
-        for i in 1:N
-            global max_error_P
-            
+        for i in 1:N            
             P_new_ref, µ_new_ref = kalman_filter(
                 P_cpu[:, :, i], A_elem, Q_elem, H_elem, R_elem, µ_cpu[:, i], b_cpu, z_cpu[:, i],
             )

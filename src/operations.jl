@@ -507,6 +507,36 @@ end
 end
 
 @inline function batch_op!(
+    ::typeof(*),
+    y::AbstractVector{T},
+    A::AbstractMatrix{T},
+    x::AbstractVector{T},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val{:small},
+) where {T,D1,D2}
+    D = max(D1, D2)
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D1
+
+    if lid > active_lanes && d > D1
+        return nothing
+    end
+
+    tot = zero(T)
+    @inbounds for k in (1i32):D2
+        tot += A[d, k] * x[k]
+    end
+    
+    @inbounds y[d] = tot
+
+    return nothing
+end
+
+@inline function batch_op!(
     ::typeof(+),
     z::AbstractVector{T},
     x::AbstractVector{T},
