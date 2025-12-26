@@ -520,9 +520,9 @@ end
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
     n_mats_per_warp = 32i32 ÷ D
-    active_lanes = n_mats_per_warp * D1
+    active_lanes = n_mats_per_warp * D
 
-    if lid > active_lanes && d > D1
+    if lid > active_lanes || d > D1
         return nothing
     end
 
@@ -560,6 +560,30 @@ end
 end
 
 @inline function batch_op!(
+    ::typeof(+),
+    z::AbstractVector{T},
+    x::AbstractVector{T},
+    y::AbstractVector{T},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D},
+    ::Val{:small},
+) where {T,D1,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D
+
+    if lid > active_lanes || d > D1
+        return nothing
+    end
+
+    @inbounds z[d] = x[d] + y[d]
+
+    return nothing
+end
+
+@inline function batch_op!(
     ::typeof(-),
     z::AbstractVector{T},
     x::AbstractVector{T},
@@ -574,6 +598,30 @@ end
     active_lanes = n_mats_per_warp * D
 
     if lid > active_lanes
+        return nothing
+    end
+
+    @inbounds z[d] = x[d] - y[d]
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(-),
+    z::AbstractVector{T},
+    x::AbstractVector{T},
+    y::AbstractVector{T},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D},
+    ::Val{:small},
+) where {T,D1,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D
+
+    if lid > active_lanes || d > D1
         return nothing
     end
 

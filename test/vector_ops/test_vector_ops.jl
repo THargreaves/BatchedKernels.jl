@@ -228,6 +228,76 @@ end
     end
 end
 
+@testitem "Vector Addition (non-square)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    # Test parameters
+    nthreads = 2^8
+    N = 2^12 + 113
+
+    @inline function kernel_vec_add!(
+        zs, xs, ys, ::Val{D1}, ::Val{D}, ::Val{nthreads}, N::Int32
+    ) where {D1,D,nthreads}
+        n_vecs_per_warp = 32i32 ÷ D
+        n_warps = nthreads ÷ 32i32
+
+        tid = threadIdx().x
+        lid = mod1(tid, 32i32)
+        warp_vector_id = div(lid - 1i32, D) + 1i32
+        d = mod1(lid, D)
+
+        shmem_elems = D * n_warps * n_vecs_per_warp
+        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
+
+        # Load x and y
+        vector_load!(shmem_1, xs, Val(D1), Val(D), Val(nthreads), N)
+        vector_load!(shmem_2, ys, Val(D1), Val(D), Val(nthreads), N)
+
+        # Create batched vectors
+        x = BatchedVector(shmem_1, Val(D), warp_vector_id)
+        y = BatchedVector(shmem_2, Val(D), warp_vector_id)
+        z = BatchedVector(shmem_3, Val(D), warp_vector_id)
+
+        if warp_vector_id <= n_vecs_per_warp
+            # Perform operation
+            batch_op!(+, z, x, y, d, Val(D1), Val(D), Val(:small))
+        end
+
+        # Store z
+        vector_write!(zs, shmem_3, Val(D1), Val(D), Val(nthreads), N)
+
+        return nothing
+    end
+
+    for D1 in 2:16
+        for D in D1:16
+            nblocks = cld(N, nthreads//32 * (32 ÷ D))
+            CUDA.seed!(1234)
+
+            xs = CUDA.rand(Float32, D1, N)
+            ys = CUDA.rand(Float32, D1, N)
+            zs = CUDA.zeros(Float32, D1, N)
+
+            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_vec_add!(
+                zs, xs, ys, Val(Int32(D1)), Val(Int32(D)), Val(Int32(nthreads)), Int32(N),
+            )
+
+            # CPU comparison
+            xs_cpu = Array(xs)
+            ys_cpu = Array(ys)
+            zs_cpu = xs_cpu .+ ys_cpu
+
+            max_error = maximum(abs.(Array(zs) .- zs_cpu))
+            @test max_error < 1e-5
+        end
+    end
+end
+
 @testitem "Matrix-Vector Multiplication (non-square)" begin
     using BatchedKernels
     using CUDA
