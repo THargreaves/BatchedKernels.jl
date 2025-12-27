@@ -345,7 +345,7 @@ end
 #### SHARED MATRIX ####
 #######################
 
-struct SharedMatrix{T,D,pad_interval} <: AbstractMatrix{T}
+struct SharedMatrix{T,D1,D2,pad_interval} <: AbstractMatrix{T}
     shmem::CuDeviceVector{T,CUDA.AS.Shared}
 end
 
@@ -355,22 +355,28 @@ A matrix that is shared across batches and backed by shared memory.
 Since there is only one matrix, both rows and columns can be accessed in parallel using the
 usual single access padding.
 """
+
 function SharedMatrix(shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}) where {T,D}
     pad_interval = div(32i32, D & -D) * D
-    return SharedMatrix{T,D,pad_interval}(shmem)
+    return SharedMatrix{T,D,D,pad_interval}(shmem)
+end
+function SharedMatrix(shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D1}, ::Val{D2}) where {T,D1,D2}
+    pad_interval = div(32i32, D1 & -D1) * D1
+    return SharedMatrix{T,D1,D2,pad_interval}(shmem)
 end
 
-@propagate_inbounds @inline function Base.getindex(
-    A::SharedMatrix{T,D,pad_interval}, i::Int32, j::Int32
-) where {T,D,pad_interval}
-    raw_idx = (j - 1i32) * D + i
+Base.@propagate_inbounds @inline function Base.getindex(
+    A::SharedMatrix{T,D1,D2,pad_interval}, i::Int32, j::Int32
+) where {T,D1,D2,pad_interval}
+    raw_idx = (j - 1i32) * D1 + i
     padding = (raw_idx - 1i32) ÷ pad_interval
     return A.shmem[raw_idx + padding]
 end
-@propagate_inbounds @inline function Base.setindex!(
-    A::SharedMatrix{T,D,pad_interval}, v::T, i::Int32, j::Int32
-) where {T,D,pad_interval}
-    raw_idx = (j - 1i32) * D + i
+
+Base.@propagate_inbounds @inline function Base.setindex!(
+    A::SharedMatrix{T,D1,D2,pad_interval}, v::T, i::Int32, j::Int32
+) where {T,D1,D2,pad_interval}
+    raw_idx = (j - 1i32) * D1 + i
     padding = (raw_idx - 1i32) ÷ pad_interval
     return A.shmem[raw_idx + padding] = v
 end
@@ -479,6 +485,35 @@ by a sync_threads() call.
 
     return nothing
 end
+
+@inline function shared_matrix_load!(shmem, global_arr, ::Val{D1}, ::Val{D2}) where {D1,D2}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+
+    pad_interval = div(32i32, D1 & -D1) * D1
+    @inbounds begin
+        offset = 0i32
+        while offset < D1 * D2
+            raw_idx = offset + lid
+            if raw_idx <= D1 * D2
+                padded_amount = (raw_idx - 1i32) ÷ pad_interval
+
+                src_idx = raw_idx
+                dest_idx = raw_idx + padded_amount
+
+                shmem[dest_idx] = global_arr[src_idx]
+            end
+
+            offset += 32i32
+        end
+    end
+
+    return nothing
+end
+
+@inline Base.size(::SharedMatrix{T,D1,D2,pad_interval}) where {T,D1,D2,pad_interval} = (D1, D2)
+@inline Base.length(::SharedMatrix{T,D1,D2,pad_interval}) where {T,D1,D2,pad_interval} = D1 * D2
+@inline Base.IndexStyle(::SharedMatrix) = IndexCartesian()
 
 #######################
 #### SHARED VECTOR ####

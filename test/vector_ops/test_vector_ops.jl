@@ -265,7 +265,7 @@ end
 
         if warp_vector_id <= n_vecs_per_warp
             # Perform operation
-            batch_op!(+, z, x, y, d, Val(D1), Val(D), Val(:small))
+            batch_op!(+, z, x, y, d, Val(D1), Val(D), Val(D), Val(:small))
         end
 
         # Store z
@@ -342,7 +342,7 @@ end
             x = BatchedVector(shmem_3, Val(D), warp_matrix_id)
             y = BatchedVector(shmem_4, Val(D), warp_matrix_id)
 
-            batch_op!(*, y, A, x, d, Val(D1), Val(D2), Val(:small))
+            batch_op!(*, y, A, x, d, Val(D1), Val(D2), Val(D), Val(:small))
         end
 
         # Store y
@@ -378,6 +378,122 @@ end
 
             max_error = maximum(abs.(ys_result .- ys_cpu))
             @test max_error < 1e-5
+        end
+    end
+end
+
+@testitem "Matrix-Vector Multiplication (vmap)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    # Test parameters
+    N = 2^12 + 113
+
+    function matvec(A, x, dummy)
+        return A * x
+    end
+
+    for D1 in 2:16
+        for D2 in 2:16
+            Dmax = max(D1, D2)
+            for extra in 0:2
+                D = Dmax + extra
+                dummy = CUDA.zeros(Float32, D, D, N)
+
+                CUDA.seed!(1234)
+
+                As = CUDA.rand(Float32, D1, D2, N)
+                xs = CUDA.rand(Float32, D2, N)
+                As_cpu = Array(As)
+                xs_cpu = Array(xs)
+
+                matvec_vmap = BatchedKernels.vmap(matvec)
+                ys = matvec_vmap(As, xs, dummy)
+                ys_result = Array(ys)
+
+                # CPU comparison
+                ys_cpu = similar(ys_result)
+                for i in 1:N
+                    ys_cpu[:, i] = matvec(As_cpu[:, :, i], xs_cpu[:, i], 0)
+                end
+
+                max_error = maximum(abs.(ys_result .- ys_cpu))
+                @test max_error < 1e-5
+            end
+        end
+    end
+end
+
+@testitem "Matrix-Vector Multiplication (shared, vmap)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    # Test parameters
+    N = 2^12 + 113
+
+    function matvec(A, x, dummy)
+        return A * x
+    end
+
+    for D1 in 2:16
+        for D2 in 2:16
+            Dmax = max(D1, D2)
+            for extra in 0:2
+                D = Dmax + extra
+                dummy = CUDA.zeros(Float32, D, D, N)
+
+                # Make A shared
+                CUDA.seed!(1234)
+
+                A = CUDA.rand(Float32, D1, D2)
+                xs = CUDA.rand(Float32, D2, N)
+                A_cpu = Array(A)
+                xs_cpu = Array(xs)
+
+                matvec_vmap = BatchedKernels.vmap(
+                    matvec,
+                    in_type = (:shared, :batched, :batched)
+                )
+                ys = matvec_vmap(A, xs, dummy)
+                ys_result = Array(ys)
+
+                # CPU comparison
+                ys_cpu = similar(ys_result)
+                for i in 1:N
+                    ys_cpu[:, i] = matvec(A_cpu, xs_cpu[:, i], 0)
+                end
+
+                max_error = maximum(abs.(ys_result .- ys_cpu))
+                @test max_error < 1e-5
+
+                # Make x shared
+                CUDA.seed!(1234)
+
+                As = CUDA.rand(Float32, D1, D2, N)
+                x = CUDA.rand(Float32, D2)
+                As_cpu = Array(As)
+                x_cpu = Array(x)
+
+                matvec_vmap = BatchedKernels.vmap(
+                    matvec,
+                    in_type = (:batched, :shared, :batched)
+                )
+                ys = matvec_vmap(As, x, dummy)
+                ys_result = Array(ys)
+
+                # CPU comparison
+                ys_cpu = similar(ys_result)
+                for i in 1:N
+                    ys_cpu[:, i] = matvec(As_cpu[:, :, i], x_cpu, 0)
+                end
+
+                max_error = maximum(abs.(ys_result .- ys_cpu))
+                @test max_error < 1e-5
+            end
         end
     end
 end

@@ -369,3 +369,135 @@ end
         end
     end
 end
+
+@testitem "Symmetric solve (vmap)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    # Test parameters
+    N = 2^12 + 113
+
+    function solve(A, B, dummy)
+        return B / Symmetric(A)
+    end
+
+    for D1 in 2:13
+        for D2 in 2:13
+            Dmax = max(D1, D2)
+            for extra in 0:2
+                D = Dmax + extra
+                dummy = CUDA.zeros(Float32, D, D, N)
+
+                CUDA.seed!(1234)
+
+                As = CUDA.zeros(Float32, D1, D1, N)
+                for i in 1:N
+                    A_temp = CUDA.rand(Float32, D1, D1)
+                    As[:, :, i] = A_temp * A_temp' + 0.1f0 * I
+                end
+
+                Bs = CUDA.rand(Float32, D2, D1, N)
+
+                As_cpu = Array(As)
+                Bs_cpu = Array(Bs)
+
+                solve_vmap = BatchedKernels.vmap(solve)
+                Cs = solve_vmap(As, Bs, dummy)
+                Cs_result = Array(Cs)
+
+                Cs_cpu = similar(Bs_cpu)
+                for i in 1:N
+                    Cs_cpu[:, :, i] = solve(As_cpu[:, :, i], Bs_cpu[:, :, i], 0)
+                end
+
+                max_error = maximum(abs.(Cs_result .- Cs_cpu))
+
+                @test max_error < 1e-3
+            end
+        end
+    end
+end
+
+@testitem "Symmetric solve (shared, vmap)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    # Test parameters
+    N = 2^12 + 113
+
+    function solve(A, B, dummy)
+        return B / Symmetric(A)
+    end
+
+    for D1 in 2:13
+        for D2 in 2:13
+            Dmax = max(D1, D2)
+            for extra in 0:2
+                D = Dmax + extra
+                dummy = CUDA.zeros(Float32, D, D, N)
+
+                CUDA.seed!(1234)
+
+                # Make A shared
+                A_temp = CUDA.rand(Float32, D1, D1)
+                A = A_temp * A_temp' + 0.1f0 * I
+
+                Bs = CUDA.rand(Float32, D2, D1, N)
+
+                A_cpu = Array(A)
+                Bs_cpu = Array(Bs)
+
+                solve_vmap = BatchedKernels.vmap(
+                    solve,
+                    in_type = (:shared, :batched, :batched)
+                )
+                Cs = solve_vmap(A, Bs, dummy)
+                Cs_result = Array(Cs)
+
+                Cs_cpu = similar(Bs_cpu)
+                for i in 1:N
+                    Cs_cpu[:, :, i] = solve(A_cpu, Bs_cpu[:, :, i], 0)
+                end
+
+                max_error = maximum(abs.(Cs_result .- Cs_cpu))
+
+                @test max_error < 1e-3
+
+
+                # Make B shared
+                CUDA.seed!(1234)
+
+                As = CUDA.zeros(Float32, D1, D1, N)
+                for i in 1:N
+                    A_temp = CUDA.rand(Float32, D1, D1)
+                    As[:, :, i] = A_temp * A_temp' + 0.1f0 * I
+                end
+
+                B = CUDA.rand(Float32, D2, D1)
+
+                As_cpu = Array(As)
+                B_cpu = Array(B)
+
+                solve_vmap = BatchedKernels.vmap(
+                    solve,
+                    in_type = (:batched, :shared, :batched)
+                )
+                Cs = solve_vmap(As, B, dummy)
+                Cs_result = Array(Cs)
+
+                Cs_cpu = zeros(Float32, D2, D1, N)
+                for i in 1:N
+                    Cs_cpu[:, :, i] = solve(As_cpu[:, :, i], B_cpu, 0)
+                end
+
+                max_error = maximum(abs.(Cs_result .- Cs_cpu))
+
+                @test max_error < 1e-3
+            end
+        end
+    end
+end

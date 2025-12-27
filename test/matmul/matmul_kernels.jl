@@ -123,7 +123,7 @@ end
         B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
         C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
 
-        batch_op!(*, C, A, B, d, Val(D1), Val(D2), Val(:small))
+        batch_op!(*, C, A, B, d, Val(D1), Val(D2), Val(D), Val(:small))
     end
 
     # Store C

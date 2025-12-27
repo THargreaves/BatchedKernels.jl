@@ -76,17 +76,17 @@ function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, Strin
     Magma.LibMagma.magma_queue_destroy_internal(queue_ptr[], C_NULL, C_NULL, 0)
     Magma.LibMagma.magma_finalize()
 
-    plot_benchmarks(results, D_min, D_max, "Kalman", "kalman")
+    plot_benchmarks(results, D_min, D_max, "Kalman filter covariance", "kalman")
     write_results_csv(results, D_min, D_max, "kalman")
 end
 
 methods = Dict{Val, String}(
     Val(:cpu_mt) => "CPU (multithreaded)",
-    Val(:ours) => "Ours",
-    Val(:gpu_mem_bound) => "SOL",
-    Val(:magma_non_strided) => "MAGMA (non-strided)",
+    Val(:ours) => "This (raw kernel)",
+    Val(:gpu_mem_bound) => "Memory bound",
+    Val(:magma_non_strided) => "MAGMA",
     Val(:jax_vmap) => "JAX (vmap)",
-    Val(:ours_vmap) => "Ours (vmap)",
+    Val(:ours_vmap) => "This (vmap)",
 )
 
 generate_plots(2, 14, methods, Float32)

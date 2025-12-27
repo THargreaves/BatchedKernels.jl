@@ -30,7 +30,10 @@ function kalman_timing(_, P_in_cpu, A_cpu, Q_cpu, H_cpu, R_cpu, _, ::Val{:ours_v
     H = cu(H_cpu)
     R = cu(R_cpu)
 
-    kalman_cov_vmap = BatchedKernels.vmap(kalman_cov)
+    kalman_cov_vmap = BatchedKernels.vmap(
+        kalman_cov,
+        in_type = (:batched, :shared, :shared, :shared, :shared),
+    )
 
     bench_results = @benchmark begin
         CUDA.@sync $kalman_cov_vmap($P_in, $A, $Q, $H, $R)

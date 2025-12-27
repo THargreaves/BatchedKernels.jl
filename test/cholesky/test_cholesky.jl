@@ -99,3 +99,50 @@ end
         end
     end
 end
+
+@testitem "Cholesky Decomposition (vmap)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    # Test parameters
+    N = 2^12 + 113
+
+    function chol(A, dummy)
+        return cholesky(Symmetric(A))
+    end
+
+    for D1 in 2:15
+        for extra in 0:2
+            D = D1 + extra
+
+            CUDA.seed!(1234)
+
+            # Create symmetric positive definite matrices
+            As = CUDA.zeros(Float32, D1, D1, N)
+            for i in 1:N
+                A_temp = CUDA.rand(Float32, D1, D1)
+                As[:, :, i] = A_temp * A_temp' + 0.1f0 * I
+            end
+            dummy = CUDA.rand(Float32, D, D, N)
+
+            chol_vmap = BatchedKernels.vmap(chol)
+            Us = chol_vmap(As, dummy)
+            Us_result = Array(Us)
+
+            # CPU comparison
+            As_cpu = Array(As)
+            Us_cpu = similar(As_cpu)
+            for i in 1:N
+                Us_cpu[:, :, i] = chol(As_cpu[:, :, i], 0).U
+                Us_result[:, :, i] = UpperTriangular(Us_result[:, :, i])
+            end
+
+            max_error = maximum(abs.(Us_result .- Us_cpu))
+
+            @test all(isfinite, Us_result)
+            @test max_error < 1e-5
+        end
+    end
+end

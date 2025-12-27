@@ -20,6 +20,12 @@ function plot_benchmarks(
 
     y_min, y_max = get_bounds(results)
 
+    xticks = 2 .^ (floor(Int, log2(D_min)):ceil(Int, log2(D_max)))
+    if xticks[end] != D_max
+        xticks = vcat(xticks, D_max)
+    end
+    xtick_labels = string.(Int.(round.(xticks)))
+
     plt = plot(
         xlabel = xlabel,
         ylabel = ylabel,
@@ -27,7 +33,7 @@ function plot_benchmarks(
         legend = :topleft,
         x_scale = :log2,
         y_scale = :log10,
-        xticks=2 .^ (floor(Int, log2(D_min)):ceil(Int, log2(D_max))),
+        xticks=(xticks, xtick_labels),
         yticks=10.0 .^ (floor(Int, log10(y_min)):(ceil(Int, log10(y_max)) + 2)),
     )
 

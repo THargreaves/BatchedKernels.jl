@@ -55,7 +55,7 @@ function compute_last_use(prog::IRProgram)
     return last_use, var_mat_inputs, shared_mat_inputs, var_vec_inputs, shared_vec_inputs
 end
 
-
+"Plans the memory usage of the function."
 function plan_memory_usage(prog::IRProgram)
     last_use, var_mat_inputs, shared_mat_inputs, _, shared_vec_inputs = compute_last_use(prog)
 
@@ -282,19 +282,5 @@ function plan_memory_usage(prog::IRProgram)
     require_extra_slot = var_mat_inputs == length(mat_slots)
     mat_load_slot_id = require_extra_slot ? next_mat_slot : next_mat_slot - 1
 
-    return slots, shared_mat_inputs, mat_slots, shared_vec_inputs, vec_slots, require_extra_slot, mat_load_slot_id
+    return slots, mat_slots, vec_slots, require_extra_slot, mat_load_slot_id
 end
-
-
-# function func(A, v)
-#     return Symmetric(A) * v
-# end
-
-# prog = trace(func, (Mat(:A), SharedVec(:b)); D=2, nthreads=4)
-
-# println(prog)
-# slots, shared_mat_inputs, mat_slots, shared_vec_inputs, vec_slots, require_extra_slot, mat_load_slot_id = plan_memory_usage(prog)
-# println("\nPRINTOUTS:")
-# println(slots)
-# println("shared_vec_inputs=", shared_vec_inputs)
-# println("peak=", length(mat_slots))

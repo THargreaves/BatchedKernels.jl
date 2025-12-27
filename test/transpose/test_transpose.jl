@@ -180,7 +180,7 @@ end
             B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
 
             # Perform out-of-place Cholesky
-            batch_op!(transpose, B, A, d, Val(D1), Val(D2), Val(:small))
+            batch_op!(transpose, B, A, d, Val(D1), Val(D2), Val(D), Val(:small))
         end
 
         # Store result
@@ -253,7 +253,7 @@ end
             A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
 
             # Perform out-of-place Cholesky
-            batch_op!(transpose, A, A, d, Val(D1), Val(D2), Val(:small))
+            batch_op!(transpose, A, A, d, Val(D1), Val(D2), Val(D), Val(:small))
         end
 
         # Store result

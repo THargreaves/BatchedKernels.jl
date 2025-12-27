@@ -133,7 +133,7 @@ end
             C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
 
             # Perform operation
-            batch_op!(-, C, A, B, d, Val(D1), Val(D2), Val(:small))
+            batch_op!(-, C, A, B, d, Val(D1), Val(D2), Val(D), Val(:small))
         end
 
         # Store C
@@ -169,6 +169,113 @@ end
                 println("D1=$D1, D2=$D2")
             end
             @test max_error < 1e-5
+        end
+    end
+end
+
+@testitem "Matrix Subtraction (vmap non-square)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    function sub(A, B)
+        return A - B
+    end
+
+    # Test parameters
+    N = 2^12 + 113
+
+    for D1 in 2:15
+        for D2 in 2:15
+            CUDA.seed!(1234)
+
+            As = CUDA.rand(Float32, D1, D2, N)
+            Bs = CUDA.rand(Float32, D1, D2, N)
+
+            sub_vmap = BatchedKernels.vmap(sub)
+            Cs = sub_vmap(As, Bs)
+
+            # CPU comparison
+            As_cpu = Array(As)
+            Bs_cpu = Array(Bs)
+            Cs_cpu = As_cpu .- Bs_cpu
+
+            max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
+
+            @test max_error < 1e-5
+        end
+    end
+end
+
+@testitem "Shared Matrix Subtraction (vmap non-square)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    function sub(A, B, dummy)
+        return A - B
+    end
+
+    # Test parameters
+    N = 2^12 + 113
+
+    for D1 in 2:15
+        for D2 in 2:15
+            Dmax = max(D1, D2)
+            for D in Dmax:(Dmax + 1)
+                dummy = CUDA.rand(Float32, D, D, N)
+                
+                ### Test 1 ###
+                CUDA.seed!(1234)
+
+                As = CUDA.rand(Float32, D1, D2, N)
+                Bs = CUDA.rand(Float32, D1, D2)
+
+                sub_vmap1 = BatchedKernels.vmap(
+                    sub,
+                    in_type = (:batched, :shared, :batched)
+                )
+                Cs = sub_vmap1(As, Bs, dummy)
+
+                # CPU comparison
+                As_cpu = Array(As)
+                Bs_cpu = Array(Bs)
+                Cs_cpu = similar(As_cpu)
+                for i in 1:N
+                    Cs_cpu[:, :, i] = sub(As_cpu[:, :, i], Bs_cpu, 0)
+                end
+
+                max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
+
+                @test max_error < 1e-5
+
+                ### Test 2 ###
+                CUDA.seed!(1234)
+
+                As = CUDA.rand(Float32, D1, D2)
+                Bs = CUDA.rand(Float32, D1, D2, N)
+
+                sub_vmap2 = BatchedKernels.vmap(
+                    sub,
+                    in_type = (:shared, :batched, :batched)
+                )
+
+                Cs = sub_vmap2(As, Bs, dummy)
+
+                # CPU comparison
+                As_cpu = Array(As)
+                Bs_cpu = Array(Bs)
+                Cs_cpu = similar(Bs_cpu)
+                for i in 1:N
+                    Cs_cpu[:, :, i] = sub(As_cpu, Bs_cpu[:, :, i], 0)
+                end
+
+                max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
+
+                @test max_error < 1e-5
+            end
         end
     end
 end

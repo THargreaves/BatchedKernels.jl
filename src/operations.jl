@@ -44,8 +44,12 @@ end
     d::Int32,
     ::Val{D1},
     ::Val{D2},
+    ::Val,
     ::Val{:small},
 ) where {T,D1,D2}
+    if d > D2
+        return nothing
+    end
     @inbounds for i in (1i32):D1
         C[i, d] = A[i, d] + B[i, d]
     end
@@ -77,8 +81,12 @@ end
     d::Int32,
     ::Val{D1},
     ::Val{D2},
+    ::Val,
     ::Val{:small},
 ) where {T,D1,D2}
+    if d > D2
+        return nothing
+    end
     @inbounds for i in (1i32):D1
         C[i, d] = A[i, d] - B[i, d]
     end
@@ -138,8 +146,12 @@ end
     d::Int32,
     ::Val{D1},
     ::Val{D2},
+    ::Val,
     ::Val{:small},
 ) where {T,D1,D2}
+    if d > D1
+        return nothing
+    end
     # Extract column d of B into registers
     B_col = @MVector zeros(T, Int64(D2))
     @inbounds for k in (1i32):D2
@@ -272,6 +284,68 @@ end
     return nothing
 end
 
+# Out-of-place Cholesky: U = cholesky(A)
+@inline function batch_op!(
+    ::typeof(cholesky),
+    U::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D},
+    n_mats_per_warp::Int32,
+    warp_matrix_id::Int32,
+    ::Val{:small},
+) where {T,D1,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D
+
+    if lid > active_lanes || d > D1
+        return nothing
+    end
+
+    # Compute mask for warp-level synchronization
+    # The mask ensures threads within the same matrix stay synchronized
+    j = d  # column this thread is responsible for
+
+    for i in (1i32):D1
+        # Create mask for threads j >= i within this matrix
+        base = UInt32((warp_matrix_id - 1i32) * D)
+        width = UInt32(D1 - i + 1i32)
+        mask = (UInt32(1) << width) - UInt32(1)
+        mask = mask << (base + UInt32(i - 1i32))
+
+        @inbounds if j >= i
+            # Load element from column j, row i
+            Ai = A[i, j]
+
+            # RMOD STEP: subtract contributions from previous columns
+            for k in (1i32):(i - 1i32)
+                Ak = U[k, j]  # Load from already-computed Cholesky factors
+                # Share the diagonal/column value with other threads
+                Aki = shfl_sync(mask, Ak, i + (warp_matrix_id - 1i32) * D)
+                Ai -= Aki * Ak
+            end
+
+            # RDIV STEP
+            if j == i
+                Ai = sqrt(Ai)
+            end
+            # Share result with other threads
+            Aii = shfl_sync(mask, Ai, i + (warp_matrix_id - 1i32) * D)
+            if j > i
+                Ai = Ai / Aii
+            end
+
+            # Write result
+            U[i, j] = Ai
+        end
+    end
+
+    return nothing
+end
+
 # In-place Cholesky: A = cholesky(A)
 @inline function batch_op!(
     ::typeof(cholesky),
@@ -358,6 +432,46 @@ end
     return nothing
 end
 
+# Out-of-place upper triangular backward solve: C = U \ A
+@inline function batch_op!(
+    ::typeof(\),
+    C::AbstractMatrix{T},
+    U::UpperTriangular{T,<:AbstractMatrix{T}},
+    A::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val,
+    ::Val{:small},
+) where {T,D1,D2}
+    if d > D2
+        return nothing
+    end
+
+    # Store column d in registers
+    x = @MVector zeros(T, Int64(D1))
+
+    # Backward substitution from bottom to top
+    @inbounds for i in D1:(-1i32):(1i32)
+        x[i] = A[i, d]
+
+        # Subtract contributions from already-computed elements
+        for j in (i + 1i32):D1
+            x[i] -= U[i, j] * x[j]
+        end
+
+        # Divide by diagonal element
+        x[i] /= U[i, i]
+    end
+
+    # Write result back to C
+    @inbounds for i in (1i32):D1
+        C[i, d] = x[i]
+    end
+
+    return nothing
+end
+
 # In-place upper triangular backward solve wrapper: A = U \ A
 @inline function batch_op!(
     ::typeof(\),
@@ -398,6 +512,45 @@ end
 
     # Write result back to C
     @inbounds for i in (1i32):D
+        C[i, d] = y[i]
+    end
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(\),
+    C::AbstractMatrix{T},
+    L::LowerTriangular{T,<:AbstractMatrix{T}},
+    A::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val,
+    ::Val{:small},
+) where {T,D1,D2}
+    if d > D2
+        return nothing
+    end
+
+    # Store column d in registers
+    y = @MVector zeros(T, Int64(D1))
+
+    # Forward substitution from top to bottom
+    @inbounds for i in (1i32):D1
+        y[i] = A[i, d]
+
+        # Subtract contributions from already-computed elements
+        for j in (1i32):(i - 1i32)
+            y[i] -= L[i, j] * y[j]
+        end
+
+        # Divide by diagonal element
+        y[i] /= L[i, i]
+    end
+
+    # Write result back to C
+    @inbounds for i in (1i32):D1
         C[i, d] = y[i]
     end
 
@@ -447,9 +600,14 @@ end
     d::Int32, 
     ::Val{D1},
     ::Val{D2},
+    ::Val,
     ::Val{:small},
 ) where {T,D1,D2}
     if A === B
+        if d > max(D1, D2)
+            return nothing
+        end
+
         @inbounds for i in (d + 1i32):min(D1, D2)
             tmp = A[d, i]
             A[d, i] = A[i, d]
@@ -466,6 +624,10 @@ end
             end
         end
     else
+        if d > D2
+            return nothing
+        end
+
         @inbounds for i in (1i32):D1
             B[d, i] = A[i, d]
         end
@@ -514,9 +676,9 @@ end
     d::Int32,
     ::Val{D1},
     ::Val{D2},
+    ::Val{D},
     ::Val{:small},
-) where {T,D1,D2}
-    D = max(D1, D2)
+) where {T,D1,D2,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
     n_mats_per_warp = 32i32 ÷ D
@@ -566,6 +728,7 @@ end
     y::AbstractVector{T},
     d::Int32,
     ::Val{D1},
+    ::Val,
     ::Val{D},
     ::Val{:small},
 ) where {T,D1,D}
@@ -613,6 +776,7 @@ end
     y::AbstractVector{T},
     d::Int32,
     ::Val{D1},
+    ::Val,
     ::Val{D},
     ::Val{:small},
 ) where {T,D1,D}

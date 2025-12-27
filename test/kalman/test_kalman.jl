@@ -15,7 +15,7 @@
     modes = (Val(:indep), Val(:conseq))
 
     function cpu_kalman_cov(P, A, Q, H, R, µ, b, z)
-        # Predict step
+        # Predict  step
         P_pred = A * P * A' + Q
         µ_interm = A * µ + b
 

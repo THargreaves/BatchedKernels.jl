@@ -19,6 +19,22 @@ struct IRNode{T}
 end
 
 
+##################
+### SHAPE TYPE ###
+##################
+
+abstract type Shape end
+struct MatShape <: Shape
+    D1::Int
+    D2::Int
+end
+struct VecShape <: Shape
+    D1::Int
+end
+struct ScalShape <: Shape end
+struct ConstShape <: Shape end
+
+
 #######################
 ### SUPPORTED TYPES ###
 #######################
@@ -36,6 +52,7 @@ struct UpperTrigMatKind <: TrigMatKind end
 struct CholeskyKind <: SymKind end
 struct VecKind <: SymKind end
 struct ScalarKind <: SymKind end
+struct ConstKind <: SymKind end
 
 # Shared (constant) types
 abstract type SharedKind <: SymKind end
@@ -52,13 +69,13 @@ const ScalLike = Union{ScalarKind,SharedScalarKind}
 ### IR PROGRAM STRUCT ###
 #########################
 
-"An IR program: inputs, nodes, outputs."
 mutable struct IRProgram{T}
     inputs::Vector{Pair{Symbol,ValueId}}
     nodes::Vector{IRNode{T}}
     outputs::Vector{ValueId}
     next_id::Int
     kinds::Dict{ValueId,Type{<:SymKind}}
+    shapes::Dict{ValueId,Shape}
     D::Int
     nthreads::Int
 end
@@ -68,12 +85,13 @@ IRProgram(::Type{T}, D::Int, nthreads::Int) where {T} = IRProgram{T}(
     ValueId[],
     1,
     Dict{ValueId,Type{<:SymKind}}(),
+    Dict{ValueId,Shape}(),
     D,
     nthreads,
 )
 Base.eltype(::IRProgram{T}) where {T} = T
 
-"Constant number type helper"
+"Constant number type helper."
 @inline function fix_type(::IRProgram{T}, x) where {T}
     x isa ValueId && return x
     x isa T && return x
@@ -93,35 +111,36 @@ fresh!(p::IRProgram) = (vid = ValueId(p.next_id); p.next_id += 1; vid)
 A symbolic value used during tracing.
 
 - `vid` identifies the value in the IR (SSA id)
-- `kind` the type of the value
 - `prog` the IRProgram that is recorded into
 """
 abstract type AbstractSymVal end
 
 struct SymVal{K<:SymKind,T} <: AbstractSymVal
     vid::ValueId
-    # kind::K
     prog::IRProgram{T}
 end
 Base.getproperty(x::SymVal{K}, s::Symbol) where {K} = s === :kind ? K : getfield(x, s)
-# kind(::SymVal{K}) where {K} = K
 
-function create_symval(vid::ValueId, ::Type{K}, prog::IRProgram{T}) where {K<:SymKind,T}
+function create_symval(vid::ValueId, ::Type{K}, shape::Shape, prog::IRProgram{T}) where {K<:SymKind,T}
     prog.kinds[vid] = K
+    prog.shapes[vid] = shape
     return SymVal{K,T}(vid, prog)
 end
 
 """
-Symbolic value for Cholesky decomposition results, containing the additional attribute `uplo`
+Symbolic value for Cholesky decomposition results, containing the additional attribute uplo.
 """
 struct CholeskyVal{T} <: AbstractSymVal
     vid::ValueId
-    # kind::DenseMatKind
     prog::IRProgram{T}
     uplo::Char
 end
 
-CholeskyVal(vid::ValueId, prog::IRProgram{T}) where {T} = CholeskyVal{T}(vid, prog, 'U')
+function CholeskyVal(vid::ValueId, shape::MatShape, prog::IRProgram{T}) where {T}
+    prog.kinds[vid] = DenseMatKind
+    prog.shapes[vid] = shape
+    return CholeskyVal{T}(vid, prog, 'U')
+end
 
 function Base.getproperty(x::CholeskyVal, s::Symbol)
     s === :U && return UpperTriangular(x)
@@ -141,40 +160,65 @@ Specifications for the input variables, containing information about the type an
 abstract type Spec end
 struct MatSpec <: Spec
     name::Symbol
+    D1::Int
+    D2::Int
 end
 struct VecSpec <: Spec
     name::Symbol
+    D1::Int
 end
 struct ScalarSpec <: Spec
     name::Symbol
 end
+struct SharedScalarSpec <: Spec
+    name::Symbol
+end
 struct SharedMatSpec <: Spec
     name::Symbol
+    D1::Int
+    D2::Int
 end
 struct SharedVecSpec <: Spec
     name::Symbol
+    D1::Int
 end
 
-Mat(name::Symbol) = MatSpec(name)
-Vec(name::Symbol) = VecSpec(name)
+Mat(name::Symbol, D1::Int, D2::Int) = MatSpec(name, D1, D2)
+Vec(name::Symbol, D1::Int) = VecSpec(name, D1)
 Scal(name::Symbol) = ScalarSpec(name)
-SharedMat(name::Symbol) = SharedMatSpec(name)
-SharedVec(name::Symbol) = SharedVecSpec(name)
+SharedScal(name::Symbol) = SharedScalarSpec(name)
+SharedMat(name::Symbol, D1::Int, D2::Int) = SharedMatSpec(name, D1, D2)
+SharedVec(name::Symbol, D1::Int) = SharedVecSpec(name, D1)
 
-"Map betwteen input specs and types."
-spec_kind_map = Dict{Type{<:Spec}, Type{<:SymKind}}(
-    MatSpec => DenseMatKind,
-    SharedMatSpec => SharedMatKind,
-    VecSpec => VecKind,
-    SharedVecSpec => SharedVecKind,
-    ScalarSpec => ScalarKind,
-)
+
+######################
+### INPUT CREATION ###
+######################
+
+@inline function create_symval_wrapper(vid::ValueId, spec::MatSpec, prog::IRProgram)
+    return create_symval(vid, DenseMatKind, MatShape(spec.D1, spec.D2), prog)
+end
+@inline function create_symval_wrapper(vid::ValueId, spec::SharedMatSpec, prog::IRProgram)
+    return create_symval(vid, SharedMatKind, MatShape(spec.D1, spec.D2), prog)
+end
+@inline function create_symval_wrapper(vid::ValueId, spec::VecSpec, prog::IRProgram)
+    return create_symval(vid, VecKind, VecShape(spec.D1), prog)
+end
+@inline function create_symval_wrapper(vid::ValueId, spec::SharedVecSpec, prog::IRProgram)
+    return create_symval(vid, SharedVecKind, VecShape(spec.D1), prog)
+end
+@inline function create_symval_wrapper(vid::ValueId, spec::ScalarSpec, prog::IRProgram)
+    return create_symval(vid, ScalarKind, ScalShape(), prog)
+end
+@inline function create_symval_wrapper(vid::ValueId, spec::SharedScalarSpec, prog::IRProgram)
+    return create_symval(vid, SharedScalarKind, ScalShape(), prog)
+end
 
 function make_input(spec::Spec, prog::IRProgram)
     vid = fresh!(prog)
     push!(prog.inputs, spec.name => vid)
-    # prog.kinds[vid] = spec_kind_map[typeof(spec)]()
-    return create_symval(vid, spec_kind_map[typeof(spec)], prog)
+    
+    return create_symval_wrapper(vid, spec, prog)
 end
 
 
@@ -195,77 +239,113 @@ end
 ### OPERATOR OVERLOADS ###
 ##########################
 
-@inline result_kind_mul(::Type{<:MatLike}, ::Type{<:MatLike}) = DenseMatKind
-@inline result_kind_mul(::Type{<:MatLike}, ::Type{<:VecLike}) = VecKind
-@inline result_kind_mul(::Type{<:VecLike}, ::Type{<:VecLike}) = error("Vec * Vec not yet supported")
-@inline result_kind_mul(::Type{ScalarKind}, ::Type{ScalarKind}) = error("Scalar * Scalar not yet supported")
-@inline result_kind_mul(::Type{ScalarKind}, ::Type{<:MatLike}) = error("Scalar * Mat not yet supported")
-@inline result_kind_mul(::Type{<:MatLike}, ::Type{ScalarKind}) = error("Mat * Scalar not yet supported")
-@inline result_kind_mul(::Type{ScalarKind}, ::Type{<:VecLike}) = error("Scalar * Vec not yet supported")
-@inline result_kind_mul(::Type{<:VecLike}, ::Type{ScalarKind}) = error("Vec * Scalar not yet supported")
-@inline result_kind_mul(::Type{<:SymKind}, ::Type{<:SymKind}) = error("Unknown combination of types to multiply")
+@inline function op_signature(::Val{:mul}, ::Type{<:MatLike}, sx::MatShape, ::Type{<:MatLike}, sy::MatShape)
+    sx.D2 == sy.D1 || error("Matmul shape mismatch: $sx * $sy")
+    return DenseMatKind, MatShape(sx.D1, sy.D2)
+end
+@inline function op_signature(::Val{:mul}, ::Type{<:MatLike}, sx::MatShape, ::Type{<:VecLike}, sy::VecShape)
+    sx.D2 == sy.D1 || error("Matvec multiplication shape mismatch $sx * $sy")
+    return VecKind, VecShape(sx.D1)
+end
+@inline function op_signature(::Val{:mul}, ::Type{<:ScalLike}, ::ScalShape, ::Type{<:ScalLike}, ::ScalShape)
+    error("Scalar * Scalar not yet supported")
+end
+@inline function op_signature(::Val{:mul}, ::Type{<:ScalLike}, ::ScalShape, ::Type{<:MatLike}, sy::MatShape)
+    error("Scalar * Mat not yet supported")
+end
+@inline function op_signature(::Val{:mul}, ::Type{<:ScalLike}, ::ScalShape, ::Type{<:VecLike}, sy::VecShape)
+    error("Scalar * Vec not yet supported")
+end
+@inline function op_signature(::Val{:mul}, ::Type{<:SymKind}, ::Shape, ::Type{<:SymKind}, ::Shape)
+    error("Unknown combination of types to multiply")
+end
 function Base.:*(x::SymVal, y::SymVal)
-    kind = result_kind_mul(x.kind, y.kind)
+    if (x.kind <: MatLike || x.kind <: VecLike) && y.kind <: ScalLike
+        return y * x
+    end
+    kind, shape = op_signature(Val(:mul), x.kind, x.prog.shapes[x.vid], y.kind, x.prog.shapes[y.vid])
     out = emit!(x.prog, :mul, Any[x.vid, y.vid])
-    return create_symval(out, kind, x.prog)
+    return create_symval(out, kind, shape, x.prog)
 end
 
-@inline result_kind_mul_const(::Type{ScalarKind}) = ScalarKind
-@inline result_kind_mul_const(::Type{<:MatLike}) = DenseMatKind
-@inline result_kind_mul_const(::Type{<:VecLike}) = VecKind
-@inline result_kind_mul_const(::Type{<:SymKind}) = error("Unknown combination of types to multiplication by constant")
+@inline function op_signature(::Val{:mul_const}, ::Type{<:ScalLike}, sx::ScalShape, ::Type{ConstKind}, ::ConstShape)
+    return ScalarKind, sx
+end
+@inline function op_signature(::Val{:mul_const}, ::Type{<:MatLike}, sx::MatShape, ::Type{ConstKind}, ::ConstShape)
+    return DenseMatKind, sx
+end
+@inline function op_signature(::Val{:mul_const}, ::Type{<:VecLike}, sx::VecShape, ::Type{ConstKind}, ::ConstShape)
+    return VecKind, sx
+end
 function Base.:*(x::SymVal, y::Number)
-    kind = result_kind_mul_const(x.kind)
+    kind, shape = op_signature(Val(:mul_const), x.kind, x.prog.shapes[x.vid], ConstKind, ConstShape())
     out = emit!(x.prog, :mul_const, Any[x.vid, fix_type(x.prog, y)])
-    return create_symval(out, kind, x.prog)
+    return create_symval(out, kind, shape, x.prog)
 end
 Base.:*(x::Number, y::SymVal) = y * x
 
-function LinearAlgebra.cholesky(x::SymVal)
-    x.kind <: SymMatKind || error("Unknown types for Cholesky. Ensure matrix is marked as Symmetric")
+function LinearAlgebra.cholesky(x::SymVal{SymMatKind,T}) where {T}
     out = emit!(x.prog, :chol, Any[x.vid])
-    x.prog.kinds[out] = DenseMatKind
-    return CholeskyVal(out, x.prog)
+    shape = x.prog.shapes[x.vid]::MatShape
+    return CholeskyVal(out, shape, x.prog)
 end
+LinearAlgebra.cholesky(::SymVal) = error("Unknown types for Cholesky. Ensure matrix is marked as Symmetric")
 
-function LinearAlgebra.Symmetric(x::SymVal)
-    x.kind <: MatLike || error("Symmetric() is only defined for matrices")
+function LinearAlgebra.Symmetric(x::SymVal{<:MatLike})
+    shape = x.prog.shapes[x.vid]
+    shape.D1 == shape.D2 || error("Cannot call Symmetric() on a matrix with shape $shape")
     out = emit!(x.prog, :sym, Any[x.vid])
-    return create_symval(out, SymMatKind, x.prog)
+    return create_symval(out, SymMatKind, shape, x.prog)
 end
+LinearAlgebra.Symmetric(::SymVal) = error("Symmetric() is only defined for matrices")
 
 function LinearAlgebra.LowerTriangular(x::SymVal{<:MatLike})
+    shape = x.prog.shapes[x.vid]
+    shape.D1 == shape.D2 || error("Cannot call LowerTriangular() on a matrix with shape $shape")
     out = emit!(x.prog, :lowertrig, Any[x.vid])
-    return create_symval(out, LowerTrigMatKind, x.prog)
+    return create_symval(out, LowerTrigMatKind, shape, x.prog)
 end
-
 function LinearAlgebra.LowerTriangular(x::CholeskyVal)
     out = emit!(x.prog, :lowertrig, Any[x.vid])
-    return create_symval(out, LowerTrigMatKind, x.prog)
+    return create_symval(out, LowerTrigMatKind, x.prog.shapes[x.vid], x.prog)
 end
+LinearAlgebra.LowerTriangular(::SymVal) = error("LowerTriangular() only defined for matrices")
 
 function LinearAlgebra.UpperTriangular(x::SymVal{<:MatLike})
+    shape = x.prog.shapes[x.vid]
+    shape.D1 == shape.D2 || error("Cannot call UpperTriangular() on a matrix with shape $shape")
     out = emit!(x.prog, :uppertrig, Any[x.vid])
-    return create_symval(out, UpperTrigMatKind, x.prog)
+    return create_symval(out, UpperTrigMatKind, shape, x.prog)
 end
-
 function LinearAlgebra.UpperTriangular(x::CholeskyVal)
     out = emit!(x.prog, :uppertrig, Any[x.vid])
-    return create_symval(out, UpperTrigMatKind, x.prog)
+    return create_symval(out, UpperTrigMatKind, x.prog.shapes[x.vid], x.prog)
 end
+LinearAlgebra.UpperTriangular(::SymVal) = error("UpperTriangular() only defined for matrices")
 
-function Base.:\(x::SymVal, y::SymVal)
-    x.kind <: TrigMatKind && y.kind <: MatLike || error("Unknown combination of types to leftdiv")
-    if x.kind <: LowerTrigMatKind
-        out = emit!(x.prog, :forwardsolve, Any[x.vid, y.vid])
-    else
-        out = emit!(x.prog, :backwardsolve, Any[x.vid, y.vid])
-    end
-    return create_symval(out, DenseMatKind, x.prog)
+function Base.:\(x::SymVal{Kx,T}, y::SymVal{Ky,T}) where {Kx<:TrigMatKind,Ky<:MatLike,T}
+    sx = x.prog.shapes[x.vid]
+    sy = x.prog.shapes[y.vid]
+
+    sx.D1 == sx.D2 || error("Triangular solve requires square L/U, got $sx")
+    sx.D2 == sy.D1 || error("Leftdiv shape mismatch: $sx \\ $sy")
+
+    op = Kx <: LowerTrigMatKind ? :forwardsolve : :backwardsolve
+    out = emit!(x.prog, op, Any[x.vid, y.vid])
+
+    return create_symval(out, DenseMatKind, sy, x.prog)
 end
+function Base.:\(x::SymVal{Kx,T}, y::SymVal{Ky,T}) where {Kx<:TrigMatKind,Ky<:VecLike,T}
+    error("Vector triangular solves not yet supported")
+end
+Base.:\(::SymVal, ::SymVal) = error("Unknown combination of types to leftdiv")
 
-Base.:/(x::SymVal{ScalarKind}, y::SymVal{ScalarKind}) = error("Scalar/Scalar not yet supported")
 function Base.:/(x::SymVal{<:MatLike}, y::SymVal{<:SymMatKind})
+    sx = x.prog.shapes[x.vid]
+    sy = x.prog.shapes[y.vid]
+    sy.D1 == sy.D2 || error("Expected symmetric matrix to be square, got $sy")
+    sx.D2 == sy.D1 || error("Matrix solve type mismatch: $sx / $sy")
+
     chol_res = cholesky(y)
     interm = chol_res.L \ x'
     result = chol_res.U \ interm
@@ -274,60 +354,77 @@ end
 function Base.:/(x::SymVal{<:MatLike}, y::SymVal{<:MatLike})
     error("Solves are not yet supported for non-symmetric matrices")
 end
+Base.:/(x::SymVal{ScalarKind}, y::SymVal{ScalarKind}) = error("Scalar/Scalar not yet supported")
 Base.:/(x::SymVal{<:SymKind}, y::SymVal{<:SymKind}) = error("Unknown combination of types to div")
 
 function LinearAlgebra.adjoint(x::SymVal{<:MatLike})
+    sx = x.prog.shapes[x.vid]
+    shape = MatShape(sx.D2, sx.D1)
     out = emit!(x.prog, :trans, Any[x.vid])
-    return create_symval(out, TransMatKind, x.prog)
+    return create_symval(out, TransMatKind, shape, x.prog)
 end
 function LinearAlgebra.adjoint(x::CholeskyVal)
     out = emit!(x.prog, :trans, Any[x.vid])
-    return create_symval(out, TransMatKind, x.prog)
+    return create_symval(out, TransMatKind, x.prog.shapes[x.vid], x.prog)
 end
 LinearAlgebra.adjoint(x::SymVal{VecKind}) = error("Vec' not yet supported")
 LinearAlgebra.adjoint(x::SymVal{ScalarKind}) = x
 LinearAlgebra.adjoint(x::SymVal{<:SymKind}) = error("Unknown type to adjoint")
 
-@inline result_kind_add_sub(::Type{<:MatLike}, ::Type{<:MatLike}) = DenseMatKind
-@inline result_kind_add_sub(::Type{<:VecLike}, ::Type{<:VecLike}) = VecKind
-@inline result_kind_add_sub(::Type{ScalarKind}, ::Type{ScalarKind}) = error("Scalar+-Scalar not yet supported")
-@inline result_kind_add_sub(::Type{<:SymKind}, ::Type{<:SymKind}) = error("Unknown combination of types to add/sub")
+@inline function op_signature(::Val{:addsub}, ::Type{<:MatLike}, sx::MatShape, ::Type{<:MatLike}, sy::MatShape)
+    sx == sy || error("Shape mismatch for add/sub: $sx +- $sy")
+    return DenseMatKind, sx
+end
+@inline function op_signature(::Val{:addsub}, ::Type{<:VecLike}, sx::VecShape, ::Type{<:VecLike}, sy::VecShape)
+    sx == sy || error("Shape mismatch for add/sub: $sx +- $sy")
+    return VecKind, sx
+end
+@inline function op_signature(::Val{:addsub}, ::Type{<:ScalLike}, sx::ScalShape, ::Type{<:ScalLike}, ::ScalShape)
+    return ScalarKind, sx
+end
+@inline function op_signature(::Val{:addsub}, ::Type{<:SymKind}, ::Shape, ::Type{<:SymKind}, ::Shape)
+    error("Unknown combination of types to add/sub")
+end
 function Base.:+(x::SymVal, y::SymVal)
-    kind = result_kind_add_sub(x.kind, y.kind)
+    sx = x.prog.shapes[x.vid]
+    sy = x.prog.shapes[y.vid]
+    kind, shape = op_signature(Val(:addsub), x.kind, sx, y.kind, sy)
     out = emit!(x.prog, :add, Any[x.vid, y.vid])
-    return create_symval(out, kind, x.prog)
+    return create_symval(out, kind, shape, x.prog)
 end
 
 function Base.:-(x::SymVal, y::SymVal)
-    kind = result_kind_add_sub(x.kind, y.kind)
+    sx = x.prog.shapes[x.vid]
+    sy = x.prog.shapes[y.vid]
+    kind, shape = op_signature(Val(:addsub), x.kind, sx, y.kind, sy)
     out = emit!(x.prog, :sub, Any[x.vid, y.vid])
-    return create_symval(out, kind, x.prog)
+    return create_symval(out, kind, shape, x.prog)
 end
 
-function Base.:+(x::UniformScaling, y::SymVal)
-    y.kind <: MatLike || error("Identity +- variable only supported for matrices")
-    # x.λ == 1.0f0 || error("Non-one coefficients not yet supported")    
+function Base.:+(x::UniformScaling, y::SymVal{<:MatLike})
+    sy = y.prog.shapes[y.vid]
+    sy.D1 == sy.D2 || error("Identity + matrix only supported for square matrices")
     out = emit!(y.prog, :iplus, Any[y.vid, fix_type(y.prog, x.λ)])
-    return create_symval(out, DenseMatKind, y.prog)
+    return create_symval(out, DenseMatKind, sy, y.prog)
 end
-
 Base.:+(x::SymVal, y::UniformScaling) = y + x
+Base.:+(::UniformScaling, y::SymVal) = error("Unknown combination of type to add with identity")
 
-function Base.:-(x::UniformScaling, y::SymVal)
-    y.kind <: MatLike || error("Identity +- variable only supported for matrices")
-    # x.λ == 1.0f0 || error("Non-one coefficients not yet supported")    
+function Base.:-(x::UniformScaling, y::SymVal{<:MatLike})
+    sy = y.prog.shapes[y.vid]
+    sy.D1 == sy.D2 || error("Identity - matrix only supported for square matrices")
     out = emit!(y.prog, :iminus, Any[y.vid, fix_type(y.prog, x.λ)])
-    return create_symval(out, DenseMatKind, y.prog)
+    return create_symval(out, DenseMatKind, sy, y.prog)
 end
-
-Base.:-(x::SymVal, y::UniformScaling) = error("Val - identity not yet supported")  # -y + x
+Base.:-(x::SymVal{<:MatLike}, y::UniformScaling) = (-y) + x
+Base.:-(::UniformScaling, y::SymVal) = error("Unknown combination of type to sub with identity")
 
 Base.:+(x::SymVal) = x
 
 Base.:-(x::SymVal) = fix_type(x.prog, -1) * x
 
 "Normalise return value to Vector{SymVal}."
-function _as_symvals(out)
+function as_symvals(out)
     if out isa AbstractSymVal
         return AbstractSymVal[out]
     elseif out isa Tuple
@@ -346,7 +443,7 @@ end
 ###########################
 
 """
-Trace a function `f` on symbolic inputs specified by `specs`.
+Trace a function f on symbolic inputs specified by specs.
 
 Example:
     prog = trace(func, (Mat(:A), Mat(:B), Mat(:C), Scal(:a), Scal(:b)))
@@ -357,7 +454,7 @@ function trace(f, specs::Tuple; T::Type, D::Int, nthreads::Int)
     syms = map(s -> make_input(s, prog), specs)
 
     out = f(syms...)
-    outs = _as_symvals(out)
+    outs = as_symvals(out)
 
     prog.outputs = [o.vid for o in outs]
     return prog
