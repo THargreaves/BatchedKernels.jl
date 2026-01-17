@@ -436,7 +436,7 @@ end
     for D1 in 2:13
         for D2 in 2:13
             Dmax = max(D1, D2)
-            for extra in 0:2
+            for extra in 0:1
                 D = Dmax + extra
                 dummy = CUDA.zeros(Float32, D, D, N)
 

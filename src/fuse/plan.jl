@@ -5,9 +5,7 @@ function compute_last_use(prog::IRProgram)
     M = length(prog.nodes)
     last_use = Dict{ValueId,Int}()
 
-    var_mat_inputs = 0
     shared_mat_inputs = 0
-    var_vec_inputs = 0
     shared_vec_inputs = 0
 
     # Inputs: initialise last_use and count kinds
@@ -24,13 +22,7 @@ function compute_last_use(prog::IRProgram)
             end
             last_use[vid] = M + 1  # Don't override shared kinds
         else
-            if K <: MatKind
-                var_mat_inputs += 1
-            elseif K <: VecKind
-                var_vec_inputs += 1
-            else
-                error("Only matrix and vector inputs permitted, got $K")
-            end
+            (K <: MatKind || K <: VecKind) || error("Only matrix and vector inputs permitted, got $K")
             last_use[vid] = 0
         end
     end
@@ -49,9 +41,29 @@ function compute_last_use(prog::IRProgram)
         last_use[vid] = M + 1
     end
 
-    return last_use, var_mat_inputs, shared_mat_inputs, var_vec_inputs, shared_vec_inputs
+    return last_use, shared_mat_inputs, shared_vec_inputs
 end
 
+"""
+Tracks the allocation and liveliness of each memory slot during an execution of an `IRProgram`.
+
+- `next_shared_mat_slot::Int`: Next available slot index for shared matrices.
+- `next_mat_slot::Int`: Next available slot index for batched matrices.
+- `next_shared_vec_slot::Int`: Next available slot index for shared vectors.
+- `next_vec_slot:::Int`: Next available slot index for batched vectors.
+- `next_pseudo_mat_slot`: Next available pseudo-slot (non-memory owning warpper variables) for matrices.
+- `free_mat_slots::Vector{String}`: Pool of unused matrix slots.
+- `free_vec_slots::Vector{String}`: Pool of unused vector slots.
+- `slots::Dict{ValueId,String}`: Mapping from `ValueId` to its assigned slot.
+- `live_count::Dict{String,Int}`: Number of references pointing to each memory slot.
+- `parent::Dict{String,String}`: Union find data structure mapping a memory slot to the true underlying memory slot.
+- `last_use::Dict{ValueId,Int}`: Dictionary mapping each `ValueId` to the last node's index that it was used in.
+    Memory will be freed after this node
+- `kinds::Dict{ValueId,Type{<:SymKind}}`: Dictionary mapping each `ValueId` to its type.
+- `unalloc_bat_inputs::Set{ValueId}`: Set of input `ValueId`s whose memory haven't been allocated yet.
+- `input_load_schedule::Vector{Vector{Tuple{ValueId,String}}}`: Per-node schedule for input loading
+    (which inputs will be loaded at the start of node i, where i indexes this vector).
+"""
 mutable struct State
     next_shared_mat_slot::Int
     next_mat_slot::Int
@@ -65,30 +77,34 @@ mutable struct State
     parent::Dict{String,String}  # slot -> true slot that it points to
     last_use::Dict{ValueId,Int}
     kinds::Dict{ValueId,Type{<:SymKind}}
+    unalloc_bat_inputs::Set{ValueId}
+    input_load_schedule::Vector{Vector{Tuple{ValueId,String}}}
 end
 
 function State(
-    next_shared_mat_slot::Int,
-    next_mat_slot::Int,
-    next_shared_vec_slot::Int,
-    next_vec_slot::Int,
-    next_pseudo_mat_slot::Int,
+    shared_mat_inputs::Int,
+    shared_vec_inputs::Int,
+    prog::IRProgram,
     last_use::Dict{ValueId,Int},
-    kinds::Dict{ValueId,Type{<:SymKind}},
 )
+    unalloc_bat_inputs = Set(vid for (_, vid) in prog.inputs if prog.kinds[vid] <: BatchedKind)
+    input_load_schedule::Vector{Vector{Tuple{ValueId,String}}} = [Tuple{ValueId,String}[] for _ in 1:length(prog.nodes)]
+
     return State(
-        next_shared_mat_slot,
-        next_mat_slot,
-        next_shared_vec_slot,
-        next_vec_slot,
-        next_pseudo_mat_slot,
+        1,
+        shared_mat_inputs + 1,
+        1,
+        shared_vec_inputs + 1,
+        length(prog.nodes) + length(prog.inputs) + 2,
         String[],
         String[],
         Dict{ValueId,String}(),
         Dict{String,Int}(),
         Dict{String,String}(),
         last_use,
-        kinds,
+        prog.kinds,
+        unalloc_bat_inputs,
+        input_load_schedule,
     )
 end
 
@@ -132,30 +148,48 @@ function free_true_slot!(state::State, true_slot::String, K::Type{<:SymKind})
     end
 end
 
-function alloc_input!(state::State, vid::ValueId)
+function alloc_shared_input!(state::State, vid::ValueId)
     K = state.kinds[vid]
+    K <: SharedKind || return
 
-    if K <: SharedKind
-        if K <: SharedMatKind
-            slot = alloc_new_shared_mat!(state)
-        elseif K <: SharedVecKind
-            slot = alloc_new_shared_vec!(state)
-        else
-            error("Unknown shared input kind: $K")
-        end
+    if K <: SharedMatKind
+        slot = alloc_new_shared_mat!(state)
+    elseif K <: SharedVecKind
+        slot = alloc_new_shared_vec!(state)
     else
-        if K <: MatKind
-            slot = alloc_new_mat!(state)
-        elseif K <: VecKind
-            slot = alloc_new_vec!(state)
-        else
-            error("Only matrix/vector inputs supported, got $K")
-        end
+        error("Unknown shared input kind: $K")
     end
 
     state.slots[vid] = slot
     state.parent[slot] = slot
     state.live_count[slot] = 1
+end
+
+function maybe_alloc_batched_input!(state::State, node::IRNode, i::Int)
+    for arg in node.args
+        arg isa ValueId || continue
+        vid = arg::ValueId
+
+        vid in state.unalloc_bat_inputs || continue 
+
+        K = state.kinds[vid]
+        if K <: MatKind
+            slot = alloc_mat_outofplace!(state)
+            load_slot = alloc_mat_outofplace!(state)
+            push!(state.input_load_schedule[i], (vid, load_slot))
+            free_true_slot!(state, load_slot, K)
+        elseif K <: VecKind
+            slot = alloc_vec_outofplace!(state)
+            push!(state.input_load_schedule[i], (vid, ""))
+        else
+            error("Only matrix/vector inputs supported, got $K")
+        end
+
+        state.slots[vid] = slot
+        state.parent[slot] = slot
+        state.live_count[slot] = 1
+        delete!(state.unalloc_bat_inputs, vid)
+    end
 end
 
 #######################
@@ -251,7 +285,14 @@ function dec_maybe_free!(state::State, i::Int, vid::ValueId)
     state.live_count[true_slot] == 0 && free_true_slot!(state, true_slot, state.kinds[vid])
 end
 
-function free_if_unused_result!(state::State, node)
+function dec_arg_count!(state::State, node::IRNode, i::Int)
+    for arg in node.args
+        arg isa ValueId || continue
+        dec_maybe_free!(state, i, arg::ValueId)
+    end
+end
+
+function free_if_unused_result!(state::State, node::IRNode)
     vid = node.out
     haskey(state.last_use, vid) && return
     true_slot = get_true_slot!(state, vid)
@@ -260,23 +301,25 @@ function free_if_unused_result!(state::State, node)
 end
 
 """
-Plans the memory usage of the function via a greedy memory allocation method.
+Plans the memory usage of the function via a lazy input loading and greedy memory allocation.
 
-Overall flow:
-1. Allocates memory for all the inputs
-2. Loops through all the nodes of the IR. For each node:
-    a) Checks if the operation can be done in-place. An operation can be done in-place
-        if the operation supports it (e.g. addition/subtraction), and if the this node
-        is the last node to use the input, so the input can be overridden.
-    b) Checks if the operation is a wrapper-operation, e.g. transposition, Symmetric().
-        If so, make a wrapper variable without allocating new memory.
-    c) If neither of the above were successful, allocate new memory. Check if any existing
-        memory slots are free, if so, use them. If not, allocate a new memory slot.
-    d) For all inputs of the node, check if this node is the last one to use them. If so,
-        free their memory.
-    e) Checks if the output of this node is used in the future. If not, free that memory.
-    
-Format of the memory slots:
+# Algorithm
+1. Initialises `State` that keeps track of the current memory allocations.
+2. Allocates memory for all shared input arguments.
+3. Loops through all nodes in the `IRProgram`. For each node:
+    a) Load the inputs if they are used in the current node and haven't been allocated earlier.
+    b) Attempt to perform operation in-place. An operation can be performed in-place if the
+        operation supports it (e.g. addition/subtraction), and if the inputs to this operation
+        can be overridden (i.e they aren't used later). If successful, go to step 3.
+    c) Checks if the operation is a wrapper operation (e.g. transposition/Symmetric).
+        If so, make a wrapper variable without allocating new memory, and skip to step 3.
+    d) Allocate new memory for the result of this operation. If free slots exist in the
+        pool of free memories, use them. If not, allocate new memory slot.
+    e) Decrement the usage counts of the input variables to this operation. Free the memory
+        if the counts reach zero.
+    f) Check if the result of this operation is used. If not, free the memory.
+
+Format of the memory slots are `String`s of format:
 - Matrices: M + (slot index)
 - Vectors: v + (slot index)
 
@@ -298,37 +341,40 @@ Indexing rule:
 - Memory slot indices for shared matirces and vectors start from 1
 - Memory slot indices for matrices and vectors start from shared_mat_inputs + 1
     and shared_vec_inputs + 1 respectively to avoid overlap
-- Pseudo matrix slot indices start from length(nodes) + length(inputs) to avoid overlap
+- Pseudo matrix slot indices start from length(nodes) + length(inputs) + 2 to avoid overlap
 
 Returns:
-    - slots::Dict{ValueId,String}: Slots for each variable
-    - mat_slots::Vector{String}: All the batched matrix slots required throughout
-    - vec_slots::Vector{String}: All the batched vector slots required throughout
-    - require_extra_slot::bool: True if mat_slots aren't enough to load all the inputs,
-        requiring an extra slot to transfer between intermediate & dual access layout
-    - mat_load_slot_id: The matrix slot index that is used to load inputs, where the
+    - `slots::Dict{ValueId,String}`: Mapping from `ValueId` to its assigned slot.
+    - `mat_slots::Vector{String}`: Vector of all matrix slots required throughout.
+    - `vec_slots::Vector{String}`: Vector of all matrix slots required throughout.
+    - `input_load_schedule::Vector{Vector{Tuple{ValueId,String}}}`: Per-node schedule for input loading
+        (which inputs will be loaded at the start of node i, where i indexes this vector).
+    - `require_extra_slot::bool`: An indicator on whether an extra memory slot is required to
+        store the output matrices, as storage of each matrix requires an extra slot to store
+        the intermediate layout.
+    - `mat_store_slot::String`: The matrix slot index that is used to store outputs, where the
         matrices are stored in intermediate layout
 """
 function plan_memory_usage(prog::IRProgram)
-    last_use, var_mat_inputs, shared_mat_inputs, _, shared_vec_inputs = compute_last_use(prog)
+    last_use, shared_mat_inputs, shared_vec_inputs = compute_last_use(prog)
 
     state = State(
-        1,
-        shared_mat_inputs + 1,
-        1,
-        shared_vec_inputs + 1,
-        length(prog.nodes) + length(prog.inputs) + 2,
+        shared_mat_inputs,
+        shared_vec_inputs,
+        prog,
         last_use,
-        prog.kinds,
     )
 
-    # Allocating input memory
+    # Allocating shared input memory
     for (_, vid) in prog.inputs
-        alloc_input!(state, vid)
+        alloc_shared_input!(state, vid)
     end
 
     # Main loop
     for (i, node) in enumerate(prog.nodes)
+        # Check if arguments of the operation are loaded, if not, load them
+        maybe_alloc_batched_input!(state, node, i)
+
         # Allocate memory, in-place, wrapper, or out-of-place
         (
             try_inplace!(state, i, node, prog.outputs)
@@ -337,20 +383,16 @@ function plan_memory_usage(prog::IRProgram)
         )
 
         # Decrement args if this was their last use
-        for arg in node.args
-            arg isa ValueId || continue
-            dec_maybe_free!(state, i, arg::ValueId)
-        end
-
-        free_if_unused_result!(state, node)
+        dec_arg_count!(state, node, i)  # Decrement count of the arguments, if those counts reach zero, free the memory
+        free_if_unused_result!(state, node)  # Free the memory of the results if its unused
     end
 
     # Gather results
     mat_slots = ["M$i" for i in (shared_mat_inputs + 1):(state.next_mat_slot - 1)]
     vec_slots = ["v$i" for i in (shared_vec_inputs + 1):(state.next_vec_slot - 1)]
 
-    require_extra_slot = var_mat_inputs == length(mat_slots)
-    mat_load_slot_id = require_extra_slot ? state.next_mat_slot : state.next_mat_slot - 1
+    require_extra_slot = length(prog.outputs) == length(mat_slots)
+    mat_store_slot = get_mat_slot(require_extra_slot ? state.next_mat_slot : state.next_mat_slot - 1)
 
-    return state.slots, mat_slots, vec_slots, require_extra_slot, mat_load_slot_id
+    return state.slots, mat_slots, vec_slots, state.input_load_schedule, require_extra_slot, mat_store_slot
 end

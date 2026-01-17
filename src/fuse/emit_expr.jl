@@ -33,6 +33,7 @@ struct LoadSharedVecStep <: KernelStep
 end
 struct LoadBatMatStep <: KernelStep
     slot::String
+    load_slot::String
     vid::ValueId
     shape::MatShape
 end
@@ -117,24 +118,6 @@ function get_shared_load_steps(prog::IRProgram, slots::Dict{ValueId,String})
 
     return shared_load_steps
 end
-function get_batched_load_steps(prog::IRProgram, slots::Dict{ValueId,String})
-    batched_load_steps = KernelStep[]
-
-    for (_, vid) in prog.inputs
-        if !is_shared(prog, vid)  # Batched type
-            if is_mat(prog, vid)
-                push!(batched_load_steps, LoadBatMatStep(slots[vid], vid, matshape(prog, vid)))
-            elseif is_vec(prog, vid)
-                push!(batched_load_steps, LoadBatVecStep(slots[vid], vid, vecshape(prog, vid)))
-            else
-                error("Unsupported input kind for $vid: $(prog.kinds[vid])")
-            end
-        end
-    end
-
-    return batched_load_steps
-end
-
 
 function get_active_init_steps(mat_slots::Vector{String}, vec_slots::Vector{String})
     active_init_steps = KernelStep[]
@@ -147,11 +130,28 @@ function get_active_init_steps(mat_slots::Vector{String}, vec_slots::Vector{Stri
     return active_init_steps
 end
 
-function get_compute_steps(prog::IRProgram{T}, slots::Dict{ValueId,String}) where {T}
-    compute_steps = KernelStep[]    
+function get_compute_steps(
+    prog::IRProgram{T},
+    slots::Dict{ValueId,String},
+    input_load_schedule::Vector{Vector{Tuple{ValueId,String}}},
+    kinds::Dict{ValueId,Type{<:SymKind}},
+) where {T}
+    compute_steps = KernelStep[]
 
-    for node in prog.nodes
+    for (i, node) in enumerate(prog.nodes)
         op = node.op
+
+        # Check if this step involves an input load
+        for (vid, load_slot) in input_load_schedule[i]
+            K = kinds[vid]
+            if K <: MatKind
+                push!(compute_steps, LoadBatMatStep(slots[vid], load_slot, vid, matshape(prog, vid)))
+            elseif K <: VecKind
+                push!(compute_steps, LoadBatVecStep(slots[vid], vid, vecshape(prog, vid)))
+            else
+                error("Invalid type for loading inputs, supported MatKind and VecKind, got $K")
+            end
+        end
 
         if op == :mul
             a = node.args[1]::ValueId
@@ -239,7 +239,7 @@ function get_compute_steps(prog::IRProgram{T}, slots::Dict{ValueId,String}) wher
     return compute_steps
 end
 
-function get_store_steps(prog::IRProgram, slots::Dict{ValueId,String}, mat_load_slot::String, mat_slots::Vector{String})
+function get_store_steps(prog::IRProgram, slots::Dict{ValueId,String}, mat_store_slot::String, mat_slots::Vector{String})
     store_steps = KernelStep[]
 
     for vid in prog.outputs
@@ -248,7 +248,7 @@ function get_store_steps(prog::IRProgram, slots::Dict{ValueId,String}, mat_load_
         if is_mat(prog, vid)
             slot = slots[vid]
             shape = matshape(prog, vid)
-            store_slot = mat_load_slot != slot ? mat_load_slot : (slot != mat_slots[1] ? mat_slots[1] : mat_slots[2])
+            store_slot = mat_store_slot != slot ? mat_store_slot : (slot != mat_slots[1] ? mat_slots[1] : mat_slots[2])
             push!(store_steps, StoreMatStep(slots[vid], store_slot, vid, shape))
         elseif is_vec(prog, vid)
             shape = vecshape(prog, vid)
@@ -295,16 +295,15 @@ function emit_kernel_expr(
         slots,
         mat_slots,
         vec_slots,
+        input_load_schedule,
         require_extra_slot,
-        mat_load_slot_id
+        mat_store_slot,
     ) = plan_memory_usage(prog)
-    mat_load_slot = "M$mat_load_slot_id"
 
     shared_load_steps = get_shared_load_steps(prog, slots)
-    batched_load_steps = get_batched_load_steps(prog, slots)
     active_init_steps = get_active_init_steps(mat_slots, vec_slots)
-    compute_steps = get_compute_steps(prog, slots)
-    store_steps = get_store_steps(prog, slots, mat_load_slot, mat_slots)
+    compute_steps = get_compute_steps(prog, slots, input_load_schedule, prog.kinds)
+    store_steps = get_store_steps(prog, slots, mat_store_slot, mat_slots)
 
     #########################
     ### INITIAL VARIABLES ###
@@ -334,6 +333,7 @@ function emit_kernel_expr(
     push!(stmts, :(warp_matrix_id = div(lid - 1i32, $D) + 1i32))
     push!(stmts, :(d = mod1(lid, $D)))
     push!(stmts, :(grid_mtrx_id = warp_matrix_id + (bid - 1i32) * $n_mats_per_block))
+    push!(stmts, :(active = warp_matrix_id <= $n_mats_per_warp && grid_mtrx_id <= N))
     if !isempty(shared_load_steps)
         push!(stmts, :(wid = div(tid - 1i32, 32i32) + 1i32))
     end
@@ -356,18 +356,18 @@ function emit_kernel_expr(
             :(CuStaticSharedArray($T, ($vec_shmem_elems,))),
         ))
     end
-    # Possibly extra one for intermediate layout transfer
+    # Possibly extra one for intermediate layout transfer during storing
     if require_extra_slot
         push!(stmts, Expr(
             :(=),
-            Symbol("shmem_$(mat_load_slot)"),
+            Symbol("shmem_$(mat_store_slot)"),
             :(CuStaticSharedArray($T, ($mat_shmem_elems,))),
         ))
     end
 
-    ##################################
-    ### EMIT INPUT LOAD STATEMENTS ###
-    ##################################
+    #########################################
+    ### EMIT SHARED INPUT LOAD STATEMENTS ###
+    #########################################
 
     for curr_step in shared_load_steps
         if curr_step isa LoadSharedMatStep
@@ -433,10 +433,41 @@ function emit_kernel_expr(
         push!(stmts, Expr(:call, :sync_threads))
     end
 
-    for curr_step in batched_load_steps
+    ############################################
+    ### ACTIVE THREADS STATEMENTS (if-block) ###
+    ############################################
+
+    # Initialise matrix & vector wrappers
+    for curr_step in active_init_steps
+        if curr_step isa InitMatWrapperStep
+            step = curr_step::InitMatWrapperStep
+            slot = step.slot
+            push!(stmts, Expr(
+                :(=),
+                Symbol(slot),
+                :(DualAccessMatrix($(Symbol("shmem_$slot")), Val($D), warp_matrix_id, Val(:small))),
+            ))
+        
+        elseif curr_step isa InitVecWrapperStep
+            step = curr_step::InitVecWrapperStep
+            slot = step.slot
+            push!(stmts, Expr(
+                :(=),
+                Symbol(slot),
+                :(BatchedVector($(Symbol("shmem_$slot")), Val($D), warp_matrix_id)),
+            ))
+        
+        else
+            error("Unknown init step type $(typeof(curr_step))")
+        end
+    end
+
+    # Render compute steps
+    for curr_step in compute_steps
         if curr_step isa LoadBatMatStep
             step = curr_step::LoadBatMatStep
             slot = step.slot
+            mat_load_slot = step.load_slot
             input_expr = input_ref(step.vid)
             shape = step.shape::MatShape
             D1 = Int32(shape.D1)
@@ -450,7 +481,7 @@ function emit_kernel_expr(
                 stmts,
                 :(interm_to_dual_transfer!($(Symbol("shmem_$slot")), $(Symbol("shmem_$mat_load_slot")), Val($D1), Val($D2), Val($D), Val($nthreads), N, Val(:small))),
             )
-        
+
         elseif curr_step isa LoadBatVecStep
             step = curr_step::LoadBatVecStep
             slot = step.slot
@@ -463,45 +494,7 @@ function emit_kernel_expr(
                 :(vector_load!($(Symbol("shmem_$slot")), $input_expr, Val($D1), Val($D), Val($nthreads), N)),
             )
 
-        else
-            error("Invalid batched load type")
-        end
-    end
-
-    ############################################
-    ### ACTIVE THREADS STATEMENTS (if-block) ###
-    ############################################
-
-    active = Expr[]
-
-    # Initialise matrix & vector wrappers
-    for curr_step in active_init_steps
-        if curr_step isa InitMatWrapperStep
-            step = curr_step::InitMatWrapperStep
-            slot = step.slot
-            push!(active, Expr(
-                :(=),
-                Symbol(slot),
-                :(DualAccessMatrix($(Symbol("shmem_$slot")), Val($D), warp_matrix_id, Val(:small))),
-            ))
-        
-        elseif curr_step isa InitVecWrapperStep
-            step = curr_step::InitVecWrapperStep
-            slot = step.slot
-            push!(active, Expr(
-                :(=),
-                Symbol(slot),
-                :(BatchedVector($(Symbol("shmem_$slot")), Val($D), warp_matrix_id)),
-            ))
-        
-        else
-            error("Unknown init step type $(typeof(curr_step))")
-        end
-    end
-
-    # Render compute steps
-    for curr_step in compute_steps
-        if curr_step isa BatchBinaryStep
+        elseif curr_step isa BatchBinaryStep
             step = curr_step::BatchBinaryStep
             f = step.f
             dest = Symbol(step.dest)
@@ -512,8 +505,15 @@ function emit_kernel_expr(
             D2 = hasproperty(shape, :D2) ? Int32(shape.D2) : D1
 
             push!(
-                active,
-                :(batch_op!($f, $dest, $a, $b, d, Val($D1), Val($D2), Val($D), Val(:small))),
+                stmts,
+                Expr(
+                    :if,
+                    :active,
+                    Expr(
+                        :block,
+                        :(batch_op!($f, $dest, $a, $b, d, Val($D1), Val($D2), Val($D), Val(:small))),
+                    ),
+                ),
             )
                     
         elseif curr_step isa BatchUnaryStep
@@ -527,14 +527,30 @@ function emit_kernel_expr(
 
             if f === cholesky
                 push!(
-                    active,
-                    :(batch_op!(cholesky, $dest, $a, d, Val($D1), Val($D), $n_mats_per_warp, warp_matrix_id, Val(:small))),
+                    stmts,
+                    Expr(
+                        :if,
+                        :active,
+                        Expr(
+                            :block,
+                            :(batch_op!(cholesky, $dest, $a, d, Val($D1), Val($D), $n_mats_per_warp, warp_matrix_id, Val(:small))),
+                        ),
+                    ),
                 )
+
             elseif f === transpose
                 push!(
-                    active,
-                    :(batch_op!(transpose, $dest, $a, d, Val($D1), Val($D2), Val($D), Val(:small))),
+                    stmts,
+                    Expr(
+                        :if,
+                        :active,
+                        Expr(
+                            :block,
+                            :(batch_op!(transpose, $dest, $a, d, Val($D1), Val($D2), Val($D), Val(:small))),
+                        ),
+                    ),
                 )
+
             else
                 error("Unknown unary op $f")
             end
@@ -544,7 +560,7 @@ function emit_kernel_expr(
             dest = Symbol(step.dest)
             a = Symbol(step.a)
             wrapper = step.wrapper
-            push!(active, Expr(
+            push!(stmts, Expr(
                 :(=),
                 dest,
                 Expr(:call, wrapper, a),
@@ -556,7 +572,7 @@ function emit_kernel_expr(
             a = Symbol(step.a)
             λ = step.λ
             sign = step.sign
-            push!(active, Expr(
+            push!(stmts, Expr(
                 :(=),
                 dest,
                 Expr(:call, :IAddSubGetterMatrix, a, λ, sign),
@@ -566,13 +582,6 @@ function emit_kernel_expr(
             error("Unknown compute step type $(typeof(curr_step))")
         end
     end
-
-    # Masking inactive threads via if-statement
-    push!(stmts, Expr(
-        :if,
-        :(warp_matrix_id <= $n_mats_per_warp && grid_mtrx_id <= N),
-        Expr(:block, active...),
-    ))
 
     ##########################
     ### EMIT OUTPUT STORES ###

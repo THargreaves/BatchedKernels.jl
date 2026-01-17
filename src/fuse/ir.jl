@@ -42,17 +42,18 @@ struct ConstShape <: Shape end
 abstract type SymKind end
 
 # Batched types
-abstract type MatKind <: SymKind end
+abstract type BatchedKind <: SymKind end
+abstract type MatKind <: BatchedKind end
 struct DenseMatKind <: MatKind end
 struct TransMatKind <: MatKind end
 struct SymMatKind <: MatKind end
 abstract type TrigMatKind <: MatKind end
 struct LowerTrigMatKind <: TrigMatKind end
 struct UpperTrigMatKind <: TrigMatKind end
-struct CholeskyKind <: SymKind end
-struct VecKind <: SymKind end
-struct ScalarKind <: SymKind end
-struct ConstKind <: SymKind end
+struct CholeskyKind <: BatchedKind end
+struct VecKind <: BatchedKind end
+struct ScalarKind <: BatchedKind end
+struct ConstKind <: BatchedKind end
 
 # Shared (constant) types
 abstract type SharedKind <: SymKind end
@@ -256,8 +257,8 @@ end
 @inline function op_signature(::Val{:mul}, ::Type{<:ScalLike}, ::ScalShape, ::Type{<:VecLike}, sy::VecShape)
     error("Scalar * Vec not yet supported")
 end
-@inline function op_signature(::Val{:mul}, ::Type{<:SymKind}, ::Shape, ::Type{<:SymKind}, ::Shape)
-    error("Unknown combination of types to multiply")
+@inline function op_signature(::Val{:mul}, tx::Type{<:SymKind}, ::Shape, ty::Type{<:SymKind}, ::Shape)
+    error("Unknown combination of types to multiply: $tx, $ty")
 end
 function Base.:*(x::SymVal, y::SymVal)
     if (x.kind <: MatLike || x.kind <: VecLike) && y.kind <: ScalLike
@@ -444,9 +445,6 @@ end
 
 """
 Trace a function f on symbolic inputs specified by specs.
-
-Example:
-    prog = trace(func, (Mat(:A), Mat(:B), Mat(:C), Scal(:a), Scal(:b)))
 """
 function trace(f, specs::Tuple; T::Type, D::Int, nthreads::Int)
     prog = IRProgram(T, D, nthreads)
