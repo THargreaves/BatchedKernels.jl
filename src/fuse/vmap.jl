@@ -126,7 +126,7 @@ mutable struct VMap{F}
     fid::UInt
     in_type::Union{Nothing,Tuple{Vararg{InType}}}
     debug::Bool
-    cache::Dict{KernelKey, Tuple{UInt64,Tuple,Tuple}}  # Values are (pid, out_kinds, out_shapes)
+    cache::Dict{KernelKey,Tuple{UInt64,Tuple,Tuple}}  # Values are (pid, out_kinds, out_shapes)
 end
 
 "Returns a callable object that launches a fused batched kernel for f."

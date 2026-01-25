@@ -533,7 +533,7 @@ function emit_kernel_expr(
                         :active,
                         Expr(
                             :block,
-                            :(batch_op!(cholesky, $dest, $a, d, Val($D1), Val($D), $n_mats_per_warp, warp_matrix_id, Val(:small))),
+                            :(batch_op!(cholesky, $dest, $a, d, Val($D1), Val($D), warp_matrix_id, Val(:small))),
                         ),
                     ),
                 )
@@ -590,7 +590,7 @@ function emit_kernel_expr(
     for curr_step in store_steps
         if curr_step isa StoreMatStep
             step = curr_step::StoreMatStep
-            slot = Symbol("shmem_$(step.slot)")
+            slot = Symbol(step.slot)
             store_slot = Symbol("shmem_$(step.store_slot)")
             output_expr = output_ref(step.vid)
             shape = step.shape::MatShape

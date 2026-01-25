@@ -110,7 +110,7 @@ end
     N = 2^12 + 113
 
     function chol(A, dummy)
-        return cholesky(Symmetric(A))
+        return cholesky(Symmetric(A)).U
     end
 
     for D1 in 2:15
@@ -135,7 +135,7 @@ end
             As_cpu = Array(As)
             Us_cpu = similar(As_cpu)
             for i in 1:N
-                Us_cpu[:, :, i] = chol(As_cpu[:, :, i], 0).U
+                Us_cpu[:, :, i] = chol(As_cpu[:, :, i], 0)
                 Us_result[:, :, i] = UpperTriangular(Us_result[:, :, i])
             end
 

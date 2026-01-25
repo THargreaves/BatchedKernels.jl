@@ -174,17 +174,17 @@ end
         intermediate_layout_load!(shmem_3, As, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
         interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
 
-        if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-            # Create dual-access matrices
-            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-            B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+        # Create dual-access matrices
+        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+        B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
 
+        if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             # Perform out-of-place Cholesky
             batch_op!(transpose, B, A, d, Val(D1), Val(D2), Val(D), Val(:small))
         end
 
         # Store result
-        dual_to_interm_transfer!(shmem_3, shmem_2, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+        dual_to_interm_transfer!(shmem_3, B, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
         intermediate_layout_write!(Bs, shmem_3, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
 
         return nothing
@@ -248,16 +248,16 @@ end
         intermediate_layout_load!(shmem_2, As, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
         interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
 
-        if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-            # Create dual-access matrices
-            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+        # Create dual-access matrices
+        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
 
+        if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             # Perform out-of-place Cholesky
             batch_op!(transpose, A, A, d, Val(D1), Val(D2), Val(D), Val(:small))
         end
 
         # Store result
-        dual_to_interm_transfer!(shmem_2, shmem_1, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+        dual_to_interm_transfer!(shmem_2, A, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
         intermediate_layout_write!(Bs, shmem_2, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
 
         return nothing

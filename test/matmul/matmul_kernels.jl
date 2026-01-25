@@ -117,18 +117,63 @@ end
     intermediate_layout_load!(shmem_3, Bs, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
     interm_to_dual_transfer!(shmem_2, shmem_3, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
 
-    if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-        # Create dual-access matrices
-        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-        B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
-        C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
+    # Create dual-access matrices
+    A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+    B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+    C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
 
+    if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         batch_op!(*, C, A, B, d, Val(D1), Val(D2), Val(D), Val(:small))
     end
 
     # Store C
-    dual_to_interm_transfer!(shmem_1, shmem_3, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+    dual_to_interm_transfer!(shmem_1, C, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
     intermediate_layout_write!(Cs, shmem_1, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
 
     return nothing
+end
+
+@inline function kernel_gram!(
+    Gs,
+    As,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val{D},
+    ::Val{nthreads},
+    N::Int32,
+    ::Val{:small},
+) where {D1,D2,D,nthreads}
+    n_mats_per_warp = 32i32 ÷ D
+    n_warps = nthreads ÷ 32i32
+    n_mats_per_block = n_warps * n_mats_per_warp
+    dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+
+    tid = threadIdx().x
+    bid = blockIdx().x
+    lid = mod1(tid, 32i32)
+
+    warp_matrix_id = div(lid - 1i32, D) + 1i32
+    d = mod1(lid, D)
+    grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
+
+    warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
+    shmem_elems = warp_shmem_size * n_warps
+    shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
+    shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
+
+    # Load A
+    intermediate_layout_load!(shmem_2, As, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+    interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+
+    # Create dual-access matrices
+    A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+    G = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+
+    if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
+        batch_op!(gram, G, A, d, Val(D1), Val(D2), Val(D), Val(:small))
+    end
+
+    # Store G
+    dual_to_interm_transfer!(shmem_1, G, Val(D2), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_write!(Gs, shmem_1, Val(D2), Val(D2), Val(D), Val(nthreads), N, Val(:small)) 
 end

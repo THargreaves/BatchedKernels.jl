@@ -391,8 +391,8 @@ function plan_memory_usage(prog::IRProgram)
     mat_slots = ["M$i" for i in (shared_mat_inputs + 1):(state.next_mat_slot - 1)]
     vec_slots = ["v$i" for i in (shared_vec_inputs + 1):(state.next_vec_slot - 1)]
 
-    require_extra_slot = length(prog.outputs) == length(mat_slots)
-    mat_store_slot = get_mat_slot(require_extra_slot ? state.next_mat_slot : state.next_mat_slot - 1)
+    require_extra_slot = isempty(state.free_mat_slots)
+    mat_store_slot = require_extra_slot ? get_mat_slot(state.next_mat_slot) : state.free_mat_slots[1]
 
     return state.slots, mat_slots, vec_slots, state.input_load_schedule, require_extra_slot, mat_store_slot
 end

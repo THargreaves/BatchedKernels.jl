@@ -51,6 +51,7 @@ abstract type TrigMatKind <: MatKind end
 struct LowerTrigMatKind <: TrigMatKind end
 struct UpperTrigMatKind <: TrigMatKind end
 struct CholeskyKind <: BatchedKind end
+struct QRKind <: BatchedKind end
 struct VecKind <: BatchedKind end
 struct ScalarKind <: BatchedKind end
 struct ConstKind <: BatchedKind end
@@ -128,25 +129,49 @@ function create_symval(vid::ValueId, ::Type{K}, shape::Shape, prog::IRProgram{T}
     return SymVal{K,T}(vid, prog)
 end
 
+abstract type FactorisationVal <: AbstractSymVal end
+
 """
-Symbolic value for Cholesky decomposition results, containing the additional attribute uplo.
+Symbolic value for Cholesky decomposition results.
 """
-struct CholeskyVal{T} <: AbstractSymVal
-    vid::ValueId
+struct CholeskyVal{T} <: FactorisationVal
+    content::SymVal
     prog::IRProgram{T}
-    uplo::Char
 end
 
-function CholeskyVal(vid::ValueId, shape::MatShape, prog::IRProgram{T}) where {T}
-    prog.kinds[vid] = DenseMatKind
-    prog.shapes[vid] = shape
-    return CholeskyVal{T}(vid, prog, 'U')
+function create_choleskyval(vid::ValueId, shape::MatShape, prog::IRProgram{T}) where {T}
+    # Creating SymVal for the result of Cholesky decomposition (upper triangular)
+    content = create_symval(vid, DenseMatKind, shape, prog)
+
+    return CholeskyVal{T}(content, prog)
 end
 
 function Base.getproperty(x::CholeskyVal, s::Symbol)
-    s === :U && return UpperTriangular(x)
-    s === :L && return LowerTriangular(x')
+    s === :U && return UpperTriangular(x.content)
+    s === :L && return LowerTriangular(x.content')
     s === :kind && return CholeskyKind
+    s === :vid && error("Cannot access vid of a FactorisationVal")
+    return getfield(x, s)
+end
+
+"""
+Symbolic value for QR decomposition results, containing Q and R
+"""
+struct QRVal{T} <: AbstractSymVal
+    Q::SymVal{<:MatKind,T}
+    R::SymVal{UpperTrigMatKind,T}
+    prog::IRProgram{T}
+end
+
+function create_qrval(Q::SymVal{<:MatKind,T}, R::SymVal{UpperTrigMatKind,T}, prog::IRProgram{T}) where {T}    
+    # No need to create SymVals for Q and R as they already exist, just link them to this QRVal instance
+    return QRVal{T}(Q, R, prog)
+end
+
+function Base.getproperty(x::QRVal, s::Symbol)
+    # s === :Q && return x.Q
+    s === :R && return UpperTriangular(getfield(x, :R))
+    s === :kind && return QRKind
     return getfield(x, s)
 end
 
@@ -288,7 +313,7 @@ Base.:*(x::Number, y::SymVal) = y * x
 function LinearAlgebra.cholesky(x::SymVal{SymMatKind,T}) where {T}
     out = emit!(x.prog, :chol, Any[x.vid])
     shape = x.prog.shapes[x.vid]::MatShape
-    return CholeskyVal(out, shape, x.prog)
+    return create_choleskyval(out, shape, x.prog)
 end
 LinearAlgebra.cholesky(::SymVal) = error("Unknown types for Cholesky. Ensure matrix is marked as Symmetric")
 
@@ -306,10 +331,6 @@ function LinearAlgebra.LowerTriangular(x::SymVal{<:MatLike})
     out = emit!(x.prog, :lowertrig, Any[x.vid])
     return create_symval(out, LowerTrigMatKind, shape, x.prog)
 end
-function LinearAlgebra.LowerTriangular(x::CholeskyVal)
-    out = emit!(x.prog, :lowertrig, Any[x.vid])
-    return create_symval(out, LowerTrigMatKind, x.prog.shapes[x.vid], x.prog)
-end
 LinearAlgebra.LowerTriangular(::SymVal) = error("LowerTriangular() only defined for matrices")
 
 function LinearAlgebra.UpperTriangular(x::SymVal{<:MatLike})
@@ -317,10 +338,6 @@ function LinearAlgebra.UpperTriangular(x::SymVal{<:MatLike})
     shape.D1 == shape.D2 || error("Cannot call UpperTriangular() on a matrix with shape $shape")
     out = emit!(x.prog, :uppertrig, Any[x.vid])
     return create_symval(out, UpperTrigMatKind, shape, x.prog)
-end
-function LinearAlgebra.UpperTriangular(x::CholeskyVal)
-    out = emit!(x.prog, :uppertrig, Any[x.vid])
-    return create_symval(out, UpperTrigMatKind, x.prog.shapes[x.vid], x.prog)
 end
 LinearAlgebra.UpperTriangular(::SymVal) = error("UpperTriangular() only defined for matrices")
 
@@ -356,17 +373,44 @@ function Base.:/(x::SymVal{<:MatLike}, y::SymVal{<:MatLike})
     error("Solves are not yet supported for non-symmetric matrices")
 end
 Base.:/(x::SymVal{ScalarKind}, y::SymVal{ScalarKind}) = error("Scalar/Scalar not yet supported")
-Base.:/(x::SymVal{<:SymKind}, y::SymVal{<:SymKind}) = error("Unknown combination of types to div")
+Base.:/(::SymVal{<:SymKind}, ::SymVal{<:SymKind}) = error("Unknown combination of types to div")
+
+function LinearAlgebra.qr(x::SymVal{<:MatLike})
+    sx = x.prog.shapes[x.vid]
+    if sx.D1 >= sx.D2
+        # Cholesky QR2
+        R1 = cholesky(Symmetric(x' * x)).U
+        Q1 = (R1' \ x')'
+        R2 = cholesky(Symmetric(Q1' * Q1)).U
+        Q = (R2' \ Q1')'
+        R = UpperTriangular(R2 * R1)
+        return create_qrval(Q, R, x.prog)
+
+        # Cholesky QR
+        # G = BatchedKernels.gram(x)
+        # R = cholesky(Symmetric(G)).U
+        # Q = (LowerTriangular(R') \ x')'
+        # return create_qrval(Q, R, x.prog)
+    else
+        error("D1 < D2 case for QR not implemented yet")
+    end
+end
+LinearAlgebra.qr(::SymVal{<:SymKind}) = error("Unknown combination of types to qr decomposition")
 
 function LinearAlgebra.adjoint(x::SymVal{<:MatLike})
     sx = x.prog.shapes[x.vid]
     shape = MatShape(sx.D2, sx.D1)
     out = emit!(x.prog, :trans, Any[x.vid])
-    return create_symval(out, TransMatKind, shape, x.prog)
-end
-function LinearAlgebra.adjoint(x::CholeskyVal)
-    out = emit!(x.prog, :trans, Any[x.vid])
-    return create_symval(out, TransMatKind, x.prog.shapes[x.vid], x.prog)
+
+    if x.prog.kinds[x.vid] <: LowerTrigMatKind
+        kind = UpperTrigMatKind
+    elseif x.prog.kinds[x.vid] <: UpperTrigMatKind
+        kind = LowerTrigMatKind
+    else
+        kind = TransMatKind
+    end
+
+    return create_symval(out, kind, shape, x.prog)
 end
 LinearAlgebra.adjoint(x::SymVal{VecKind}) = error("Vec' not yet supported")
 LinearAlgebra.adjoint(x::SymVal{ScalarKind}) = x

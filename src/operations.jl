@@ -1,7 +1,9 @@
-export batch_op!
+export batch_op!, gram
 
 using StaticArrays
 using LinearAlgebra
+
+gram(A) = A' * A
 
 @inline function batch_op!(
     ::typeof(+),
@@ -225,6 +227,45 @@ end
     return nothing
 end
 
+@inline function batch_op!(
+    ::typeof(gram),
+    G::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val,
+    ::Val{:small},
+) where {T,D1,D2}
+    if d > D2
+        return nothing
+    end
+
+    # A' -> (D2,D1)
+    # A  -> (D1,D2)
+    # G  -> (D2,D2)
+
+    # Extract column d of A into registers
+    A_col = @MVector zeros(T, Int64(D1))
+    # @inbounds for k in (1i32):D1
+    for k in (1i32):D1
+        A_col[k] = A[k, d]
+    end
+
+    # Compute each element of column d of G 
+    # @inbounds for i in (1i32):d #D2
+    for i in (1i32):d #D2
+        tot = zero(T)
+        for k in (1i32):D1
+            tot += A[k, i] * A_col[k]
+        end
+        G[i, d] = tot
+        G[d, i] = tot
+    end
+
+    return nothing
+end
+
 # Out-of-place Cholesky: U = cholesky(A)
 @inline function batch_op!(
     ::typeof(cholesky),
@@ -292,7 +333,6 @@ end
     d::Int32,
     ::Val{D1},
     ::Val{D},
-    n_mats_per_warp::Int32,
     warp_matrix_id::Int32,
     ::Val{:small},
 ) where {T,D1,D}

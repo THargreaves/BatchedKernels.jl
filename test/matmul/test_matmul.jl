@@ -121,6 +121,58 @@ end
     end
 end
 
+@testitem "Gram matrix (non-square)" begin
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+    using BatchedKernels
+
+    include("matmul_kernels.jl")
+
+    # Test parameters
+    N = 2^12 + 113
+    nthreads = 2^8
+
+    # Accuracy tests
+    for D1 in 2:15
+        for D2 in 2:15
+            for extra in 0:1
+                D = max(D1, D2) + extra
+                nblocks = cld(N, nthreads//32 * (32 ÷ D))
+
+                CUDA.seed!(1234)
+
+                As_cpu = rand(Float32, D1, D2, N)
+
+                As = cu(As_cpu)
+
+                Gs = CUDA.zeros(Float32, D2, D2, N)
+
+                CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_gram!(
+                    Gs,
+                    As,
+                    Val(Int32(D1)),
+                    Val(Int32(D2)),
+                    Val(Int32(D)),
+                    Val(Int32(nthreads)),
+                    Int32(N),
+                    Val(:small),
+                )
+                Gs_result = Array(Gs)
+
+                # CPU comparison
+                Gs_cpu = zeros(Float32, D2, D2, N)
+                for i in 1:N
+                    Gs_cpu[:, :, i] = As_cpu[:, :, i]' * As_cpu[:, :, i]
+                end
+
+                max_error = maximum(abs.(Gs_result .- Gs_cpu))
+                @test max_error < 1e-5
+            end
+        end
+    end
+end
+
 @testitem "Matrix Multiplication (vmap, non_square)" begin
     using CUDA
     using CUDA: i32

@@ -1121,12 +1121,11 @@ end
 end
 
 @inline function dual_to_interm_transfer!(
-    shmem_interm, shmem_dual, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small},
+    shmem_interm, M_dual, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small},
 ) where {D,D1,D2,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
     n_mats_per_block = n_warps * n_mats_per_warp
-    active_lanes = n_mats_per_warp * D
 
     tid = threadIdx().x
     bid = blockIdx().x
@@ -1134,7 +1133,6 @@ end
     lid = mod1(tid, 32i32)
 
     dual_padding = mod(32i32 ÷ D - mod(n_mats_per_warp * D, 32i32), 32i32)
-    stride = n_mats_per_warp * D + dual_padding
     warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
     interm_pad_freq = div(32i32, D & -D) * D
 
@@ -1143,19 +1141,14 @@ end
     block_matrix_id = (wid - 1i32) * n_mats_per_warp + warp_matrix_id
     grid_matrix_id = (bid - 1i32) * n_mats_per_block + block_matrix_id
 
-    @inbounds if lid <= active_lanes && grid_matrix_id <= N && col <= D2
+    # @inbounds if lid <= active_lanes && grid_matrix_id <= N && col <= D2
+    @inbounds if warp_matrix_id <= n_mats_per_warp && grid_matrix_id <= N && col <= D2
         for row in (1i32):D1
             logical_idx = (warp_matrix_id - 1i32) * D1 * D2 + (col - 1i32) * D1 + row
             padding = (logical_idx - 1i32) ÷ interm_pad_freq
             padded_idx_interm = logical_idx + padding + (wid - 1i32) * warp_shmem_size
 
-            padded_idx_dual = (
-                (col - 1i32 + (wid - 1i32) * D) * stride +
-                (row - 1i32) * n_mats_per_warp +
-                warp_matrix_id - (wid - 1i32) * dual_padding
-            )
-
-            shmem_interm[padded_idx_interm] = shmem_dual[padded_idx_dual]
+            shmem_interm[padded_idx_interm] = M_dual[row, col]
         end
     end
 
