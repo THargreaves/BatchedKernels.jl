@@ -358,28 +358,28 @@ end
 
         @inbounds if j >= i
             # Load element from column j, row i
-            Ai = A[i, j]
+            Uij = A[i, j]
 
             # RMOD STEP: subtract contributions from previous columns
             for k in (1i32):(i - 1i32)
-                Ak = U[k, j]  # Load from already-computed Cholesky factors
+                Ukj = U[k, j]  # Load from already-computed Cholesky factors
                 # Share the diagonal/column value with other threads
-                Aki = shfl_sync(mask, Ak, i + (warp_matrix_id - 1i32) * D)
-                Ai -= Aki * Ak
+                Uki = shfl_sync(mask, Ukj, i + (warp_matrix_id - 1i32) * D)
+                Uij -= Uki * Ukj
             end
 
             # RDIV STEP
             if j == i
-                Ai = sqrt(Ai)
+                Uij = sqrt(Uij)
             end
             # Share result with other threads
-            Aii = shfl_sync(mask, Ai, i + (warp_matrix_id - 1i32) * D)
+            Uii = shfl_sync(mask, Uij, i + (warp_matrix_id - 1i32) * D)
             if j > i
-                Ai = Ai / Aii
+                Uij = Uij / Uii
             end
 
             # Write result
-            U[i, j] = Ai
+            U[i, j] = Uij
         end
     end
 
@@ -436,6 +436,228 @@ end
     end
 
     return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(qr),
+    R::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val{D},
+    warp_matrix_id::Int32,
+    ::Val{:small},
+) where {T,D1,D2,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D
+
+    if lid > active_lanes || d > D1
+        return 0.0f0
+    end
+
+    i = d  # Each thread is responsible for the i-th row
+    
+    R_col = @MVector zeros(T, Int64(D2))
+    for j in 1i32:D2
+        R_col[j] = A[i, j]
+    end
+
+    tau_storage = 0.0f0
+
+    # Loop through all columns
+    for j in 1i32:(min(D1, D2) - (D1 == D2) * 1i32)
+        # Compute norm of j-th column
+
+        # Create mask for threads i >= j
+        base = (warp_matrix_id - 1i32) * D
+        width = D1 - j + 1i32
+        mask = (UInt32(1) << width) - UInt32(1)
+        mask = mask << (base + j - 1i32)
+
+        @inbounds if i >= j
+            offset_start = (1i32 << (32i32 - CUDA.clz(width - 1i32))) >> 1i32
+            
+            # Calculate norm via reduction sum
+            offset = offset_start
+            norm = R_col[j] * R_col[j]
+            while offset > 0
+                add = shfl_down_sync(mask, norm, offset)
+                if i + offset <= width + j - 1i32
+                    norm += add
+                end
+                offset >>= 1
+            end
+
+            # Store each element in vector v as v_elem, in each thread
+            sign = ifelse(R_col[j] >= zero(T), one(T), -one(T))
+            v_elem = R_col[j] - ifelse(i == j, -sign * sqrt(norm), zero(T))
+            
+            # Normalise v so that v[1] = 1.0. This is necessary to fit v into lower triangular
+            # part of R for storage and calculation of Q later, despite not necessary when calculating R
+            v1 = shfl_sync(mask, v_elem, lid - i + j)
+            v_elem /= v1
+
+            # Calculate tau via reduction sum
+            offset = offset_start
+            tau = v_elem * v_elem
+            while offset > 0
+                add = shfl_down_sync(mask, tau, offset)
+                if i + offset <= width + j - 1i32
+                    tau += add
+                end
+                offset >>= 1
+            end
+            tau = 2i32 / tau
+
+            # Broadcast the value of tau to all threads within the group
+            tau = shfl_sync(mask, tau, lid - i + j)
+            
+            # Store tau to be returned
+            if j == i
+                tau_storage = tau
+            end
+
+            # Computing H = I - tau * v * v^T, A <- HA = A - tau * v * (v^T A)
+            
+            # Compute v^T A first
+            # Thread that owns v_i computes v_i * A_{i,t}, etc.
+            # Then use reduce sum to calculate each element in R
+            # Then, compute A - v v^T A
+            # Loop columns
+            for t in j:D2
+                w_t = v_elem * R_col[t]
+
+                # Summing to get w_t via reduction sum
+                offset = offset_start
+                while offset > 0
+                    add = shfl_down_sync(mask, w_t, offset)
+                    if i + offset <= width + j - 1i32
+                        w_t += add
+                    end
+                    offset >>= 1
+                end
+                # Broadcast the value of w_t to all threads within the group
+                w_t = shfl_sync(mask, w_t, lid - i + j)
+                R_col[t] -= tau * v_elem * w_t
+            end
+
+            # Store v in strictly lower triangular part of R
+            if i > j
+                R_col[j] = v_elem
+            end
+        end
+    end
+
+    for j in 1i32:D2
+        R[i, j] = R_col[j]
+    end
+
+    return tau_storage
+end
+
+function batch_op!(
+    ::Val{:qr_Q_thin},
+    Q::AbstractMatrix{T},
+    R::AbstractMatrix{T},
+    d::Int32,
+    tau::Float32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val{D},
+    warp_matrix_id::Int32,
+    ::Val{:small},
+) where {T,D1,D2,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D
+    
+    if lid > active_lanes || d > D1
+        return nothing
+    end
+    
+    i = d  # Each thread is responsible for the i-th row
+
+    # Initialise Q as identity
+    for j in 1i32:min(D1, D2)
+        Q[i, j] = ifelse(i == j, one(T), zero(T))
+    end
+    
+    # Loop through the H_k...
+    for j in min(D1, D2):-1i32:1i32
+        base = (warp_matrix_id - 1i32) * D
+        width = D1 - j + 1i32
+        mask = (UInt32(1) << width) - UInt32(1)
+        mask = mask << (base + j - 1i32)
+
+        if i >= j
+            tau_j = shfl_sync(mask, tau, lid - i + j)  # Get tau from 'leader' thread
+            w_i = Q[j, i]  # first element in v = 1, not stored in R
+            for t in (j + 1i32):D1
+                w_i += R[t, j] * Q[t, i]
+            end
+
+            R_elem = ifelse(i == j, 1.0f0, R[i, j])
+            for t in j:D2
+                w_t = shfl_sync(mask, w_i, lid - i + t)
+                Q[i, t] -= tau_j * R_elem * w_t
+            end
+        end
+    end
+end
+
+function batch_op!(
+    ::Val{:qr_Q_full},
+    Q::AbstractMatrix{T},
+    R::AbstractMatrix{T},
+    d::Int32,
+    tau::Float32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val{D},
+    warp_matrix_id::Int32,
+    ::Val{:small},
+) where {T,D1,D2,D}
+    tid = threadIdx().x
+    lid = mod1(tid, 32i32)
+    n_mats_per_warp = 32i32 ÷ D
+    active_lanes = n_mats_per_warp * D
+    
+    if lid > active_lanes || d > D1
+        return nothing
+    end
+    
+    i = d  # Each thread is responsible for the i-th row
+
+    # Initialise Q as identity
+    for j in 1i32:D1#min(D1, D2)
+        Q[i, j] = ifelse(i == j, one(T), zero(T))
+    end
+    
+    # Loop through the H_k...
+    for j in min(D1, D2):-1i32:1i32
+        base = (warp_matrix_id - 1i32) * D
+        width = D1 - j + 1i32
+        mask = (UInt32(1) << width) - UInt32(1)
+        mask = mask << (base + j - 1i32)
+
+        if i >= j
+            tau_j = shfl_sync(mask, tau, lid - i + j)  # Get tau from 'leader' thread
+            w_i = Q[j, i]  # first element in v = 1, not stored in R
+            for t in (j + 1i32):D1
+                w_i += R[t, j] * Q[t, i]
+            end
+
+            R_elem = ifelse(i == j, 1.0f0, R[i, j])
+            for t in j:max(D1, D2)#D2
+                w_t = shfl_sync(mask, w_i, lid - i + t)
+                Q[i, t] -= tau_j * R_elem * w_t
+            end
+        end
+    end
 end
 
 # Out-of-place upper triangular backward solve: C = U \ A

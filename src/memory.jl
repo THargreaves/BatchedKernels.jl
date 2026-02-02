@@ -1141,7 +1141,6 @@ end
     block_matrix_id = (wid - 1i32) * n_mats_per_warp + warp_matrix_id
     grid_matrix_id = (bid - 1i32) * n_mats_per_block + block_matrix_id
 
-    # @inbounds if lid <= active_lanes && grid_matrix_id <= N && col <= D2
     @inbounds if warp_matrix_id <= n_mats_per_warp && grid_matrix_id <= N && col <= D2
         for row in (1i32):D1
             logical_idx = (warp_matrix_id - 1i32) * D1 * D2 + (col - 1i32) * D1 + row
