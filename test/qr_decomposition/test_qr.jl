@@ -254,6 +254,249 @@ end
     end
 end
 
+@testitem "QR and multiply (out-of-place, non-square)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    function qr_and_multiply_kernel!(
+        Cs,
+        Bs,
+        As,
+        ::Val{D1},
+        ::Val{D2},
+        ::Val{B_D1},
+        ::Val{B_D2},
+        ::Val{D},
+        ::Val{nthreads},
+        N::Int32
+    ) where {D1,D2,B_D1,B_D2,D,nthreads}
+        n_mats_per_warp = 32i32 ÷ D
+        n_warps = nthreads ÷ 32i32
+        n_mats_per_block = n_warps * n_mats_per_warp
+        dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+
+        tid = threadIdx().x
+        bid = blockIdx().x
+        lid = mod1(tid, 32i32)
+        warp_matrix_id = div(lid - 1i32, D) + 1i32
+        d = mod1(lid, D)
+        grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
+
+        warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
+        shmem_elems = warp_shmem_size * n_warps
+        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
+
+        # Load A
+        intermediate_layout_load!(shmem_3, As, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+
+        # Load B
+        intermediate_layout_load!(shmem_3, Bs, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N, Val(:small))
+        interm_to_dual_transfer!(shmem_2, shmem_3, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N, Val(:small))
+
+        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+        R = A
+        B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+        C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
+
+        if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
+            tau = batch_op!(qr, R, A, d, Val(D1), Val(D2), Val(D), warp_matrix_id, Val(:small))
+            batch_op!(Val(:qr_Q_multiply), Val(false), C, R, B, d, tau, Val(D1), Val(D2), Val(B_D1), Val(B_D2), Val(D), warp_matrix_id, Val(:small))
+        end
+
+        # Store C
+        dual_to_interm_transfer!(shmem_1, C, Val(D1), Val(B_D2), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_write!(Cs, shmem_1, Val(D1), Val(B_D2), Val(D), Val(nthreads), N, Val(:small))
+
+        return nothing
+    end
+
+    # Test parameters
+    nthreads = 2^8
+    N = 2^9
+
+    count = 0
+    for D1 in 2:10
+        for D2 in 2:10
+            for B_D1 in unique((D1, min(D1, D2)))
+                for B_D2 in 2:10
+                    for extra in 0:1
+                        global count
+                        D = max(D1, D2, B_D1, B_D2) + extra
+                        nblocks = cld(N, nthreads//32 * (32 ÷ D))
+
+                        CUDA.seed!(1234)
+
+                        As = CUDA.rand(Float32, D1, D2, N)
+                        Bs = CUDA.rand(Float32, B_D1, B_D2, N)
+                        Cs = CUDA.zeros(Float32, D1, B_D2, N)
+
+                        CUDA.@sync @cuda threads = nthreads blocks = nblocks qr_and_multiply_kernel!(
+                            Cs,
+                            Bs,
+                            As,
+                            Val(Int32(D1)),
+                            Val(Int32(D2)),
+                            Val(Int32(B_D1)),
+                            Val(Int32(B_D2)),
+                            Val(Int32(D)),
+                            Val(nthreads),
+                            Int32(N),
+                        )
+
+                        # CPU comparison
+                        As_cpu = Array(As)
+                        Bs_cpu = Array(Bs)
+                        Cs_cpu = Array(Cs)
+
+                        Cs_real = zeros(Float32, D1, B_D2, N)
+
+                        for i in 1:N
+                            Cs_real[:, :, i] = qr(As_cpu[:, :, i]).Q * Bs_cpu[:, :, i]
+                        end
+
+                        max_error = maximum(abs.(Cs_real - Cs_cpu))
+                        if max_error >= 1e-4
+                            error("ERROR: [$count/2106]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error")
+                            break
+                        end
+
+                        @test max_error < 1e-4
+
+                        count += 1
+                        println("[$count/2106]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error")
+                    end
+                end
+            end
+        end
+    end
+end
+
+@testitem "QR transpose and multiply (out-of-place, non-square)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    function qr_trans_and_multiply_kernel!(
+        Cs,
+        Bs,
+        As,
+        ::Val{D1},
+        ::Val{D2},
+        ::Val{B_D1},
+        ::Val{B_D2},
+        ::Val{D},
+        ::Val{nthreads},
+        N::Int32
+    ) where {D1,D2,B_D1,B_D2,D,nthreads}
+        n_mats_per_warp = 32i32 ÷ D
+        n_warps = nthreads ÷ 32i32
+        n_mats_per_block = n_warps * n_mats_per_warp
+        dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+
+        tid = threadIdx().x
+        bid = blockIdx().x
+        lid = mod1(tid, 32i32)
+        warp_matrix_id = div(lid - 1i32, D) + 1i32
+        d = mod1(lid, D)
+        grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
+
+        warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
+        shmem_elems = warp_shmem_size * n_warps
+        shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
+
+        # Load A
+        intermediate_layout_load!(shmem_3, As, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+
+        # Load B
+        intermediate_layout_load!(shmem_3, Bs, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N, Val(:small))
+        interm_to_dual_transfer!(shmem_2, shmem_3, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N, Val(:small))
+
+        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+        R = A
+        B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+        C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
+
+        if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
+            tau = batch_op!(qr, R, A, d, Val(D1), Val(D2), Val(D), warp_matrix_id, Val(:small))
+            batch_op!(Val(:qr_Q_multiply), Val(true), C, R, B, d, tau, Val(D1), Val(D2), Val(B_D1), Val(B_D2), Val(D), warp_matrix_id, Val(:small))
+        end
+
+        # Store C
+        dual_to_interm_transfer!(shmem_1, C, Val(D1), Val(B_D2), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_write!(Cs, shmem_1, Val(D1), Val(B_D2), Val(D), Val(nthreads), N, Val(:small))
+
+        return nothing
+    end
+
+    # Test parameters
+    nthreads = 2^8
+    N = 2^9
+
+    count = 0
+    for D1 in 2:10
+        for D2 in 2:10
+            B_D1 = D1
+            for B_D2 in 2:10
+                for extra in 0:1
+                    global count
+                    D = max(D1, D2, B_D1, B_D2) + extra
+                    nblocks = cld(N, nthreads//32 * (32 ÷ D))
+
+                    CUDA.seed!(1234)
+
+                    As = CUDA.rand(Float32, D1, D2, N)
+                    Bs = CUDA.rand(Float32, B_D1, B_D2, N)
+                    Cs = CUDA.zeros(Float32, D1, B_D2, N)
+
+                    CUDA.@sync @cuda threads = nthreads blocks = nblocks qr_trans_and_multiply_kernel!(
+                        Cs,
+                        Bs,
+                        As,
+                        Val(Int32(D1)),
+                        Val(Int32(D2)),
+                        Val(Int32(B_D1)),
+                        Val(Int32(B_D2)),
+                        Val(Int32(D)),
+                        Val(nthreads),
+                        Int32(N),
+                    )
+
+                    # CPU comparison
+                    As_cpu = Array(As)
+                    Bs_cpu = Array(Bs)
+                    Cs_cpu = Array(Cs)
+
+                    Cs_real = zeros(Float32, D1, B_D2, N)
+
+                    for i in 1:N
+                        Cs_real[:, :, i] = qr(As_cpu[:, :, i]).Q' * Bs_cpu[:, :, i]
+                    end
+
+                    max_error = maximum(abs.(Cs_real - Cs_cpu))
+                    if max_error >= 1e-4
+                        error("ERROR: [$count/1458]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error")
+                        break
+                    end
+
+                    @test max_error < 1e-4
+
+                    count += 1
+                    println("[$count/1458]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error")
+                end
+            end
+        end
+    end
+end
+
 @testitem "QR Decomposition (vmap, non-square)" begin
     using BatchedKernels
     using CUDA
