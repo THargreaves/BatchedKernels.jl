@@ -58,6 +58,28 @@ struct BatchBinaryStep{F} <: KernelStep
     a::String
     b::String
     shape::Shape
+    shape2::Union{Nothing,Shape}
+    adj::Union{Nothing,Bool}
+end
+function BatchBinaryStep(
+    f::F,
+    dest::String,
+    a::String,
+    b::String,
+    shape::Shape,
+) where {F}
+    return BatchBinaryStep{F}(f, dest, a, b, shape, nothing, nothing)
+end
+function BatchBinaryStep(
+    f::F,
+    dest::String,
+    a::String,
+    b::String,
+    shape::Shape,
+    shape2::Shape,
+    adj::Bool
+) where {F}
+    return BatchBinaryStep{F}(f, dest, a, b, shape, shape2, adj)
 end
 struct BatchUnaryStep{F} <: KernelStep
     f::F  # cholesky, transpose
@@ -186,6 +208,37 @@ function get_compute_steps(
             is_mat(prog, a) || error("Cholesky only defined for matrices")
             push!(compute_steps, BatchUnaryStep(cholesky, slots[node.out], slots[a], shape))
         
+        elseif op == :qr
+            a = node.args[1]::ValueId
+            shape = prog.shapes[a]
+            is_mat(prog, a) || error("QR decomposition only defined for matrices")
+            push!(compute_steps, BatchUnaryStep(qr, slots[node.out], slots[a], shape))
+        
+        elseif op == :qr_Q_thin
+            a = node.args[1]::ValueId
+            shape = node.args[2]::MatShape
+            # shape = prog.shapes[a]
+            is_mat(prog, a) || error("Invalid type to materialise")
+            push!(compute_steps, BatchUnaryStep(:qr_Q_thin, slots[node.out], slots[a], shape))
+        
+        elseif op == :qr_Q_full
+            a = node.args[1]::ValueId
+            shape = node.args[2]::MatShape
+            # shape = prog.shapes[a]
+            is_mat(prog, a) || error("Invalid type to materialise")
+            push!(compute_steps, BatchUnaryStep(:qr_Q_full, slots[node.out], slots[a], shape))
+
+        elseif op == :qr_Q_multiply
+            a = node.args[1]::ValueId
+            b = node.args[2]::ValueId
+            adj = node.args[3]::Bool
+            shape1 = node.args[4]::MatShape
+            shape2 = prog.shapes[b]
+            (
+                is_mat(prog, a) && is_mat(prog, b)
+            ) || error("QR multipication only supports mat*mat")
+            push!(compute_steps, BatchBinaryStep(:qr_Q_multiply, slots[node.out], slots[a], slots[b], shape1, shape2, adj))
+
         elseif op == :trans
             a = node.args[1]::ValueId
             shape = prog.shapes[a]
@@ -504,17 +557,36 @@ function emit_kernel_expr(
             D1 = Int32(shape.D1)
             D2 = hasproperty(shape, :D2) ? Int32(shape.D2) : D1
 
-            push!(
-                stmts,
-                Expr(
-                    :if,
-                    :active,
+            if f == :qr_Q_multiply
+                shape2 = step.shape2::MatShape
+                B_D1 = shape2.D1
+                B_D2 = shape2.D2
+                adj = step.adj
+
+                push!(
+                    stmts,
                     Expr(
-                        :block,
-                        :(batch_op!($f, $dest, $a, $b, d, Val($D1), Val($D2), Val($D), Val(:small))),
+                        :if,
+                        :active,
+                        Expr(
+                            :block,
+                            :(batch_op!(Val($(QuoteNode(f))), Val($adj), $dest, $a, $b, d, $(Symbol("tau_$a")), Val($D1), Val($D2), Val($B_D1), Val($B_D2), Val($D), warp_matrix_id, Val(:small))),
+                        ),
                     ),
-                ),
-            )
+                )
+            else
+                push!(
+                    stmts,
+                    Expr(
+                        :if,
+                        :active,
+                        Expr(
+                            :block,
+                            :(batch_op!($f, $dest, $a, $b, d, Val($D1), Val($D2), Val($D), Val(:small))),
+                        ),
+                    ),
+                )
+            end
                     
         elseif curr_step isa BatchUnaryStep
             step = curr_step::BatchUnaryStep
@@ -547,6 +619,36 @@ function emit_kernel_expr(
                         Expr(
                             :block,
                             :(batch_op!(transpose, $dest, $a, d, Val($D1), Val($D2), Val($D), Val(:small))),
+                        ),
+                    ),
+                )
+
+            elseif f === qr
+                tau_sym = Symbol("tau_$dest")
+                push!(stmts, :($(tau_sym) = 0.0f0))
+                push!(
+                    stmts,
+                    Expr(
+                        :if,
+                        :active,
+                        Expr(
+                            :block,
+                            :(
+                                $(tau_sym) = batch_op!(qr, $dest, $a, d, Val($D1), Val($D2), Val($D), warp_matrix_id, Val(:small))
+                            ),
+                        ),
+                    ),
+                )
+            
+            elseif f === :qr_Q_thin || f === :qr_Q_full
+                push!(
+                    stmts,
+                    Expr(
+                        :if,
+                        :active,
+                        Expr(
+                            :block,
+                            :(batch_op!(Val($(QuoteNode(f))), $dest, $a, d, $(Symbol("tau_$a")), Val($D1), Val($D2), Val($D), warp_matrix_id, Val(:small))),
                         ),
                     ),
                 )

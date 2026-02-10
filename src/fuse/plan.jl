@@ -215,7 +215,7 @@ function can_reuse_arg1(state::State, i::Int, node::IRNode)
 end
 
 function can_reuse_arg2(state::State, i::Int, node::IRNode)
-    length(node.args) == 2 || return false
+    length(node.args) >= 2 || return false
     node.args[2] isa ValueId || return false
     
     arg2 = node.args[2]::ValueId
@@ -227,19 +227,21 @@ end
 function try_inplace!(state::State, i::Int, node::IRNode, outputs::Vector{ValueId})
     op = node.op
     arg1 = node.args[1]
+    arg2 = length(node.args) ≥ 2 ? node.args[2] : nothing
 
     (
-        op in (:chol, :forwardsolve, :backwardsolve)
-        || (op in (:add, :sub) && arg1 isa ValueId && !(state.kinds[arg1] <: TransMatKind))
+        op in (:chol, :forwardsolve, :backwardsolve, :qr_Q_thin, :qr_Q_full)
+        || (op in (:add, :sub, :qr) && arg1 isa ValueId && !(state.kinds[arg1] <: TransMatKind))
+        || (op == :qr_Q_multiply) && arg2 isa ValueId && !(state.kinds[arg2] <: TransMatKind)
         || (op == :trans && node.out in outputs)
     ) || return false
 
-    if op in (:chol, :add, :sub, :trans) && arg1 isa ValueId && can_reuse_arg1(state, i, node)
+    if op in (:chol, :add, :sub, :trans, :qr, :qr_Q_thin, :qr_Q_full) && arg1 isa ValueId && can_reuse_arg1(state, i, node)
         state.slots[node.out] = increment_slot!(state, arg1::ValueId)
         return true
     end
     
-    if op in (:add, :sub, :forwardsolve, :backwardsolve) && can_reuse_arg2(state, i, node)
+    if op in (:add, :sub, :forwardsolve, :backwardsolve, :qr_Q_multiply) && can_reuse_arg2(state, i, node)
         arg2 = node.args[2]
         state.slots[node.out] = increment_slot!(state, arg2::ValueId)
         return true

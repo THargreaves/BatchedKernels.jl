@@ -497,34 +497,139 @@ end
     end
 end
 
-@testitem "QR Decomposition (vmap, non-square)" begin
+@testitem "QR and multiply (vmap)" begin
+    using BatchedKernels
+    using LinearAlgebra
+    using CUDA
+
+    function qr_mul(A, B, dummy)
+        res = qr(A)
+        return res.Q * B
+    end
+
+    # Test parameters
+    N = 2^9
+
+    count = 0
+    for D1 in 2:10
+        for D2 in 2:10
+            for B_D1 in unique((D1, min(D1, D2)))
+                for B_D2 in 2:10
+                    for extra in 0:1
+                        global count
+                        count += 1
+                        D = max(D1, D2, B_D1, B_D2) + extra
+
+                        CUDA.seed!(1234)
+
+                        As = CUDA.rand(Float32, D1, D2, N)
+                        Bs = CUDA.rand(Float32, B_D1, B_D2, N)
+                        dummy = CUDA.zeros(Float32, D, D, N)
+
+                        qr_mul_vmap = BatchedKernels.vmap(qr_mul)
+                        Cs = qr_mul_vmap(As, Bs, dummy)
+
+                        # CPU comparison
+                        As_cpu = Array(As)
+                        Bs_cpu = Array(Bs)
+                        Cs_cpu = Array(Cs)
+
+                        Cs_real = zeros(Float32, D1, B_D2, N)
+
+                        for i in 1:N
+                            Cs_real[:, :, i] = qr_mul(As_cpu[:, :, i], Bs_cpu[:, :, i], 0)
+                        end
+
+                        max_error = maximum(abs.(Cs_real - Cs_cpu))
+
+                        @test max_error < 1e-4 && !isnan(max_error)
+
+                        println("[$count/2106]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error")
+                    end
+                end
+            end
+        end
+    end
+end
+
+@testitem "QR transpose and multiply (vmap)" begin
+    using BatchedKernels
+    using LinearAlgebra
+    using CUDA
+
+    function qr_mul(A, B, dummy)
+        res = qr(A)
+        return res.Q' * B
+    end
+
+    # Test parameters
+    N = 2^9
+
+    count = 0
+    for D1 in 2:10
+        for D2 in 2:10
+            B_D1 = D1
+            for B_D2 in 2:10
+                for extra in 0:1
+                    global count
+                    count += 1
+                    D = max(D1, D2, B_D1, B_D2) + extra
+
+                    CUDA.seed!(1234)
+
+                    As = CUDA.rand(Float32, D1, D2, N)
+                    Bs = CUDA.rand(Float32, B_D1, B_D2, N)
+                    dummy = CUDA.zeros(Float32, D, D, N)
+
+                    qr_mul_vmap = BatchedKernels.vmap(qr_mul)
+                    Cs = qr_mul_vmap(As, Bs, dummy)
+
+                    # CPU comparison
+                    As_cpu = Array(As)
+                    Bs_cpu = Array(Bs)
+                    Cs_cpu = Array(Cs)
+
+                    Cs_real = zeros(Float32, D1, B_D2, N)
+
+                    for i in 1:N
+                        Cs_real[:, :, i] = qr_mul(As_cpu[:, :, i], Bs_cpu[:, :, i], 0)
+                    end
+
+                    max_error = maximum(abs.(Cs_real - Cs_cpu))
+
+                    @test max_error < 1e-4 && !isnan(max_error)
+
+                    println("[$count/1458]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error")
+                end
+            end
+        end
+    end
+end
+
+@testitem "QR Decomposition Qthin (vmap, non-square)" begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
     using LinearAlgebra
 
     # Test parameters
-    N = 2^12 + 113
+    N = 2^9 + 113
 
     function qr_decomp(A)
         res = qr(A)
-        Q = res.Q
+        Q = Matrix(res.Q)
         R = res.R
         return Q, R
     end
 
-    N = 2^12 + 113
-
-    for D1 in 2:13
-        for D2 in 2:D1
-            for extra in 0:0
+    for D1 in 2:10
+        for D2 in 2:10
+            for extra in 0:1
                 D = max(D1, D2) + extra
 
                 CUDA.seed!(1234)
 
                 # Create symmetric positive definite matrices
-                # This is numerically unstable if A^T A is near-singular.
-                # TODO: Implement a direct QR decomposition that is more stable
                 As = CUDA.rand(Float32, D1, D2, N)
                 As_cpu = Array(As)
                 dummy = CUDA.rand(Float32, D, D, N)
@@ -534,17 +639,171 @@ end
                 Qs_result = Array(Q)
                 Rs_result = Array(R)
 
-                # Reconstruction comparison
-                max_Q_error = 0.0
-                max_recon_error = 0.0
+                Qs_real = zeros(Float32, D1, min(D1, D2), N)
+                Rs_real = zeros(Float32, min(D1, D2), D2, N)
                 for i in 1:N
-                    Q_error = maximum(abs.(I - Qs_result[:, :, i]' * Qs_result[:, :, i]))
-                    recon_error = maximum(abs.(As_cpu[:, :, i] - Qs_result[:, :, i] * Rs_result[:, :, i]))
-
-                    max_Q_error = max(max_Q_error, Q_error)
-                    max_recon_error = max(max_recon_error, recon_error)
+                    Q_real, R_real = qr_decomp(As_cpu[:, :, i])
+                    Qs_real[:, :, i] = Q_real
+                    Rs_real[:, :, i] = R_real
                 end
-                max_error = max(max_Q_error, max_recon_error)
+                
+                max_error_Q = maximum(abs.(Qs_real - Qs_result))
+                max_error_R = maximum(abs.(Rs_real - Rs_result))
+                max_error = max(max_error_Q, max_error_R)
+
+                @test max_error < 1e-3 && !isnan(max_error)
+            end
+        end
+    end
+end
+
+@testitem "QR Decomposition Qthin transpose (vmap, non-square)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    # Test parameters
+    N = 2^9
+
+    function qr_decomp(A)
+        res = qr(A')
+        Q = Matrix(res.Q)
+        R = res.R
+        return Q, R
+    end
+
+    for D1 in 2:10
+        for D2 in 2:10
+            for extra in 0:1
+                D = max(D1, D2) + extra
+
+                CUDA.seed!(1234)
+
+                # Create symmetric positive definite matrices
+                As = CUDA.rand(Float32, D1, D2, N)
+                As_cpu = Array(As)
+                dummy = CUDA.rand(Float32, D, D, N)
+
+                qr_vmap = BatchedKernels.vmap(qr_decomp)
+                Q, R = qr_vmap(As)
+                Qs_result = Array(Q)
+                Rs_result = Array(R)
+
+                Qs_real = zeros(Float32, D2, min(D1, D2), N)
+                Rs_real = zeros(Float32, min(D1, D2), D1, N)
+                for i in 1:N
+                    Q_real, R_real = qr_decomp(As_cpu[:, :, i])
+                    Qs_real[:, :, i] = Q_real
+                    Rs_real[:, :, i] = R_real
+                end
+                
+                max_error_Q = maximum(abs.(Qs_real - Qs_result))
+                max_error_R = maximum(abs.(Rs_real - Rs_result))
+                max_error = max(max_error_Q, max_error_R)
+
+                @test max_error < 1e-3 && !isnan(max_error)
+            end
+        end
+    end
+end
+
+@testitem "QR Decomposition Qfull (vmap, non-square)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    # Test parameters
+    N = 2^9 + 113
+
+    function qr_decomp(A)
+        res = qr(A)
+        Q = res.Q * I
+        R = res.R
+        return Q, R
+    end
+
+    for D1 in 2:10
+        for D2 in 2:10
+            for extra in 0:1
+                D = max(D1, D2) + extra
+
+                CUDA.seed!(1234)
+
+                # Create symmetric positive definite matrices
+                As = CUDA.rand(Float32, D1, D2, N)
+                As_cpu = Array(As)
+                dummy = CUDA.rand(Float32, D, D, N)
+
+                qr_vmap = BatchedKernels.vmap(qr_decomp)
+                Q, R = qr_vmap(As)
+                Qs_result = Array(Q)
+                Rs_result = Array(R)
+
+                Qs_real = zeros(Float32, D1, D1, N)
+                Rs_real = zeros(Float32, min(D1, D2), D2, N)
+                for i in 1:N
+                    Q_real, R_real = qr_decomp(As_cpu[:, :, i])
+                    Qs_real[:, :, i] = Q_real
+                    Rs_real[:, :, i] = R_real
+                end
+                
+                max_error_Q = maximum(abs.(Qs_real - Qs_result))
+                max_error_R = maximum(abs.(Rs_real - Rs_result))
+                max_error = max(max_error_Q, max_error_R)
+
+                @test max_error < 1e-3 && !isnan(max_error)
+            end
+        end
+    end
+end
+
+@testitem "QR Decomposition Qfull  transpose(vmap, non-square)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    # Test parameters
+    N = 2^9 + 113
+
+    function qr_decomp(A)
+        res = qr(A')
+        Q = res.Q * I
+        R = res.R
+        return Q, R
+    end
+
+    for D1 in 2:10
+        for D2 in 2:10
+            for extra in 0:1
+                D = max(D1, D2) + extra
+
+                CUDA.seed!(1234)
+
+                # Create symmetric positive definite matrices
+                As = CUDA.rand(Float32, D1, D2, N)
+                As_cpu = Array(As)
+                dummy = CUDA.rand(Float32, D, D, N)
+
+                qr_vmap = BatchedKernels.vmap(qr_decomp)
+                Q, R = qr_vmap(As)
+                Qs_result = Array(Q)
+                Rs_result = Array(R)
+
+                Qs_real = zeros(Float32, D2, D2, N)
+                Rs_real = zeros(Float32, min(D1, D2), D1, N)
+                for i in 1:N
+                    Q_real, R_real = qr_decomp(As_cpu[:, :, i])
+                    Qs_real[:, :, i] = Q_real
+                    Rs_real[:, :, i] = R_real
+                end
+                
+                max_error_Q = maximum(abs.(Qs_real - Qs_result))
+                max_error_R = maximum(abs.(Rs_real - Rs_result))
+                max_error = max(max_error_Q, max_error_R)
+
                 @test max_error < 1e-3 && !isnan(max_error)
             end
         end

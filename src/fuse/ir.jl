@@ -1,23 +1,5 @@
 using LinearAlgebra
 
-##########################
-### IR DATA STRUCTURES ###
-##########################
-
-"SSA ID for each variable in the function."
-struct ValueId
-    id::Int
-end
-
-const IRArg{T} = Union{ValueId, T}
-
-"A node in the IR program. Represents one operation."
-struct IRNode{T}
-    out::ValueId
-    op::Symbol
-    args::Vector{IRArg{T}}   # ValueId or literal (e.g. 3.0f0)
-end
-
 
 ##################
 ### SHAPE TYPE ###
@@ -33,6 +15,25 @@ struct VecShape <: Shape
 end
 struct ScalShape <: Shape end
 struct ConstShape <: Shape end
+
+
+##########################
+### IR DATA STRUCTURES ###
+##########################
+
+"SSA ID for each variable in the function."
+struct ValueId
+    id::Int
+end
+
+const IRArg{T} = Union{ValueId,T,Bool,Shape}
+
+"A node in the IR program. Represents one operation."
+struct IRNode{T}
+    out::ValueId
+    op::Symbol
+    args::Vector{IRArg{T}}
+end
 
 
 #######################
@@ -93,11 +94,9 @@ IRProgram(::Type{T}, D::Int, nthreads::Int) where {T} = IRProgram{T}(
 )
 Base.eltype(::IRProgram{T}) where {T} = T
 
-"Constant number type helper."
 @inline function fix_type(::IRProgram{T}, x) where {T}
-    x isa ValueId && return x
     x isa T && return x
-    x isa Number && return T(x)
+    (x isa Number || x isa Bool) && return T(x)
     error("Unsupported IR arg $(typeof(x))")
 end
 
@@ -130,6 +129,7 @@ function create_symval(vid::ValueId, ::Type{K}, shape::Shape, prog::IRProgram{T}
 end
 
 abstract type FactorisationVal <: AbstractSymVal end
+abstract type LazyOperatorVal <: AbstractSymVal end
 
 """
 Symbolic value for Cholesky decomposition results.
@@ -157,21 +157,42 @@ end
 """
 Symbolic value for QR decomposition results, containing Q and R
 """
-struct QRVal{T} <: AbstractSymVal
-    Q::SymVal{<:MatKind,T}
-    R::SymVal{UpperTrigMatKind,T}
+struct QRVal{T} <: FactorisationVal
+    content::SymVal
+    shape::MatShape
     prog::IRProgram{T}
 end
 
-function create_qrval(Q::SymVal{<:MatKind,T}, R::SymVal{UpperTrigMatKind,T}, prog::IRProgram{T}) where {T}    
-    # No need to create SymVals for Q and R as they already exist, just link them to this QRVal instance
-    return QRVal{T}(Q, R, prog)
+struct LazyQOperator{T,Adj} <: LazyOperatorVal
+    content::SymVal
+    shape::MatShape
+    prog::IRProgram{T}
 end
 
-function Base.getproperty(x::QRVal, s::Symbol)
-    # s === :Q && return x.Q
-    s === :R && return UpperTriangular(getfield(x, :R))
+function create_qrval(vid::ValueId, shape::MatShape, prog::IRProgram{T}) where {T}    
+    R_shape = MatShape(min(shape.D1, shape.D2), shape.D2)
+    content = create_symval(vid, DenseMatKind, R_shape, prog)
+    return QRVal{T}(content, shape, prog)
+end
+
+function Base.getproperty(x::QRVal{T}, s::Symbol) where {T}
+    s === :Q && return LazyQOperator{T,false}(x.content, x.shape, x.prog)
+    s === :R && return UpperTriangular(x.content)
     s === :kind && return QRKind
+    s === :vid && error("Cannot access vid of a FactorisationVal")
+    return getfield(x, s)
+end
+
+function Base.getproperty(x::LazyQOperator{T,Adj}, s::Symbol) where {T,Adj}
+    if s === :shape
+        sx = getfield(x, s)
+        if !Adj
+            return sx
+        else
+            return MatShape(sx.D2, sx.D1)
+        end
+    end
+    s === :adj && return Adj
     return getfield(x, s)
 end
 
@@ -253,10 +274,9 @@ end
 ##########################
 
 "Append an IR node and return its output ValueId."
-function emit!(prog::IRProgram{T}, op::Symbol, args::Vector) where {T}
+function emit!(prog::IRProgram{T}, op::Symbol, args::Vector{IRArg{T}}) where {T}
     out = fresh!(prog)
-    typed_args = IRArg{T}[fix_type(prog, arg) for arg in args]
-    push!(prog.nodes, IRNode{T}(out, op, typed_args))
+    push!(prog.nodes, IRNode{T}(out, op, args))
     return out
 end
 
@@ -290,8 +310,21 @@ function Base.:*(x::SymVal, y::SymVal)
         return y * x
     end
     kind, shape = op_signature(Val(:mul), x.kind, x.prog.shapes[x.vid], y.kind, x.prog.shapes[y.vid])
-    out = emit!(x.prog, :mul, Any[x.vid, y.vid])
+    out = emit!(x.prog, :mul, IRArg{eltype(x.prog)}[x.vid, y.vid])
     return create_symval(out, kind, shape, x.prog)
+end
+function Base.:*(x::LazyQOperator{T,Adj}, y::SymVal{<:MatKind}) where {T,Adj}
+    sx = x.shape
+    sy = x.prog.shapes[y.vid]
+
+    res_shape = MatShape(!Adj ? sx.D1 : sx.D2, sy.D2)
+    if !Adj
+        shape = sx
+    else
+        shape = MatShape(sx.D2, sx.D1)
+    end
+    out = emit!(x.prog, :qr_Q_multiply, IRArg{eltype(x.prog)}[x.content.vid, y.vid, Adj, shape])
+    return create_symval(out, DenseMatKind, res_shape, x.prog)
 end
 
 @inline function op_signature(::Val{:mul_const}, ::Type{<:ScalLike}, sx::ScalShape, ::Type{ConstKind}, ::ConstShape)
@@ -305,13 +338,44 @@ end
 end
 function Base.:*(x::SymVal, y::Number)
     kind, shape = op_signature(Val(:mul_const), x.kind, x.prog.shapes[x.vid], ConstKind, ConstShape())
-    out = emit!(x.prog, :mul_const, Any[x.vid, fix_type(x.prog, y)])
+    out = emit!(x.prog, :mul_const, IRArg{eltype(x.prog)}[x.vid, fix_type(x.prog, y)])
     return create_symval(out, kind, shape, x.prog)
 end
 Base.:*(x::Number, y::SymVal) = y * x
 
+# Materialise Qfull
+function Base.:*(x::LazyQOperator{T,Adj}, ::UniformScaling) where {T,Adj}
+    sx = x.shape
+    shape = MatShape(sx.D1, sx.D1)
+
+    out = emit!(x.prog, :qr_Q_full, IRArg{eltype(x.prog)}[x.content.vid, sx])
+
+    res = create_symval(out, DenseMatKind, shape, x.prog)
+    if !Adj
+        return res
+    else
+        return res'
+    end
+end
+Base.:*(y::UniformScaling, x::LazyQOperator) = x * y
+
+# Materialise Qthin
+function LinearAlgebra.Matrix(x::LazyQOperator{T,Adj}) where {T,Adj}
+    sx = x.shape
+    shape = MatShape(sx.D1, min(sx.D1, sx.D2))
+
+    out = emit!(x.prog, :qr_Q_thin, IRArg{eltype(x.prog)}[x.content.vid, sx])
+
+    res = create_symval(out, DenseMatKind, shape, x.prog)
+    if !Adj
+        return res
+    else
+        return res'
+    end
+end
+
 function LinearAlgebra.cholesky(x::SymVal{SymMatKind,T}) where {T}
-    out = emit!(x.prog, :chol, Any[x.vid])
+    out = emit!(x.prog, :chol, IRArg{eltype(x.prog)}[x.vid])
     shape = x.prog.shapes[x.vid]::MatShape
     return create_choleskyval(out, shape, x.prog)
 end
@@ -320,7 +384,7 @@ LinearAlgebra.cholesky(::SymVal) = error("Unknown types for Cholesky. Ensure mat
 function LinearAlgebra.Symmetric(x::SymVal{<:MatLike})
     shape = x.prog.shapes[x.vid]
     shape.D1 == shape.D2 || error("Cannot call Symmetric() on a matrix with shape $shape")
-    out = emit!(x.prog, :sym, Any[x.vid])
+    out = emit!(x.prog, :sym, IRArg{eltype(x.prog)}[x.vid])
     return create_symval(out, SymMatKind, shape, x.prog)
 end
 LinearAlgebra.Symmetric(::SymVal) = error("Symmetric() is only defined for matrices")
@@ -328,15 +392,14 @@ LinearAlgebra.Symmetric(::SymVal) = error("Symmetric() is only defined for matri
 function LinearAlgebra.LowerTriangular(x::SymVal{<:MatLike})
     shape = x.prog.shapes[x.vid]
     shape.D1 == shape.D2 || error("Cannot call LowerTriangular() on a matrix with shape $shape")
-    out = emit!(x.prog, :lowertrig, Any[x.vid])
+    out = emit!(x.prog, :lowertrig, IRArg{eltype(x.prog)}[x.vid])
     return create_symval(out, LowerTrigMatKind, shape, x.prog)
 end
 LinearAlgebra.LowerTriangular(::SymVal) = error("LowerTriangular() only defined for matrices")
 
 function LinearAlgebra.UpperTriangular(x::SymVal{<:MatLike})
     shape = x.prog.shapes[x.vid]
-    shape.D1 == shape.D2 || error("Cannot call UpperTriangular() on a matrix with shape $shape")
-    out = emit!(x.prog, :uppertrig, Any[x.vid])
+    out = emit!(x.prog, :uppertrig, IRArg{eltype(x.prog)}[x.vid])
     return create_symval(out, UpperTrigMatKind, shape, x.prog)
 end
 LinearAlgebra.UpperTriangular(::SymVal) = error("UpperTriangular() only defined for matrices")
@@ -349,7 +412,7 @@ function Base.:\(x::SymVal{Kx,T}, y::SymVal{Ky,T}) where {Kx<:TrigMatKind,Ky<:Ma
     sx.D2 == sy.D1 || error("Leftdiv shape mismatch: $sx \\ $sy")
 
     op = Kx <: LowerTrigMatKind ? :forwardsolve : :backwardsolve
-    out = emit!(x.prog, op, Any[x.vid, y.vid])
+    out = emit!(x.prog, op, IRArg{eltype(x.prog)}[x.vid, y.vid])
 
     return create_symval(out, DenseMatKind, sy, x.prog)
 end
@@ -359,8 +422,8 @@ end
 Base.:\(::SymVal, ::SymVal) = error("Unknown combination of types to leftdiv")
 
 function Base.:/(x::SymVal{<:MatLike}, y::SymVal{<:SymMatKind})
-    sx = x.prog.shapes[x.vid]
-    sy = x.prog.shapes[y.vid]
+    sx = x.prog.shapes[x.vid]::MatShape
+    sy = x.prog.shapes[y.vid]::MatShape
     sy.D1 == sy.D2 || error("Expected symmetric matrix to be square, got $sy")
     sx.D2 == sy.D1 || error("Matrix solve type mismatch: $sx / $sy")
 
@@ -370,37 +433,46 @@ function Base.:/(x::SymVal{<:MatLike}, y::SymVal{<:SymMatKind})
     return result'
 end
 function Base.:/(x::SymVal{<:MatLike}, y::SymVal{<:MatLike})
-    error("Solves are not yet supported for non-symmetric matrices")
+    sx = x.prog.shapes[x.vid]::MatShape
+    sy = y.prog.shapes[y.vid]::MatShape
+
+    sx.D2 == sy.D2 || error("Solve shape mismatch: $sx, $sy")
+
+    if sy.D1 < sy.D2
+        qr_res = qr(y')
+
+        # Perform interm = qr_res.Q' * x' but only take first min(D1,D2) rows
+        s_qr = qr_res.shape 
+        interm_shape = MatShape(min(sy.D1, sy.D2), sx.D1)
+        interm_vid = emit!(
+            x.prog,
+            :qr_Q_multiply,
+            IRArg{eltype(x.prog)}[qr_res.content.vid, (x').vid, true, s_qr]
+        )
+        interm = create_symval(interm_vid, DenseMatKind, interm_shape, x.prog)
+
+        return (qr_res.R \ interm)'
+    else
+        qr_res = qr(y)
+        interm = (qr_res.R') \ x'
+        return (qr_res.Q * interm)'
+    end
 end
 Base.:/(x::SymVal{ScalarKind}, y::SymVal{ScalarKind}) = error("Scalar/Scalar not yet supported")
 Base.:/(::SymVal{<:SymKind}, ::SymVal{<:SymKind}) = error("Unknown combination of types to div")
 
 function LinearAlgebra.qr(x::SymVal{<:MatLike})
-    sx = x.prog.shapes[x.vid]
-    if sx.D1 >= sx.D2
-        # Cholesky QR2
-        R1 = cholesky(Symmetric(x' * x)).U
-        Q1 = (R1' \ x')'
-        R2 = cholesky(Symmetric(Q1' * Q1)).U
-        Q = (R2' \ Q1')'
-        R = UpperTriangular(R2 * R1)
-        return create_qrval(Q, R, x.prog)
+    out = emit!(x.prog, :qr, IRArg{eltype(x.prog)}[x.vid])
+    sx = x.prog.shapes[x.vid]::MatShape
 
-        # Cholesky QR
-        # G = BatchedKernels.gram(x)
-        # R = cholesky(Symmetric(G)).U
-        # Q = (LowerTriangular(R') \ x')'
-        # return create_qrval(Q, R, x.prog)
-    else
-        error("D1 < D2 case for QR not implemented yet")
-    end
+    return create_qrval(out, sx, x.prog)
 end
 LinearAlgebra.qr(::SymVal{<:SymKind}) = error("Unknown combination of types to qr decomposition")
 
 function LinearAlgebra.adjoint(x::SymVal{<:MatLike})
     sx = x.prog.shapes[x.vid]
     shape = MatShape(sx.D2, sx.D1)
-    out = emit!(x.prog, :trans, Any[x.vid])
+    out = emit!(x.prog, :trans, IRArg{eltype(x.prog)}[x.vid])
 
     if x.prog.kinds[x.vid] <: LowerTrigMatKind
         kind = UpperTrigMatKind
@@ -411,6 +483,9 @@ function LinearAlgebra.adjoint(x::SymVal{<:MatLike})
     end
 
     return create_symval(out, kind, shape, x.prog)
+end
+function LinearAlgebra.adjoint(x::LazyQOperator{T,Adj}) where {T,Adj}
+    return LazyQOperator{T,!Adj}(x.content, x.shape, x.prog)
 end
 LinearAlgebra.adjoint(x::SymVal{VecKind}) = error("Vec' not yet supported")
 LinearAlgebra.adjoint(x::SymVal{ScalarKind}) = x
@@ -434,7 +509,7 @@ function Base.:+(x::SymVal, y::SymVal)
     sx = x.prog.shapes[x.vid]
     sy = x.prog.shapes[y.vid]
     kind, shape = op_signature(Val(:addsub), x.kind, sx, y.kind, sy)
-    out = emit!(x.prog, :add, Any[x.vid, y.vid])
+    out = emit!(x.prog, :add, IRArg{eltype(x.prog)}[x.vid, y.vid])
     return create_symval(out, kind, shape, x.prog)
 end
 
@@ -442,14 +517,14 @@ function Base.:-(x::SymVal, y::SymVal)
     sx = x.prog.shapes[x.vid]
     sy = x.prog.shapes[y.vid]
     kind, shape = op_signature(Val(:addsub), x.kind, sx, y.kind, sy)
-    out = emit!(x.prog, :sub, Any[x.vid, y.vid])
+    out = emit!(x.prog, :sub, IRArg{eltype(x.prog)}[x.vid, y.vid])
     return create_symval(out, kind, shape, x.prog)
 end
 
 function Base.:+(x::UniformScaling, y::SymVal{<:MatLike})
     sy = y.prog.shapes[y.vid]
     sy.D1 == sy.D2 || error("Identity + matrix only supported for square matrices")
-    out = emit!(y.prog, :iplus, Any[y.vid, fix_type(y.prog, x.λ)])
+    out = emit!(y.prog, :iplus, IRArg{eltype(y.prog)}[y.vid, fix_type(y.prog, x.λ)])
     return create_symval(out, DenseMatKind, sy, y.prog)
 end
 Base.:+(x::SymVal, y::UniformScaling) = y + x
@@ -458,7 +533,7 @@ Base.:+(::UniformScaling, y::SymVal) = error("Unknown combination of type to add
 function Base.:-(x::UniformScaling, y::SymVal{<:MatLike})
     sy = y.prog.shapes[y.vid]
     sy.D1 == sy.D2 || error("Identity - matrix only supported for square matrices")
-    out = emit!(y.prog, :iminus, Any[y.vid, fix_type(y.prog, x.λ)])
+    out = emit!(y.prog, :iminus, IRArg{eltype(y.prog)}[y.vid, fix_type(y.prog, x.λ)])
     return create_symval(out, DenseMatKind, sy, y.prog)
 end
 Base.:-(x::SymVal{<:MatLike}, y::UniformScaling) = (-y) + x

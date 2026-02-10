@@ -501,3 +501,59 @@ end
         end
     end
 end
+
+@testitem "Non-symmetric solve (vmap)" begin
+    using BatchedKernels
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+
+    # Test parameters
+    N = 2^9
+
+    function solve(X, Y, dummy)
+        return X / Y
+    end
+
+    count = 0
+    for Y_D1 in 2:10
+        for Y_D2 in 2:10
+            for X_D1 in 2:10
+                X_D2 = Y_D2
+                for extra in 0:2
+                    global count
+                    count += 1
+
+                    D = max(Y_D1, Y_D2, X_D1, X_D2) + extra
+
+                    CUDA.seed!(1234)
+
+                    Xs = CUDA.rand(Float32, X_D1, X_D2, N)
+                    Ys = CUDA.rand(Float32, Y_D1, Y_D2, N)
+                    for j in 1:min(Y_D1, Y_D2)
+                        @views Ys[j, j, :] .+= 2f0
+                    end
+                    dummy = CUDA.zeros(Float32, D, D, N)
+
+                    solve_vmap = BatchedKernels.vmap(solve)
+                    Zs = solve_vmap(Xs, Ys, dummy)
+
+                    Xs_cpu = Array(Xs)
+                    Ys_cpu = Array(Ys)
+                    Zs_cpu = Array(Zs)
+
+                    Zs_real = zeros(Float32, X_D1, Y_D1, N)
+                    for i in 1:N
+                        Zs_real[:, :, i] = solve(Xs_cpu[:, :, i], Ys_cpu[:, :, i], 0)
+                    end
+
+                    max_error = maximum(abs.(Zs_real - Zs_cpu))
+
+                    @test max_error < 1e-3 && !isnan(max_error)
+
+                    println("[$count/1458]: Y=($Y_D1,$Y_D2), X=($X_D1,$X_D2), max_error=$max_error")
+                end
+            end
+        end
+    end
+end

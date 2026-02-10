@@ -468,7 +468,7 @@ end
     tau_storage = 0.0f0
 
     # Loop through all columns
-    for j in 1i32:(min(D1, D2) - (D1 == D2) * 1i32)
+    for j in 1i32:min(D1 - 1i32, D2)
         # Compute norm of j-th column
 
         # Create mask for threads i >= j
@@ -673,8 +673,8 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
     B::AbstractMatrix{T},
     d::Int32,
     tau::Float32,
-    ::Val{D1},
-    ::Val{D2},
+    ::Val{D1},  # Rows of the original matrix that qr was called on, independent of whether Q is transposed or not
+    ::Val{D2},  # Columns of the original matrix
     ::Val{B_D1},  # Rows of B
     ::Val{B_D2},  # Columns of B
     ::Val{D},
@@ -692,15 +692,14 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
     
     i = d
 
-    @inbounds if C !== B
-        if i <= B_D1
-            for j in 1i32:B_D2
-                C[i, j] = B[i, j]
-            end
-        elseif i <= D1
-            for j in 1i32:B_D2
-                C[i, j] = 0.0f0
-            end 
+    @inbounds if C !== B && i <= B_D1
+        for j in 1i32:B_D2
+            C[i, j] = B[i, j]
+        end
+    end
+    @inbounds if i > B_D1 && i <= D1
+        for j in 1i32:B_D2
+            C[i, j] = 0.0f0
         end
     end
 
