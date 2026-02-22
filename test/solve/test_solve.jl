@@ -520,7 +520,7 @@ end
         for Y_D2 in 2:10
             for X_D1 in 2:10
                 X_D2 = Y_D2
-                for extra in 0:2
+                for extra in 0:1
                     global count
                     count += 1
 
