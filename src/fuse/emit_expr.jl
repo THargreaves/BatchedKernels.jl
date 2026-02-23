@@ -59,6 +59,7 @@ struct BatchBinaryStep{F} <: KernelStep
     b::String
     shape::Shape
     shape2::Union{Nothing,Shape}
+    D3::Union{Nothing,Int}
     adj::Union{Nothing,Bool}
 end
 function BatchBinaryStep(
@@ -68,7 +69,17 @@ function BatchBinaryStep(
     b::String,
     shape::Shape,
 ) where {F}
-    return BatchBinaryStep{F}(f, dest, a, b, shape, nothing, nothing)
+    return BatchBinaryStep{F}(f, dest, a, b, shape, nothing, nothing, nothing)
+end
+function BatchBinaryStep(
+    f::F,
+    dest::String,
+    a::String,
+    b::String,
+    shape::Shape,
+    D3::Int32,
+) where {F}
+    return BatchBinaryStep{F}(f, dest, a, b, shape, nothing, D3, nothing)
 end
 function BatchBinaryStep(
     f::F,
@@ -79,7 +90,7 @@ function BatchBinaryStep(
     shape2::Shape,
     adj::Bool
 ) where {F}
-    return BatchBinaryStep{F}(f, dest, a, b, shape, shape2, adj)
+    return BatchBinaryStep{F}(f, dest, a, b, shape, shape2, nothing, adj)
 end
 struct BatchUnaryStep{F} <: KernelStep
     f::F  # cholesky, transpose
@@ -178,11 +189,12 @@ function get_compute_steps(
         if op == :mul
             a = node.args[1]::ValueId
             b = node.args[2]::ValueId
+            D3 = hasproperty(prog.shapes[b], :D2) ? Int32(prog.shapes[b].D2) : Int32(prog.D)
             shape = prog.shapes[a]
             (
                 is_mat(prog, a) && (is_mat(prog, b) || is_vec(prog, b))
             ) || error("Multipication only supports mat*mat or mat*vec")
-            push!(compute_steps, BatchBinaryStep(*, slots[node.out], slots[a], slots[b], shape))
+            push!(compute_steps, BatchBinaryStep(*, slots[node.out], slots[a], slots[b], shape, D3))
         
         elseif op == :add
             a = node.args[1]::ValueId
@@ -383,13 +395,11 @@ function emit_kernel_expr(
     push!(stmts, :(tid = threadIdx().x))
     push!(stmts, :(bid = blockIdx().x))
     push!(stmts, :(lid = mod1(tid, 32i32)))
+    push!(stmts, :(wid = div(tid - 1i32, 32i32) + 1i32))
     push!(stmts, :(warp_matrix_id = div(lid - 1i32, $D) + 1i32))
     push!(stmts, :(d = mod1(lid, $D)))
-    push!(stmts, :(grid_mtrx_id = warp_matrix_id + (bid - 1i32) * $n_mats_per_block))
+    push!(stmts, :(grid_mtrx_id = warp_matrix_id + (wid - 1i32) * $n_mats_per_warp + (bid - 1i32) * $n_mats_per_block))
     push!(stmts, :(active = warp_matrix_id <= $n_mats_per_warp && grid_mtrx_id <= N))
-    if !isempty(shared_load_steps)
-        push!(stmts, :(wid = div(tid - 1i32, 32i32) + 1i32))
-    end
 
     ####################################
     ### SHARED MEMORY INITIALISATION ###
@@ -571,6 +581,19 @@ function emit_kernel_expr(
                         Expr(
                             :block,
                             :(batch_op!(Val($(QuoteNode(f))), Val($adj), $dest, $a, $b, d, $(Symbol("tau_$a")), Val($D1), Val($D2), Val($B_D1), Val($B_D2), Val($D), warp_matrix_id, Val(:small))),
+                        ),
+                    ),
+                )
+            elseif f === *
+                D3 = step.D3
+                push!(
+                    stmts,
+                    Expr(
+                        :if,
+                        :active,
+                        Expr(
+                            :block,
+                            :(batch_op!($f, $dest, $a, $b, d, Val($D1), Val($D2), Val($D3), Val(:small))),
                         ),
                     ),
                 )

@@ -148,10 +148,10 @@ end
     d::Int32,
     ::Val{D1},
     ::Val{D2},
-    ::Val,
+    ::Val{D3},
     ::Val{:small},
-) where {T,D1,D2}
-    if d > D1
+) where {T,D1,D2,D3}  # (D1,D2) x (D2,D3) -> (D1,D3) multiplication
+    if d > D3
         return nothing
     end
     # Extract column d of B into registers

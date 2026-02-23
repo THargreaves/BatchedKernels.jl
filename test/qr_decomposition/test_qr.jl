@@ -23,9 +23,10 @@
         tid = threadIdx().x
         bid = blockIdx().x
         lid = mod1(tid, 32i32)
+        wid = div(tid - 1i32, 32i32) + 1i32
         warp_matrix_id = div(lid - 1i32, D) + 1i32
         d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
+        grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
         warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
         shmem_elems = warp_shmem_size * n_warps
@@ -151,9 +152,10 @@ end
         tid = threadIdx().x
         bid = blockIdx().x
         lid = mod1(tid, 32i32)
+        wid = div(tid - 1i32, 32i32) + 1i32
         warp_matrix_id = div(lid - 1i32, D) + 1i32
         d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
+        grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
         warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
         shmem_elems = warp_shmem_size * n_warps
@@ -280,9 +282,10 @@ end
         tid = threadIdx().x
         bid = blockIdx().x
         lid = mod1(tid, 32i32)
+        wid = div(tid - 1i32, 32i32) + 1i32
         warp_matrix_id = div(lid - 1i32, D) + 1i32
         d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
+        grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
         warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
         shmem_elems = warp_shmem_size * n_warps
@@ -402,9 +405,10 @@ end
         tid = threadIdx().x
         bid = blockIdx().x
         lid = mod1(tid, 32i32)
+        wid = div(tid - 1i32, 32i32) + 1i32
         warp_matrix_id = div(lid - 1i32, D) + 1i32
         d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
+        grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
         warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
         shmem_elems = warp_shmem_size * n_warps
