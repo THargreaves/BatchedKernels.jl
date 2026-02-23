@@ -18,7 +18,7 @@
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
     n_mats_per_block = n_warps * n_mats_per_warp
-    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+    dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
     tid = threadIdx().x
     bid = blockIdx().x
@@ -28,7 +28,8 @@
     d = mod1(lid, D)
     grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
 
-    shmem_elems = (n_mats_per_warp * D + padding) * D * n_warps
+    warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
+    shmem_elems = warp_shmem_size * n_warps
     shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
     shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
     shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
@@ -89,9 +90,9 @@
         v2 = BatchedVector(shmem_vec_2, Val(D), warp_matrix_id)
         v3 = BatchedVector(shmem_vec_3, Val(D), warp_matrix_id)
 
-        ######################
-        #### PREDICT STEP ####
-        ######################
+        # ######################
+        # #### PREDICT STEP ####
+        # ######################
 
         batch_op!(*, B2, A, B3, d, Val(D), Val(:small))
         batch_op!(*, B1, B2, A', d, Val(D), Val(:small))
@@ -99,10 +100,10 @@
         # B3 now contains P_pred. We keep this until the final update step.
 
         # v3 <- A * µ
-        batch_op!(*, v3, A, v1, d, Val(D))
+        batch_op!(*, v3, A, v1, d, Val(D), Val(:small))
 
         # v1 <- (A * µ) + b
-        batch_op!(+, v1, v3, b, d, Val(D))
+        batch_op!(+, v1, v3, b, d, Val(D), Val(:small))
         # v1 now contains µ_{k|k-1}
 
         #####################
@@ -140,17 +141,17 @@
         # Use P_new = (I - K*H) * P_pred form of update
 
         # Transpose K' in B2 to get K = P_pred * H' / S
-        batch_op!(*, IMinusSetterMatrix(B2), B1', H, d, Val(D), Val(:small))
+        batch_op!(*, IAddSubSetterMatrix(B2, 1.0f0, -1.0f0), B1', H, d, Val(D), Val(:small))
         # B2 now contains (I - K*H)
 
         # (I - K * H) * x → v3
-        batch_op!(*, v3, B2, v1, d, Val(D))
+        batch_op!(*, v3, B2, v1, d, Val(D), Val(:small))
 
         # K * z → v1
-        batch_op!(*, v1, B1', v2, d, Val(D))
+        batch_op!(*, v1, B1', v2, d, Val(D), Val(:small))
 
         # x_new = (I - K*H) * x + K * z → v1
-        batch_op!(+, v1, v3, v1, d, Val(D))
+        batch_op!(+, v1, v3, v1, d, Val(D), Val(:small))
 
         batch_op!(*, B1, B2, B3, d, Val(D), Val(:small))
         # B2 now contains P_new = (I - K*H) * P_pred
@@ -185,7 +186,7 @@ end
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
     n_mats_per_block = n_warps * n_mats_per_warp
-    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+    dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
     tid = threadIdx().x
     bid = blockIdx().x
@@ -195,7 +196,8 @@ end
     d = mod1(lid, D)
     grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
 
-    shmem_mat_elems = (n_mats_per_warp * D + padding) * D * n_warps
+    warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
+    shmem_mat_elems = warp_shmem_size * n_warps
     shmem_mat_1 = CuStaticSharedArray(Float32, (shmem_mat_elems,))
     shmem_mat_2 = CuStaticSharedArray(Float32, (shmem_mat_elems,))
 
@@ -251,10 +253,10 @@ end
         # B1 now contains P_pred
         
         # v2 <- A * µ
-        batch_op!(*, v2, A, v1, d, Val(D))
+        batch_op!(*, v2, A, v1, d, Val(D), Val(:small))
 
         # v2 <- (A * µ) + b
-        batch_op!(+, v2, v2, b, d, Val(D))
+        batch_op!(+, v2, v2, b, d, Val(D), Val(:small))
     end
 
     # Writing P_pred
@@ -286,7 +288,7 @@ end
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
     n_mats_per_block = n_warps * n_mats_per_warp
-    padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+    dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
 
     tid = threadIdx().x
     bid = blockIdx().x
@@ -296,7 +298,8 @@ end
     d = mod1(lid, D)
     grid_mtrx_id = warp_matrix_id + (bid - 1i32) * n_mats_per_block
 
-    shmem_mat_elems = (n_mats_per_warp * D + padding) * D * n_warps
+    warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
+    shmem_mat_elems = warp_shmem_size * n_warps
     shmem_mat_1 = CuStaticSharedArray(Float32, (shmem_mat_elems,))
     shmem_mat_2 = CuStaticSharedArray(Float32, (shmem_mat_elems,))
     shmem_mat_3 = CuStaticSharedArray(Float32, (shmem_mat_elems,))
@@ -375,17 +378,17 @@ end
 
         # Use P_new = (I - K*H) * P_pred form of update
         # Transpose K' in B2 to get K = P_pred * H' / S
-        batch_op!(*, IMinusSetterMatrix(B2), B1', H, d, Val(D), Val(:small))
+        batch_op!(*, IAddSubSetterMatrix(B2, 1.0f0, -1.0f0), B1', H, d, Val(D), Val(:small))
         # B2 now contains (I - K*H)
 
         # (I - K * H) * x → v3
-        batch_op!(*, v3, B2, v1, d, Val(D))
+        batch_op!(*, v3, B2, v1, d, Val(D), Val(:small))
 
         # K * z → v1
-        batch_op!(*, v1, B1', v2, d, Val(D))
+        batch_op!(*, v1, B1', v2, d, Val(D), Val(:small))
 
         # x_new = (I - K*H) * x + K * z → v1
-        batch_op!(+, v1, v3, v1, d, Val(D))
+        batch_op!(+, v1, v3, v1, d, Val(D), Val(:small))
 
         batch_op!(*, B1, B2, B3, d, Val(D), Val(:small))
         # B2 now contains P_new = (I - K*H) * P_pred
