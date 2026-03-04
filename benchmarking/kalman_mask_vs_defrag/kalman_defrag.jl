@@ -1,3 +1,9 @@
+using BatchedKernels
+using LinearAlgebra
+using CUDA
+using CUDA: i32
+using Random
+
 @inline function get_shmem_elems(::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}) where {D1,D2,D,nthreads}
     tid = threadIdx().x
     wid = div(tid - 1i32, 32i32) + 1i32
@@ -83,47 +89,43 @@ end
     shmem_4 = CuStaticSharedArray(Float32, (shmem_elems,))
 
     # Load P shape: (Dx,Dx)
-    intermediate_layout_load!(shmem_1, P_in, Val(Dx), Val(Dx), Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_2, shmem_1, Val(Dx), Val(Dx), Val(D), Val(nthreads), N, Val(:small))
+    warps_active = cld(n_mats_per_block, n_mats_per_warp_xx)
+    if wid <= warps_active
+        intermediate_layout_load!(shmem_1, P_in, Val(Dx), Val(Dx), Val(Dx), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
+        interm_to_dual_transfer!(shmem_2, shmem_1, Val(Dx), Val(Dx), Val(Dx), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
+    end
 
     sync_threads()
 
-    warps_active = cld(n_mats_per_block, n_mats_per_warp_xx)
     if warp_matrix_id_xx <= n_mats_per_warp_xx && grid_mtrx_id_xx <= N && wid <= warps_active && block_mtrx_id_xx <= n_mats_per_block
         # Calculating which warp and how many-th matrix within the warp the current matrix belongs
         # to under the new distribution
         wid_retrieve = (block_mtrx_id_xx - 1i32) ÷ n_mats_per_warp + 1i32
         warp_matrix_id_retrieve = mod1(block_mtrx_id_xx, n_mats_per_warp)
-        
-        M1 = DualAccessMatrix(shmem_1, Val(Dx), warp_matrix_id_xx, Val(:small))
-        M3 = DualAccessMatrix(shmem_3, Val(Dx), warp_matrix_id_xx, Val(:small))
 
-        # Transfer P (D,D) -> (Dx,Dx)
-        P_D = DualAccessMatrix(shmem_2, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
-        P_pred = DualAccessMatrix(shmem_4, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
-
-        P_Dx = P_D
+        M1 = DualAccessMatrix(shmem_1, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
+        P_Dx = DualAccessMatrix(shmem_2, Val(Dx), warp_matrix_id_xx, Val(:small))
+        M3 = DualAccessMatrix(shmem_3, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
+        P_pred = M1
 
         # Compute P_pred = FPF' + Q
-        # NOTE: The following operations cannot mix memory slots between two different layouts due to race conditions
         batch_op!(*, M3, F, P_Dx, d_xx, Val(Dx), Val(Dx), Val(Dx), Val(:small))
         batch_op!(*, M1, M3, F', d_xx, Val(Dx), Val(Dx), Val(Dx), Val(:small))
         batch_op!(+, P_pred, M1, Q, d_xx, Val(Dx), Val(Dx), Val(Dx), Val(:small))
+
+        # Compute H * P_pred
+        HP = M3
+        if Dy >= Dx
+            batch_op!(*, HP, H, P_pred, d_xx, Val(Dy), Val(Dx), Val(Dx), Val(:small))
+        else
+            # Compute in transpose-space
+            batch_op!(*, HP', P_pred', H', d_xx, Val(Dx), Val(Dx), Val(Dy), Val(:small))
+        end
     end
 
-    sync_threads()
-
-    # Compute H P_pred H' normally wihtin (D,D)
-    if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-        HPH_trans = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-        P_pred = DualAccessMatrix(shmem_4, Val(D), warp_matrix_id, Val(:small))
-        HP = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
-
-        batch_op!(*, HP, H, P_pred, d, Val(Dy), Val(Dx), Val(Dx), Val(:small))
-        batch_op!(*, HPH_trans, HP, H', d, Val(Dy), Val(Dx), Val(Dy), Val(:small))
+    if Dx != Dy
+        sync_threads()
     end
-
-    sync_threads()
 
     # Compute S = (H P_pred H') + Q and K = P_pred H' S^{-1}
     warps_active = cld(n_mats_per_block, n_mats_per_warp_yy)
@@ -131,24 +133,28 @@ end
         wid_retrieve = (block_mtrx_id_yy - 1i32) ÷ n_mats_per_warp + 1i32
         warp_matrix_id_retrieve = mod1(block_mtrx_id_yy, n_mats_per_warp)
         
-        HPH_trans = DualAccessMatrix(shmem_1, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
-        S = DualAccessMatrix(shmem_2, Val(Dy), warp_matrix_id_yy, Val(:small))
-        U = HPH_trans
+        S = U = DualAccessMatrix(shmem_2, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
+        HP = DualAccessMatrix(shmem_3, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
+        HPH_trans = DualAccessMatrix(shmem_4, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
+
+        # (HP) * H'
+        batch_op!(*, HPH_trans, HP, H', d_yy, Val(Dy), Val(Dx), Val(Dy), Val(:small))
         
         # S = HPH' + R
         batch_op!(+, S, HPH_trans, R, d_yy, Val(Dy), Val(Dy), Val(Dy), Val(:small))
 
-        # Cholesky of S into M1 (D,D)
+        # Cholesky of S
         batch_op!(cholesky, U, S, d_yy, Val(Dy), Val(Dy), warp_matrix_id_yy, Val(:small))
     end
 
-    sync_threads()
+    if Dx > Dy
+        sync_threads()
+    end
 
     # Compute K = HP / S normally within (D,D)
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-        U = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-        HP = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
-        K_trans = HP
+        U = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+        HP = K_trans = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
 
         # Compute U' \ HP
         batch_op!(\, HP, LowerTriangular(U'), HP, d, Val(Dy), Val(Dx), Val(D), Val(:small))
@@ -157,32 +163,32 @@ end
         batch_op!(\, K_trans, UpperTriangular(U), HP, d, Val(Dy), Val(Dx), Val(D), Val(:small))
     end
 
-    sync_threads()
+    if Dx < Dy
+        sync_threads()
+    end
 
     # Compute rest in (Dx,Dx)
     warps_active = cld(n_mats_per_block, n_mats_per_warp_xx)
     if warp_matrix_id_xx <= n_mats_per_warp_xx && grid_mtrx_id_xx <= N && wid <= warps_active && block_mtrx_id_xx <= n_mats_per_block
-        # Calculating which warp and how many-th matrix within the warp the current matrix belongs
-        # to under the new distribution
         wid_retrieve = (block_mtrx_id_xx - 1i32) ÷ n_mats_per_warp + 1i32
         warp_matrix_id_retrieve = mod1(block_mtrx_id_xx, n_mats_per_warp)
         
-        M1 = DualAccessMatrix(shmem_1, Val(Dx), warp_matrix_id_xx, Val(:small))
-        M2 = DualAccessMatrix(shmem_2, Val(Dx), warp_matrix_id_xx, Val(:small))
+        P_pred = DualAccessMatrix(shmem_1, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
+        M2 = DualAccessMatrix(shmem_2, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
         K_trans = DualAccessMatrix(shmem_3, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
-        P_pred = DualAccessMatrix(shmem_4, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
+        M4 = DualAccessMatrix(shmem_4, Val(Dx), warp_matrix_id_xx, Val(:small))
 
-        # M1 <- (I - KH)
-        batch_op!(*, IAddSubSetterMatrix(M1, 1.0f0, -1.0f0), K_trans', H, d_xx, Val(Dx), Val(Dy), Val(Dx), Val(:small))
+        # M2 <- (I - KH)
+        batch_op!(*, IAddSubSetterMatrix(M2, 1.0f0, -1.0f0), K_trans', H, d_xx, Val(Dx), Val(Dy), Val(Dx), Val(:small))
 
-        # M2 <- (I - KH) * P_pred
-        batch_op!(*, M2, M1, P_pred, d_xx, Val(Dx), Val(Dx), Val(Dx), Val(:small))
+        # M4 <- (I - KH) * P_pred
+        batch_op!(*, M4, M2, P_pred, d_xx, Val(Dx), Val(Dx), Val(Dx), Val(:small))
     end
 
     sync_threads()
 
     if wid <= warps_active
-        M = DualAccessMatrix(shmem_2, Val(Dx), warp_matrix_id_xx, Val(:small))
+        M = DualAccessMatrix(shmem_4, Val(Dx), warp_matrix_id_xx, Val(:small))
         dual_to_interm_transfer!(shmem_3, M, Val(Dx), Val(Dx), Val(Dx), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
         intermediate_layout_write!(P_out, shmem_3, Val(Dx), Val(Dx), Val(Dx), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
     end

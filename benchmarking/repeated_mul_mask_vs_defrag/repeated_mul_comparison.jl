@@ -14,6 +14,7 @@ include("repeated_mul_mask.jl")
 function get_ratios(D::Integer, max_n_muls::Integer; redo::Bool = false)
     cache_dir = joinpath(@__DIR__, "cache")
     isdir(cache_dir) || mkdir(cache_dir)
+    nthreads = 2^8
 
     Ds = collect(2:D)
     T = Float32
@@ -47,13 +48,13 @@ function get_ratios(D::Integer, max_n_muls::Integer; redo::Bool = false)
                 @load cache_file ratio
             else
                 result_mask = @benchmark begin
-                    CUDA.@sync @cuda threads=nthreads blocks=nblocks $kernel_mul_mask!(
+                    CUDA.@sync @cuda threads=$nthreads blocks=$nblocks $kernel_mul_mask!(
                         $M_out, $M_in, $A, Val(Int32($D1)), Val(Int32($D)), Val(Int32($nthreads)), Val($n_muls), Int32($N),
                     )
                 end
 
                 result_defrag = @benchmark begin
-                    CUDA.@sync @cuda threads=nthreads blocks=nblocks $kernel_mul_defrag!(
+                    CUDA.@sync @cuda threads=$nthreads blocks=$nblocks $kernel_mul_defrag!(
                         $M_out, $M_in, $A, Val(Int32($D1)), Val(Int32($D)), Val(Int32($nthreads)), Val($n_muls), Int32($N),
                     )
                 end
