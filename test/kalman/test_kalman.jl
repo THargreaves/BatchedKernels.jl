@@ -112,6 +112,7 @@ end
 
 @testitem "Kalman full (shared, vmap)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using LinearAlgebra
     using CUDA
     using CUDA: i32
@@ -155,7 +156,7 @@ end
             P_cpu[:, :, i] = P_i
         end
 
-        P_in = CuArray(P_cpu)
+        P_in_gpu = CuArray(P_cpu)
 
         A_gpu = CuArray(A_elem)
         Q_gpu = CuArray(Q_elem)
@@ -170,14 +171,24 @@ end
         b_gpu = cu(b_cpu)
         z_gpu = cu(z_cpu)
 
+        P_in = BatchedCuMatrix(P_in_gpu)
+
+        A = SharedCuMatrix(A_gpu, N)
+        Q = SharedCuMatrix(Q_gpu, N)
+        H = SharedCuMatrix(H_gpu, N)
+        R = SharedCuMatrix(R_gpu, N)
+
+        µ = BatchedCuVector(µ_gpu)
+        b = SharedCuVector(b_gpu, N)
+        z = BatchedCuVector(z_gpu)
+
         kalman_vmap = BatchedKernels.vmap(
             kalman_filter,
-            in_type = (:batched, :shared, :shared, :shared, :shared, :batched, :shared, :batched),
         )
 
-        P_out, µ_out = kalman_vmap(P_in, A_gpu, Q_gpu, H_gpu, R_gpu, µ_gpu, b_gpu, z_gpu)
-        P_out_cpu = Array(P_out)
-        µ_out_cpu = Array(µ_out)
+        P_out, µ_out = kalman_vmap(P_in, A, Q, H, R, µ, b, z)
+        P_out_cpu = Array(P_out.data)
+        µ_out_cpu = Array(µ_out.data)
 
         max_error_P = 0.0
         for i in 1:N            
@@ -200,6 +211,7 @@ end
 
 @testitem "Kalman full (all batched, vmap)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using LinearAlgebra
     using CUDA
     using CUDA: i32
@@ -227,52 +239,52 @@ end
     T = Float32
 
     for D in 2:8
-        A = rand(T, D, D, N) / T(D)
-        Q = zeros(T, D, D, N)
+        A_cpu = rand(T, D, D, N) / T(D)
+        Q_cpu = zeros(T, D, D, N)
         for i in 1:N
             Q_elem = rand(T, D, D) / T(D)^2
-            Q[:, :, i] = Q_elem * Q_elem' + 0.01f0 * I
+            Q_cpu[:, :, i] = Q_elem * Q_elem' + 0.01f0 * I
         end
 
-        H = rand(T, D, D, N) / T(D)
-        R = zeros(T, D, D, N)
+        H_cpu = rand(T, D, D, N) / T(D)
+        R_cpu = zeros(T, D, D, N)
         for i in 1:N
             R_elem = rand(T, D, D) / T(D)^2
-            R[:, :, i] = R_elem * R_elem' + 0.01f0 * I
+            R_cpu[:, :, i] = R_elem * R_elem' + 0.01f0 * I
         end
 
-        P_cpu = Array{T}(undef, D, D, N)
+        P_in_cpu = Array{T}(undef, D, D, N)
         for i in 1:N
             P_i = rand(T, D, D) / T(D)
             P_i = P_i * P_i' + 0.1f0 * I
-            P_cpu[:, :, i] = P_i
+            P_in_cpu[:, :, i] = P_i
         end
 
-        P_in = CuArray(P_cpu)
+        P_in = BatchedCuMatrix(CuArray(P_in_cpu))
 
-        A_gpu = CuArray(A)
-        Q_gpu = CuArray(Q)
-        H_gpu = CuArray(H)
-        R_gpu = CuArray(R)
+        A = BatchedCuMatrix(CuArray(A_cpu))
+        Q = BatchedCuMatrix(CuArray(Q_cpu))
+        H = BatchedCuMatrix(CuArray(H_cpu))
+        R = BatchedCuMatrix(CuArray(R_cpu))
 
         µ_cpu = rand(T, D, N)
         b_cpu = rand(T, D, N)
         z_cpu = rand(T, D, N)
 
-        µ_gpu = cu(µ_cpu)
-        b_gpu = cu(b_cpu)
-        z_gpu = cu(z_cpu)
+        µ = BatchedCuVector(cu(µ_cpu))
+        b = BatchedCuVector(cu(b_cpu))
+        z = BatchedCuVector(cu(z_cpu))
 
         kalman_vmap = BatchedKernels.vmap(kalman_filter)
 
-        P_out, µ_out = kalman_vmap(P_in, A_gpu, Q_gpu, H_gpu, R_gpu, µ_gpu, b_gpu, z_gpu)
-        P_out_cpu = Array(P_out)
-        µ_out_cpu = Array(µ_out)
+        P_out, µ_out = kalman_vmap(P_in, A, Q, H, R, µ, b, z)
+        P_out_cpu = Array(P_out.data)
+        µ_out_cpu = Array(µ_out.data)
 
         max_error_P = 0.0
         for i in 1:N            
             P_new_ref, µ_new_ref = kalman_filter(
-                P_cpu[:, :, i], A[:, :, i], Q[:, :, i], H[:, :, i], R[:, :, i], µ_cpu[:, i], b_cpu[:, i], z_cpu[:, i],
+                P_in_cpu[:, :, i], A_cpu[:, :, i], Q_cpu[:, :, i], H_cpu[:, :, i], R_cpu[:, :, i], µ_cpu[:, i], b_cpu[:, i], z_cpu[:, i],
             )
 
             P_new_cpu = P_out_cpu[:, :, i]

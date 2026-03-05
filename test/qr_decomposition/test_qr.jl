@@ -526,17 +526,17 @@ end
 
                         CUDA.seed!(1234)
 
-                        As = CUDA.rand(Float32, D1, D2, N)
-                        Bs = CUDA.rand(Float32, B_D1, B_D2, N)
-                        dummy = CUDA.zeros(Float32, D, D, N)
+                        As = BatchedCuMatrix(CUDA.rand(Float32, D1, D2, N))
+                        Bs = BatchedCuMatrix(CUDA.rand(Float32, B_D1, B_D2, N))
+                        dummy = BatchedCuMatrix(CUDA.zeros(Float32, D, D, N))
 
                         qr_mul_vmap = BatchedKernels.vmap(qr_mul)
                         Cs = qr_mul_vmap(As, Bs, dummy)
 
                         # CPU comparison
-                        As_cpu = Array(As)
-                        Bs_cpu = Array(Bs)
-                        Cs_cpu = Array(Cs)
+                        As_cpu = Array(As.data)
+                        Bs_cpu = Array(Bs.data)
+                        Cs_cpu = Array(Cs.data)
 
                         Cs_real = zeros(Float32, D1, B_D2, N)
 
@@ -558,6 +558,7 @@ end
 
 @testitem "QR transpose and multiply (vmap)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using LinearAlgebra
     using CUDA
 
@@ -581,17 +582,17 @@ end
 
                     CUDA.seed!(1234)
 
-                    As = CUDA.rand(Float32, D1, D2, N)
-                    Bs = CUDA.rand(Float32, B_D1, B_D2, N)
-                    dummy = CUDA.zeros(Float32, D, D, N)
+                    As = BatchedCuMatrix(CUDA.rand(Float32, D1, D2, N))
+                    Bs = BatchedCuMatrix(CUDA.rand(Float32, B_D1, B_D2, N))
+                    dummy = BatchedCuMatrix(CUDA.zeros(Float32, D, D, N))
 
                     qr_mul_vmap = BatchedKernels.vmap(qr_mul)
                     Cs = qr_mul_vmap(As, Bs, dummy)
 
                     # CPU comparison
-                    As_cpu = Array(As)
-                    Bs_cpu = Array(Bs)
-                    Cs_cpu = Array(Cs)
+                    As_cpu = Array(As.data)
+                    Bs_cpu = Array(Bs.data)
+                    Cs_cpu = Array(Cs.data)
 
                     Cs_real = zeros(Float32, D1, B_D2, N)
 
@@ -612,6 +613,7 @@ end
 
 @testitem "QR Decomposition Qthin (vmap, non-square)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -634,14 +636,14 @@ end
                 CUDA.seed!(1234)
 
                 # Create symmetric positive definite matrices
-                As = CUDA.rand(Float32, D1, D2, N)
-                As_cpu = Array(As)
-                dummy = CUDA.rand(Float32, D, D, N)
+                As = BatchedCuMatrix(CUDA.rand(Float32, D1, D2, N))
+                As_cpu = Array(As.data)
+                dummy = BatchedCuMatrix(CUDA.rand(Float32, D, D, N))
 
                 qr_vmap = BatchedKernels.vmap(qr_decomp)
                 Q, R = qr_vmap(As)
-                Qs_result = Array(Q)
-                Rs_result = Array(R)
+                Qs_result = Array(Q.data)
+                Rs_result = Array(R.data)
 
                 Qs_real = zeros(Float32, D1, min(D1, D2), N)
                 Rs_real = zeros(Float32, min(D1, D2), D2, N)
@@ -663,6 +665,7 @@ end
 
 @testitem "QR Decomposition Qthin transpose (vmap, non-square)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -685,14 +688,14 @@ end
                 CUDA.seed!(1234)
 
                 # Create symmetric positive definite matrices
-                As = CUDA.rand(Float32, D1, D2, N)
-                As_cpu = Array(As)
-                dummy = CUDA.rand(Float32, D, D, N)
+                As = BatchedCuMatrix(CUDA.rand(Float32, D1, D2, N))
+                As_cpu = Array(As.data)
+                dummy = BatchedCuMatrix(CUDA.rand(Float32, D, D, N))
 
                 qr_vmap = BatchedKernels.vmap(qr_decomp)
                 Q, R = qr_vmap(As)
-                Qs_result = Array(Q)
-                Rs_result = Array(R)
+                Qs_result = Array(Q.data)
+                Rs_result = Array(R.data)
 
                 Qs_real = zeros(Float32, D2, min(D1, D2), N)
                 Rs_real = zeros(Float32, min(D1, D2), D1, N)
@@ -714,6 +717,7 @@ end
 
 @testitem "QR Decomposition Qfull (vmap, non-square)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -736,14 +740,14 @@ end
                 CUDA.seed!(1234)
 
                 # Create symmetric positive definite matrices
-                As = CUDA.rand(Float32, D1, D2, N)
-                As_cpu = Array(As)
-                dummy = CUDA.rand(Float32, D, D, N)
+                As = BatchedCuMatrix(CUDA.rand(Float32, D1, D2, N))
+                As_cpu = Array(As.data)
+                dummy = BatchedCuMatrix(CUDA.rand(Float32, D, D, N))
 
                 qr_vmap = BatchedKernels.vmap(qr_decomp)
                 Q, R = qr_vmap(As)
-                Qs_result = Array(Q)
-                Rs_result = Array(R)
+                Qs_result = Array(Q.data)
+                Rs_result = Array(R.data)
 
                 Qs_real = zeros(Float32, D1, D1, N)
                 Rs_real = zeros(Float32, min(D1, D2), D2, N)
@@ -765,6 +769,7 @@ end
 
 @testitem "QR Decomposition Qfull  transpose(vmap, non-square)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -787,14 +792,14 @@ end
                 CUDA.seed!(1234)
 
                 # Create symmetric positive definite matrices
-                As = CUDA.rand(Float32, D1, D2, N)
-                As_cpu = Array(As)
-                dummy = CUDA.rand(Float32, D, D, N)
+                As = BatchedCuMatrix(CUDA.rand(Float32, D1, D2, N))
+                As_cpu = Array(As.data)
+                dummy = BatchedCuMatrix(CUDA.rand(Float32, D, D, N))
 
                 qr_vmap = BatchedKernels.vmap(qr_decomp)
                 Q, R = qr_vmap(As)
-                Qs_result = Array(Q)
-                Rs_result = Array(R)
+                Qs_result = Array(Q.data)
+                Rs_result = Array(R.data)
 
                 Qs_real = zeros(Float32, D2, D2, N)
                 Rs_real = zeros(Float32, min(D1, D2), D1, N)

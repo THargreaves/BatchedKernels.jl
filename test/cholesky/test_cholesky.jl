@@ -102,6 +102,7 @@ end
 
 @testitem "Cholesky Decomposition (vmap)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -125,14 +126,15 @@ end
                 A_temp = CUDA.rand(Float32, D1, D1)
                 As[:, :, i] = A_temp * A_temp' + 0.1f0 * I
             end
-            dummy = CUDA.rand(Float32, D, D, N)
+            As = BatchedCuMatrix(As)
+            dummy = BatchedCuMatrix(CUDA.rand(Float32, D, D, N))
 
             chol_vmap = BatchedKernels.vmap(chol)
             Us = chol_vmap(As, dummy)
-            Us_result = Array(Us)
+            Us_result = Array(Us.data)
 
             # CPU comparison
-            As_cpu = Array(As)
+            As_cpu = Array(As.data)
             Us_cpu = similar(As_cpu)
             for i in 1:N
                 Us_cpu[:, :, i] = chol(As_cpu[:, :, i], 0)

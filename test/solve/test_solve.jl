@@ -372,6 +372,7 @@ end
 
 @testitem "Symmetric solve (vmap)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -388,7 +389,7 @@ end
             Dmax = max(D1, D2)
             for extra in 0:2
                 D = Dmax + extra
-                dummy = CUDA.zeros(Float32, D, D, N)
+                dummy = BatchedCuMatrix(CUDA.zeros(Float32, D, D, N))
 
                 CUDA.seed!(1234)
 
@@ -397,15 +398,16 @@ end
                     A_temp = CUDA.rand(Float32, D1, D1)
                     As[:, :, i] = A_temp * A_temp' + 0.1f0 * I
                 end
+                As = BatchedCuMatrix(As)
 
-                Bs = CUDA.rand(Float32, D2, D1, N)
+                Bs = BatchedCuMatrix(CUDA.rand(Float32, D2, D1, N))
 
-                As_cpu = Array(As)
-                Bs_cpu = Array(Bs)
+                As_cpu = Array(As.data)
+                Bs_cpu = Array(Bs.data)
 
                 solve_vmap = BatchedKernels.vmap(solve)
                 Cs = solve_vmap(As, Bs, dummy)
-                Cs_result = Array(Cs)
+                Cs_result = Array(Cs.data)
 
                 Cs_cpu = similar(Bs_cpu)
                 for i in 1:N
@@ -422,6 +424,7 @@ end
 
 @testitem "Symmetric solve (shared, vmap)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -438,25 +441,22 @@ end
             Dmax = max(D1, D2)
             for extra in 0:1
                 D = Dmax + extra
-                dummy = CUDA.zeros(Float32, D, D, N)
+                dummy = BatchedCuMatrix(CUDA.zeros(Float32, D, D, N))
 
                 CUDA.seed!(1234)
 
                 # Make A shared
                 A_temp = CUDA.rand(Float32, D1, D1)
-                A = A_temp * A_temp' + 0.1f0 * I
+                A = SharedCuMatrix(A_temp * A_temp' + 0.1f0 * I, N)
 
-                Bs = CUDA.rand(Float32, D2, D1, N)
+                Bs = BatchedCuMatrix(CUDA.rand(Float32, D2, D1, N))
 
-                A_cpu = Array(A)
-                Bs_cpu = Array(Bs)
+                A_cpu = Array(A.data)
+                Bs_cpu = Array(Bs.data)
 
-                solve_vmap = BatchedKernels.vmap(
-                    solve,
-                    in_type = (:shared, :batched, :batched)
-                )
+                solve_vmap = BatchedKernels.vmap(solve)
                 Cs = solve_vmap(A, Bs, dummy)
-                Cs_result = Array(Cs)
+                Cs_result = Array(Cs.data)
 
                 Cs_cpu = similar(Bs_cpu)
                 for i in 1:N
@@ -476,18 +476,16 @@ end
                     A_temp = CUDA.rand(Float32, D1, D1)
                     As[:, :, i] = A_temp * A_temp' + 0.1f0 * I
                 end
+                As = BatchedCuMatrix(As)
 
-                B = CUDA.rand(Float32, D2, D1)
+                B = SharedCuMatrix(CUDA.rand(Float32, D2, D1), N)
 
-                As_cpu = Array(As)
-                B_cpu = Array(B)
+                As_cpu = Array(As.data)
+                B_cpu = Array(B.data)
 
-                solve_vmap = BatchedKernels.vmap(
-                    solve,
-                    in_type = (:batched, :shared, :batched)
-                )
+                solve_vmap = BatchedKernels.vmap(solve)
                 Cs = solve_vmap(As, B, dummy)
-                Cs_result = Array(Cs)
+                Cs_result = Array(Cs.data)
 
                 Cs_cpu = zeros(Float32, D2, D1, N)
                 for i in 1:N
@@ -504,6 +502,7 @@ end
 
 @testitem "Non-symmetric solve (vmap)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -528,19 +527,20 @@ end
 
                     CUDA.seed!(1234)
 
-                    Xs = CUDA.rand(Float32, X_D1, X_D2, N)
+                    Xs = BatchedCuMatrix(CUDA.rand(Float32, X_D1, X_D2, N))
                     Ys = CUDA.rand(Float32, Y_D1, Y_D2, N)
                     for j in 1:min(Y_D1, Y_D2)
                         @views Ys[j, j, :] .+= 2f0
                     end
-                    dummy = CUDA.zeros(Float32, D, D, N)
+                    Ys = BatchedCuMatrix(Ys)
+                    dummy = BatchedCuMatrix(CUDA.zeros(Float32, D, D, N))
 
                     solve_vmap = BatchedKernels.vmap(solve)
                     Zs = solve_vmap(Xs, Ys, dummy)
 
-                    Xs_cpu = Array(Xs)
-                    Ys_cpu = Array(Ys)
-                    Zs_cpu = Array(Zs)
+                    Xs_cpu = Array(Xs.data)
+                    Ys_cpu = Array(Ys.data)
+                    Zs_cpu = Array(Zs.data)
 
                     Zs_real = zeros(Float32, X_D1, Y_D1, N)
                     for i in 1:N
