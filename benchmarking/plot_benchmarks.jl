@@ -42,7 +42,10 @@ function plot_benchmarks(
     end
 
     display(plt)
-    
-    path = joinpath(@__DIR__, "figs", "$filename.svg")
+
+    figs_dir = joinpath(@__DIR__, "figs")
+    mkpath(figs_dir)
+
+    path = joinpath(figs_dir, "$filename.svg")
     savefig(plt, path)
 end
