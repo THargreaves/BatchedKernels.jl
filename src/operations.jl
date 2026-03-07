@@ -176,6 +176,39 @@ end
     ::typeof(*),
     C::AbstractMatrix{T},
     A::AbstractMatrix{T},
+    L::LowerTriangular{T,<:AbstractMatrix{T}},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val{D},
+    ::Val{:small},
+) where {T,D1,D2,D}  # (D1,D2) x trig(D2,D2) = (D1,D2)
+    if d > D2
+        return nothing
+    end
+
+    # Extract nonzero part of column d of L into registers
+    L_col = @MVector zeros(T, Int64(D2))
+    @inbounds for k in d:D2
+        L_col[k] = L[k, d]
+    end
+
+    # Compute each element of column d of C
+    @inbounds for i in (1i32):D1
+        tot = zero(T)
+        for k in d:D2
+            tot += A[i, k] * L_col[k]
+        end
+        C[i, d] = tot
+    end
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(*),
+    C::AbstractMatrix{T},
+    A::AbstractMatrix{T},
     B::AbstractMatrix{T},
     ::Val{D},
     ::Val{:large},
@@ -247,14 +280,12 @@ end
 
     # Extract column d of A into registers
     A_col = @MVector zeros(T, Int64(D1))
-    # @inbounds for k in (1i32):D1
-    for k in (1i32):D1
+    @inbounds for k in (1i32):D1
         A_col[k] = A[k, d]
     end
 
     # Compute each element of column d of G 
-    # @inbounds for i in (1i32):d #D2
-    for i in (1i32):d #D2
+    @inbounds for i in (1i32):d
         tot = zero(T)
         for k in (1i32):D1
             tot += A[k, i] * A_col[k]

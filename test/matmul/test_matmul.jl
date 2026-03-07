@@ -121,6 +121,59 @@ end
     end
 end
 
+@testitem "Triangular matrix multiplication (non_square)" begin
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+    using BatchedKernels
+
+    include("matmul_kernels.jl")
+
+    # Test parameters
+    N = 2^9 + 113
+    nthreads = 2^8
+
+    # Accuracy tests
+    for D1 in 2:15
+        for D2 in 2:15
+            D = max(D1, D2)
+            nblocks = cld(N, nthreads//32 * (32 ÷ D))
+
+            CUDA.seed!(1234)
+
+            As_cpu = rand(Float32, D1, D2, N)
+            Ls_cpu = rand(Float32, D2, D2, N)
+
+            As = cu(As_cpu)
+            Ls = cu(Ls_cpu)
+
+            Cs = CUDA.zeros(Float32, D1, D2, N)
+
+            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_trig_matmul!(
+                Cs,
+                As,
+                Ls,
+                Val(Int32(D1)),
+                Val(Int32(D2)),
+                Val(Int32(D)),
+                Val(Int32(nthreads)),
+                Int32(N),
+            )
+            Cs_result = Array(Cs)
+
+            # CPU comparison
+            Cs_cpu = zeros(Float32, D1, D2, N)
+            for i in 1:N
+                Cs_cpu[:, :, i] = As_cpu[:, :, i] * LowerTriangular(Ls_cpu[:, :, i])
+            end
+
+            max_error = maximum(abs.(Cs_result .- Cs_cpu))
+            @test max_error < 1e-5
+        end
+    end
+end
+
+
 @testitem "Gram matrix (non-square)" begin
     using CUDA
     using CUDA: i32
