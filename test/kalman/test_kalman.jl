@@ -617,7 +617,7 @@ end
         μ, Σ = state.µ, state.Σ.mat
         A, b, Q = dyn_params.components.x1, dyn_params.components.x2, dyn_params.components.x3.mat
         
-        Σ = A .* Σ .* adjoint.(A) .+ Q
+        Σ = X_A_Xt.(Σ, A) .+ Q
         Σ_PDs = PDMat.(Σ)
         µ = A .* μ .+ b
 
