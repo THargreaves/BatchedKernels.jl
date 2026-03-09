@@ -24,8 +24,11 @@ function write_results_csv(
         df[!, Symbol(method)] = runtimes
     end
 
-    path = joinpath(@__DIR__, "tables", "$filename.csv")
+    tables_dir = joinpath(@__DIR__, "tables")
+    mkpath(tables_dir)
+    path = joinpath(tables_dir, "$filename.csv")
 
     CSV.write(path, df)
+
     return nothing
 end
