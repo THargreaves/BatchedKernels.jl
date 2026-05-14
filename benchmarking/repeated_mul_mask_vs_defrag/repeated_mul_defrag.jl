@@ -51,37 +51,40 @@ end
 
     (shmem_elems, d, warp_matrix_id, block_mtrx_id, grid_mtrx_id, n_mats_per_warp, n_mats_per_block) = get_shmem_elems(Val(D), Val(D), Val(D), Val(nthreads))
     (shmem_elems_small, d_small, warp_matrix_id_small, block_mtrx_id_small, grid_mtrx_id_small, n_mats_per_warp_small, n_mats_per_block_small) = get_shmem_elems(Val(D1), Val(D1), Val(D), Val(nthreads))
+    warps_active = cld(n_mats_per_block, n_mats_per_warp_small)
 
+    # Reserving the same amount of shared memory as masking (i.e. more than necessary) for shared memory equality
     shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
     shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
 
-    # Load M_in shape: (D1,D1) into (D,D)
-    intermediate_layout_load!(shmem_2, M_in, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+    # Load M_in shape: (D1,D1) into (D1,D1)
+    if wid <= warps_active
+        intermediate_layout_load!(shmem_2, M_in, Val(D1), Val(D1), Val(D1), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
+        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D1), Val(D1), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
+    end
+    M1 = DualAccessMatrix(shmem_1, Val(D1), warp_matrix_id_small, Val(:small))
+    M2 = DualAccessMatrix(shmem_2, Val(D1), warp_matrix_id_small, Val(:small))
 
-    sync_threads()
-
-    warps_active = cld(n_mats_per_block, n_mats_per_warp_small)
-    if warp_matrix_id_small <= n_mats_per_warp_small && grid_mtrx_id <= N && wid <= warps_active && block_mtrx_id_small <= n_mats_per_block
-        # Calculating which warp and how many-th matrix within the warp the current matrix belongs
-        # to under the new distribution
-        wid_retrieve = (block_mtrx_id_small - 1i32) ÷ n_mats_per_warp + 1i32
-        warp_matrix_id_retrieve = mod1(block_mtrx_id_small, n_mats_per_warp)
-        
-        M1 = DualAccessMatrix(shmem_1, Val(D), wid_retrieve, warp_matrix_id_retrieve, Val(:small))
-        M2 = DualAccessMatrix(shmem_2, Val(D1), warp_matrix_id_small, Val(:small))
-
-        for _ in 1i32:n_muls
-            batch_op!(*, M2, M1, A, d_small, Val(D1), Val(D1), Val(D1), Val(:small))
+    if warp_matrix_id_small <= n_mats_per_warp_small && grid_mtrx_id_small <= N && wid <= warps_active && block_mtrx_id_small <= n_mats_per_block
+        for i in 1i32:n_muls
+            if isodd(i)
+                batch_op!(*, M2, M1, A, d_small, Val(D1), Val(D1), Val(D1), Val(:small))
+            else
+                batch_op!(*, M1, M2, A, d_small, Val(D1), Val(D1), Val(D1), Val(:small))
+            end
         end
     end
 
-    sync_threads()
-
     if wid <= warps_active
-        M = DualAccessMatrix(shmem_2, Val(D1), warp_matrix_id_small, Val(:small))
-        dual_to_interm_transfer!(shmem_1, M, Val(D1), Val(D1), Val(D1), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
-        intermediate_layout_write!(M_out, shmem_1, Val(D1), Val(D1), Val(D1), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
+        if isodd(n_muls)
+            M = DualAccessMatrix(shmem_2, Val(D1), warp_matrix_id_small, Val(:small))
+            dual_to_interm_transfer!(shmem_1, M, Val(D1), Val(D1), Val(D1), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
+            intermediate_layout_write!(M_out, shmem_1, Val(D1), Val(D1), Val(D1), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
+        else
+            M = DualAccessMatrix(shmem_1, Val(D1), warp_matrix_id_small, Val(:small))
+            dual_to_interm_transfer!(shmem_2, M, Val(D1), Val(D1), Val(D1), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
+            intermediate_layout_write!(M_out, shmem_2, Val(D1), Val(D1), Val(D1), Val(nthreads), Val(n_mats_per_block), N, Val(:small))
+        end
     end
 
     return nothing

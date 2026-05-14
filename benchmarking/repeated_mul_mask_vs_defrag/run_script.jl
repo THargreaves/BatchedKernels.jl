@@ -28,7 +28,7 @@ function get_ratios(D::Integer, max_n_muls::Integer; redo::Bool = false)
         Random.seed!(1234)
 
         N = Int(ceil(1e9 / (4 * 2 * D1^2)))
-        nblocks = cld(N, nthreads//32 * (32 ÷ D))
+        nblocks = cld(N, nthreads ÷ 32 * (32 ÷ D))
 
         M_in_cpu = rand(T, D1, D1, N)
         M_in = cu(M_in_cpu)
@@ -68,6 +68,9 @@ function get_ratios(D::Integer, max_n_muls::Integer; redo::Bool = false)
 
             count += 1
             println("$count/$total_count ($D1,$D) n_muls=$n_muls ratio=$ratio")
+
+            CUDA.reclaim()
+            GC.gc()
         end
     end
 
@@ -81,7 +84,7 @@ function generate_plots(D::Integer, max_n_muls::Integer; redo::Bool = false)
 
     plt = heatmap(
         xs, ys, ratios;
-        size = (1000, 500),
+        size = (2000, 500),
         xlabel = "n_muls",
         ylabel = "D",
         title = "time(mask) / time(defrag)",
@@ -117,4 +120,4 @@ function generate_plots(D::Integer, max_n_muls::Integer; redo::Bool = false)
     display(plt)
 end
 
-generate_plots(8, 20, redo = false)
+generate_plots(8, 40, redo = false)

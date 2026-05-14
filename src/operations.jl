@@ -811,25 +811,21 @@ end
         return nothing
     end
 
-    # Store column d in registers
-    x = @MVector zeros(T, Int64(D1))
+    # if C !== A
+    #     @inbounds for i in (1i32):D1
+    #         C[i, d] = A[i, d]
+    #     end
+    # end
 
-    # Backward substitution from bottom to top
     @inbounds for i in D1:(-1i32):(1i32)
-        x[i] = A[i, d]
+        xi = C[i, d]
 
-        # Subtract contributions from already-computed elements
         for j in (i + 1i32):D1
-            x[i] -= U[i, j] * x[j]
+            xi -= U[i, j] * C[j, d]
         end
 
-        # Divide by diagonal element
-        x[i] /= U[i, i]
-    end
-
-    # Write result back to C
-    @inbounds for i in (1i32):D1
-        C[i, d] = x[i]
+        xi /= U[i, i]
+        C[i, d] = xi
     end
 
     return nothing
@@ -896,25 +892,21 @@ end
         return nothing
     end
 
-    # Store column d in registers
-    y = @MVector zeros(T, Int64(D1))
+    # if C !== A
+    #     @inbounds for i in (1i32):D1
+    #         C[i, d] = A[i, d]
+    #     end
+    # end
 
-    # Forward substitution from top to bottom
     @inbounds for i in (1i32):D1
-        y[i] = A[i, d]
+        yi = C[i, d]
 
-        # Subtract contributions from already-computed elements
         for j in (1i32):(i - 1i32)
-            y[i] -= L[i, j] * y[j]
+            yi -= L[i, j] * C[j, d]
         end
 
-        # Divide by diagonal element
-        y[i] /= L[i, i]
-    end
-
-    # Write result back to C
-    @inbounds for i in (1i32):D1
-        C[i, d] = y[i]
+        yi /= L[i, i]
+        C[i, d] = yi
     end
 
     return nothing

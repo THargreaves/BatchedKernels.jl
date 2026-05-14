@@ -80,6 +80,9 @@ function generate_plot(D_max::Integer; redo::Bool = false)
                 ratio = median(result_curr.times) / median(result_defrag.times)
 
                 @save cache_file ratio
+
+                CUDA.reclaim()
+                GC.gc()
             end
             
             ratios[Dy - 1, Dx - 1] = ratio

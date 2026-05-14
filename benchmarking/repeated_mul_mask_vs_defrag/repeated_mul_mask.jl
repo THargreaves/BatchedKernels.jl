@@ -62,14 +62,24 @@ end
     interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-        for _ in 1i32:n_muls
-            batch_op!(*, M2, M1, A, d, Val(D1), Val(D1), Val(D1), Val(:small))
+        for i in 1i32:n_muls
+            if isodd(i)
+                batch_op!(*, M2, M1, A, d, Val(D1), Val(D1), Val(D), Val(:small))
+            else
+                batch_op!(*, M1, M2, A, d, Val(D1), Val(D1), Val(D), Val(:small))
+            end
         end
     end
-
-    M = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
-    dual_to_interm_transfer!(shmem_1, M, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
-    intermediate_layout_write!(M_out, shmem_1, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+    
+    if isodd(n_muls)
+        M = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+        dual_to_interm_transfer!(shmem_1, M, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_write!(M_out, shmem_1, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+    else
+        M = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+        dual_to_interm_transfer!(shmem_2, M, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_write!(M_out, shmem_2, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+    end
 
     return nothing
 end

@@ -128,7 +128,7 @@ using CUDA: i32
     return nothing
 end
 
-function kalman_timing(P_out_cpu, P_in_cpu, A_cpu, Q_cpu, H_cpu, R_cpu, _, ::Val{:ours})
+function kalman_timing(P_out_cpu, P_in_cpu, A_cpu, Q_cpu, H_cpu, R_cpu, _, ::Val{:independent})
     D, _, N = size(P_in_cpu)
     
     P_out = cu(P_out_cpu)
@@ -139,7 +139,7 @@ function kalman_timing(P_out_cpu, P_in_cpu, A_cpu, Q_cpu, H_cpu, R_cpu, _, ::Val
     R = cu(R_cpu)
 
     nthreads = 2^8
-    nblocks = cld(N, nthreads ÷ 32 * (32 ÷ D))
+    nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
     n_mats_per_warp = 32 ÷ D
     n_warps = nthreads ÷ 32
@@ -153,20 +153,53 @@ function kalman_timing(P_out_cpu, P_in_cpu, A_cpu, Q_cpu, H_cpu, R_cpu, _, ::Val
         3 * shmem_elems + 4 * shmem_size_fixed
     )
 
-    kernel = @cuda launch=false kernel_kalman!(
-        P_out, P_in, A, Q, H, R,
-        Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), Val(:indep),
+    kernel = @cuda launch = false kernel_kalman!(
+        P_out,
+        P_in,
+        A,
+        Q,
+        H,
+        R,
+        Val(Int32(D)),
+        Val(Int32(nthreads)),
+        Int32(N),
+        Val(:small),
+        Val(:indep),
     )
     CUDA.cuFuncSetAttribute(kernel.fun, CUDA.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, shmem_bytes)
-
     bench_results = @benchmark begin
         CUDA.@sync $kernel(
-            $P_out, $P_in, $A, $Q, $H, $R,
-            Val(Int32($D)), Val(Int32($nthreads)), Int32($N),
-            $Val(:small), $Val(:indep);
-            threads=$nthreads, blocks=$nblocks, shmem=$shmem_bytes,
+            $P_out,
+            $P_in,
+            $A,
+            $Q,
+            $H,
+            $R,
+            Val(Int32($D)),
+            Val(Int32($nthreads)),
+            Int32($N),
+            $Val(:small),
+            $Val(:indep);
+            threads = $nthreads, blocks = $nblocks, shmem = $shmem_bytes,
         )
     end
+
+
+    # bench_results = @benchmark begin
+    #     CUDA.@sync @cuda threads = $nthreads blocks = $nblocks shmem = $shmem_bytes kernel_kalman!(
+    #         $P_out,
+    #         $P_in,
+    #         $A,
+    #         $Q,
+    #         $H,
+    #         $R,
+    #         Val(Int32($D)),
+    #         Val(Int32($nthreads)),
+    #         Int32($N),
+    #         $Val(:small),
+    #         $Val(:indep),
+    #     )
+    # end
 
     return median(bench_results.times) / 1e9 / N
 end

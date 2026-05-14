@@ -35,6 +35,10 @@ function plot_benchmarks(
         y_scale = :log10,
         xticks=(xticks, xtick_labels),
         yticks=10.0 .^ (floor(Int, log10(y_min)):(ceil(Int, log10(y_max)) + 2)),
+        grid=true,
+        minorgrid=true,
+        gridalpha=0.3,
+        minorgridalpha=0.3,
     )
 
     for (label, result) in results
