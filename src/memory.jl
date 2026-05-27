@@ -1,11 +1,14 @@
 import Base: @propagate_inbounds
 import LinearAlgebra: AdjOrTransAbsMat, wrapperop
+using KernelAbstractions.Extras: @unroll
 
 export DualAccessMatrix, SingleAccessMatrix, SharedMatrix, IAddSubSetterMatrix, IAddSubGetterMatrix, SharedVector, BatchedVector
+export BlockMatrix_2_1, BlockMatrixLowerTrig_2_2
 export intermediate_layout_load!, intermediate_layout_write!
 export interm_to_dual_transfer!, dual_to_interm_transfer!
 export shared_matrix_load!, shared_vector_load!
 export vector_load!, vector_write!
+export scalar_stage!, scalar_write!
 
 """
 Abstraction of shared memory layout for a matrix accessible both column and row-wise.
@@ -94,6 +97,125 @@ Base.@propagate_inbounds @inline function Base.setindex!(
     return A.shmem[A.offset + (j - 1i32) * stride + (i - 1i32) * n_mats_per_warp + 1i32] = v
 end
 
+struct BlockMatrix_2_1{T,D,V,Mtop<:AbstractMatrix{T},Mbot<:AbstractMatrix{T}} <: AbstractMatrix{T}
+    top::Mtop
+    bot::Mbot
+end
+
+function BlockMatrix_2_1(
+    top::Mtop,
+    bot::Mbot,
+    ::Val{D},
+    warp_matrix_id::Int32,
+    ::Val{:small},
+) where {T,D,Mtop<:AbstractMatrix{T},Mbot<:AbstractMatrix{T}}
+    return BlockMatrix_2_1{T,D,Val{:small},Mtop,Mbot}(top, bot)
+end
+
+Base.@propagate_inbounds @inline function Base.getindex(
+    A::BlockMatrix_2_1{T,D,Val{:small}}, i::Int32, j::Int32,
+) where {T,D}
+    if i <= D
+        return A.top[i, j]
+    else
+        return A.bot[i - D, j]
+    end
+end
+
+Base.@propagate_inbounds @inline function Base.setindex!(
+    A::BlockMatrix_2_1{T,D,Val{:small}}, v::T, i::Int32, j::Int32,
+) where {T,D}
+    if i <= D
+        return A.top[i, j] = v
+    else
+        return A.bot[i - D, j] = v
+    end
+end
+
+Base.size(::BlockMatrix_2_1{T,D,Val{:small}}) where {T,D} = (2i32 * D, D)
+
+struct BlockMatrixLowerTrig_2_2{T,D,V,Mtop<:AbstractMatrix{T},Mbotleft<:AbstractMatrix{T},Mbotright<:AbstractMatrix{T}} <: AbstractMatrix{T}
+    top::Mtop
+    bot_left::Mbotleft
+    bot_right::Mbotright
+end
+
+function BlockMatrixLowerTrig_2_2(
+    top::Mtop,
+    bot_left::Mbotleft,
+    bot_right::Mbotright,
+    ::Val{D},
+    warp_matrix_id::Int32,
+    ::Val{:small},
+) where {T,D,Mtop<:AbstractMatrix{T},Mbotleft<:AbstractMatrix{T},Mbotright<:AbstractMatrix{T}}
+    return BlockMatrixLowerTrig_2_2{T,D,Val{:small},Mtop,Mbotleft,Mbotright}(top, bot_left, bot_right)
+end
+
+Base.@propagate_inbounds @inline function Base.getindex(
+    A::BlockMatrixLowerTrig_2_2{T,D,Val{:small}}, i::Int32, j::Int32,
+) where {T,D}
+    if i <= D
+        if j > D
+            return zero(T)
+        else
+            return A.top[i, j]
+        end
+    else
+        i -= D
+        if j > D
+            j -= D
+            return A.bot_right[i, j]
+        else
+            return A.bot_left[i, j]
+        end
+    end
+end
+
+Base.@propagate_inbounds @inline function Base.setindex!(
+    A::BlockMatrixLowerTrig_2_2{T,D,Val{:small}}, v::T, i::Int32, j::Int32,
+) where {T,D}
+    if i <= D
+        if j > D
+            return v
+        else
+            return A.top[i, j] = v
+        end
+    else
+        i -= D
+        if j > D
+            j -= D
+            return A.bot_right[i, j] = v
+        else
+            return A.bot_left[i, j] = v
+        end
+    end
+end
+Base.size(::BlockMatrixLowerTrig_2_2{T,D,Val{:small}}) where {T,D} = (2i32 * D, 2i32 * D)
+
+@propagate_inbounds @inline function Base.getindex(
+    A::BlockMatrix_2_1{T,D,Val{:small}}, i::Int, j::Int
+) where {T,D}
+    return getindex(A, Int32(i), Int32(j))
+end
+
+@propagate_inbounds @inline function Base.setindex!(
+    A::BlockMatrix_2_1{T,D,Val{:small}}, v::T, i::Int, j::Int
+) where {T,D}
+    return setindex!(A, v, Int32(i), Int32(j))
+end
+
+@propagate_inbounds @inline function Base.getindex(
+    A::BlockMatrixLowerTrig_2_2{T,D,Val{:small}}, i::Int, j::Int
+) where {T,D}
+    return getindex(A, Int32(i), Int32(j))
+end
+
+@propagate_inbounds @inline function Base.setindex!(
+    A::BlockMatrixLowerTrig_2_2{T,D,Val{:small}}, v::T, i::Int, j::Int
+) where {T,D}
+    return setindex!(A, v, Int32(i), Int32(j))
+end
+
 """
 Get index method for memory layout where one matrix is handled by D^2 threads.
 """
@@ -123,6 +245,9 @@ end
 # Wrappers to handle Int32 case
 @propagate_inbounds Base.getindex(A::AdjOrTransAbsMat{T}, i::Int32, j::Int32) where {T} =
     wrapperop(A)(A.parent[j, i])::T
+
+@propagate_inbounds Base.setindex!(A::AdjOrTransAbsMat{T}, v, i::Int32, j::Int32) where {T} =
+    A.parent[j, i] = wrapperop(A)(convert(T, v))
 
 # Support regular Int indexing (needed for Adjoint and other wrappers)
 @propagate_inbounds @inline function Base.getindex(
@@ -501,20 +626,15 @@ end
     lid = mod1(tid, 32i32)
 
     pad_interval = div(32i32, D1 & -D1) * D1
-    @inbounds begin
-        offset = 0i32
-        while offset < D1 * D2
-            raw_idx = offset + lid
-            if raw_idx <= D1 * D2
-                padded_amount = (raw_idx - 1i32) ÷ pad_interval
+    @inbounds @unroll for offset in 0i32:32i32:(D1 * D2 - 1)
+        raw_idx = offset + lid
+        if raw_idx <= D1 * D2
+            padded_amount = (raw_idx - 1i32) ÷ pad_interval
 
-                src_idx = raw_idx
-                dest_idx = raw_idx + padded_amount
+            src_idx = raw_idx
+            dest_idx = raw_idx + padded_amount
 
-                shmem[dest_idx] = global_arr[src_idx]
-            end
-
-            offset += 32i32
+            shmem[dest_idx] = global_arr[src_idx]
         end
     end
 
@@ -609,7 +729,7 @@ where one warp handles multiple matrices. Meant for small matrices.
                 raw_mtrx <= n_mats_per_block &&
                 grid_mtrx_load <= N &&
                 raw_idx <= warp_shmem_elem * wid
-            )  # div(raw_idx - 1, warp_shmem_elem) != wid
+            )
                 padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
 
                 src_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
@@ -1061,28 +1181,28 @@ end
     start_raw = (wid - 1i32) * warp_shmem_elem + 1i32
     start_offset = (wid - 1i32) * warp_shmem_size + 1i32
 
-    @inbounds begin
-        offset = 0i32
-        while offset < warp_shmem_elem
-            raw_idx = start_raw + offset + lid - 1i32
-            raw_mtrx = div(raw_idx - 1i32, D1 * D2) + 1i32
-            grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block
+    # offset = 0i32
+    # while offset < warp_shmem_elem
+    @inbounds @unroll for o in 1i32:cld(warp_shmem_elem, 32i32)
+        offset = (o - 1i32) * 32i32
+        raw_idx = start_raw + offset + lid - 1i32
+        raw_mtrx = div(raw_idx - 1i32, D1 * D2) + 1i32
+        grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block
 
-            if (
-                raw_mtrx <= n_mats_per_block &&
-                grid_mtrx_load <= N &&
-                raw_idx <= warp_shmem_elem * wid
-            )
-                padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
+        if (
+            raw_mtrx <= n_mats_per_block &&
+            grid_mtrx_load <= N &&
+            raw_idx <= warp_shmem_elem * wid
+        )
+            padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
 
-                src_idx = (bid - 1i32) * n_mats_per_block * D1 * D2 + raw_idx
-                dest_idx = start_offset + offset + lid - 1i32 + padded_amount
+            src_idx = (bid - 1i32) * n_mats_per_block * D1 * D2 + raw_idx
+            dest_idx = start_offset + offset + lid - 1i32 + padded_amount
 
-                shmem[dest_idx] = global_arr[src_idx]
-            end
-
-            offset += 32i32
+            shmem[dest_idx] = global_arr[src_idx]
         end
+
+        # offset += 32i32
     end
 
     return nothing
@@ -1105,28 +1225,28 @@ end
     start_raw = (wid - 1i32) * warp_shmem_elem + 1i32
     start_offset = (wid - 1i32) * warp_shmem_size + 1i32
 
-    @inbounds begin
-        offset = 0i32
-        while offset < warp_shmem_elem
-            raw_idx = start_raw + offset + lid - 1i32
-            raw_mtrx = div(raw_idx - 1i32, D1 * D2) + 1i32
-            grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block
+    # offset = 0i32
+    # while offset < warp_shmem_elem
+    @inbounds @unroll for o in 1i32:cld(warp_shmem_elem, 32i32)
+        offset = (o - 1i32) * 32i32
+        raw_idx = start_raw + offset + lid - 1i32
+        raw_mtrx = div(raw_idx - 1i32, D1 * D2) + 1i32
+        grid_mtrx_load = raw_mtrx + (bid - 1i32) * n_mats_per_block
 
-            if (
-                raw_mtrx <= n_mats_per_block &&
-                grid_mtrx_load <= N &&
-                raw_idx <= warp_shmem_elem * wid
-            )
-                padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
+        if (
+            raw_mtrx <= n_mats_per_block &&
+            grid_mtrx_load <= N &&
+            raw_idx <= warp_shmem_elem * wid
+        )
+            padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
 
-                src_idx = (bid - 1i32) * n_mats_per_block * D1 * D2 + raw_idx
-                dest_idx = start_offset + offset + lid - 1i32 + padded_amount
+            src_idx = (bid - 1i32) * n_mats_per_block * D1 * D2 + raw_idx
+            dest_idx = start_offset + offset + lid - 1i32 + padded_amount
 
-                shmem[dest_idx] = global_arr[src_idx]
-            end
-
-            offset += 32i32
+            shmem[dest_idx] = global_arr[src_idx]
         end
+
+        # offset += 32i32
     end
 
     return nothing
@@ -1155,8 +1275,8 @@ end
     block_matrix_id = (wid - 1i32) * n_mats_per_warp + warp_matrix_id
     grid_matrix_id = (bid - 1i32) * n_mats_per_block + block_matrix_id
 
-    @inbounds if lid <= active_lanes && grid_matrix_id <= N && col <= D2
-        for row in (1i32):D1
+    if lid <= active_lanes && grid_matrix_id <= N && col <= D2
+        @inbounds @unroll for row in (1i32):D1
             logical_idx = (warp_matrix_id - 1i32) * D1 * D2 + (col - 1i32) * D1 + row
             padding = (logical_idx - 1i32) ÷ interm_pad_freq
             padded_idx_interm = logical_idx + padding + (wid - 1i32) * warp_shmem_size
@@ -1195,8 +1315,8 @@ end
     block_matrix_id = (wid - 1i32) * n_mats_per_warp + warp_matrix_id
     grid_matrix_id = (bid - 1i32) * n_mats_per_block + block_matrix_id
 
-    @inbounds if lid <= active_lanes && grid_matrix_id <= N && col <= D2
-        for row in (1i32):D1
+    if lid <= active_lanes && grid_matrix_id <= N && col <= D2
+        @inbounds @unroll for row in (1i32):D1
             logical_idx = (warp_matrix_id - 1i32) * D1 * D2 + (col - 1i32) * D1 + row
             padding = (logical_idx - 1i32) ÷ interm_pad_freq
             padded_idx_interm = logical_idx + padding + (wid - 1i32) * warp_shmem_size
@@ -1235,8 +1355,8 @@ end
     block_matrix_id = (wid - 1i32) * n_mats_per_warp + warp_matrix_id
     grid_matrix_id = (bid - 1i32) * n_mats_per_block + block_matrix_id
 
-    @inbounds if warp_matrix_id <= n_mats_per_warp && grid_matrix_id <= N && col <= D2
-        for row in (1i32):D1
+    if warp_matrix_id <= n_mats_per_warp && grid_matrix_id <= N && col <= D2
+        @inbounds @unroll for row in (1i32):D1
             logical_idx = (warp_matrix_id - 1i32) * D1 * D2 + (col - 1i32) * D1 + row
             padding = (logical_idx - 1i32) ÷ interm_pad_freq
             padded_idx_interm = logical_idx + padding + (wid - 1i32) * warp_shmem_size
@@ -1267,8 +1387,8 @@ end
     block_matrix_id = (wid - 1i32) * n_mats_per_warp + warp_matrix_id
     grid_matrix_id = (bid - 1i32) * n_mats_per_block + block_matrix_id
 
-    @inbounds if warp_matrix_id <= n_mats_per_warp && grid_matrix_id <= N && col <= D2
-        for row in (1i32):D1
+    if warp_matrix_id <= n_mats_per_warp && grid_matrix_id <= N && col <= D2
+        @inbounds @unroll for row in (1i32):D1
             logical_idx = (warp_matrix_id - 1i32) * D1 * D2 + (col - 1i32) * D1 + row
             padding = (logical_idx - 1i32) ÷ interm_pad_freq
             padded_idx_interm = logical_idx + padding + (wid - 1i32) * warp_shmem_size
@@ -1299,28 +1419,28 @@ end
     start_raw = (wid - 1i32) * warp_shmem_elem + 1i32
     start_offset = (wid - 1i32) * warp_shmem_size + 1i32
 
-    @inbounds begin
-        offset = 0i32
-        while offset < warp_shmem_elem
-            raw_idx = start_raw + offset + lid - 1i32
-            raw_mtrx = div(raw_idx - 1i32, D1 * D2) + 1i32
-            grid_mtrx_write = raw_mtrx + (bid - 1i32) * n_mats_per_block
+    # offset = 0i32
+    # while offset < warp_shmem_elem
+    @inbounds @unroll for o in 1i32:cld(warp_shmem_elem, 32i32)
+        offset = (o - 1i32) * 32i32
+        raw_idx = start_raw + offset + lid - 1i32
+        raw_mtrx = div(raw_idx - 1i32, D1 * D2) + 1i32
+        grid_mtrx_write = raw_mtrx + (bid - 1i32) * n_mats_per_block
 
-            if (
-                raw_mtrx <= n_mats_per_block &&
-                grid_mtrx_write <= N &&
-                raw_idx <= warp_shmem_elem * wid
-            )
-                padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
+        if (
+            raw_mtrx <= n_mats_per_block &&
+            grid_mtrx_write <= N &&
+            raw_idx <= warp_shmem_elem * wid
+        )
+            padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
 
-                dest_idx = (bid - 1i32) * n_mats_per_block * D1 * D2 + raw_idx
-                src_idx = start_offset + offset + lid - 1i32 + padded_amount
+            dest_idx = (bid - 1i32) * n_mats_per_block * D1 * D2 + raw_idx
+            src_idx = start_offset + offset + lid - 1i32 + padded_amount
 
-                global_arr[dest_idx] = shmem[src_idx]
-            end
-
-            offset += 32i32
+            global_arr[dest_idx] = shmem[src_idx]
         end
+
+        # offset += 32i32
     end
 
     return nothing
@@ -1343,29 +1463,56 @@ end
     start_raw = (wid - 1i32) * warp_shmem_elem + 1i32
     start_offset = (wid - 1i32) * warp_shmem_size + 1i32
 
-    @inbounds begin
-        offset = 0i32
-        while offset < warp_shmem_elem
-            raw_idx = start_raw + offset + lid - 1i32
-            raw_mtrx = div(raw_idx - 1i32, D1 * D2) + 1i32
-            grid_mtrx_write = raw_mtrx + (bid - 1i32) * n_mats_per_block
+    # offset = 0i32
+    # while offset < warp_shmem_elem
+    @inbounds @unroll for o in 1i32:cld(warp_shmem_elem, 32i32)
+        offset = (o - 1i32) * 32i32
+        raw_idx = start_raw + offset + lid - 1i32
+        raw_mtrx = div(raw_idx - 1i32, D1 * D2) + 1i32
+        grid_mtrx_write = raw_mtrx + (bid - 1i32) * n_mats_per_block
 
-            if (
-                raw_mtrx <= n_mats_per_block &&
-                grid_mtrx_write <= N &&
-                raw_idx <= warp_shmem_elem * wid
-            )
-                padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
+        if (
+            raw_mtrx <= n_mats_per_block &&
+            grid_mtrx_write <= N &&
+            raw_idx <= warp_shmem_elem * wid
+        )
+            padded_amount = (offset + lid - 1i32) ÷ interm_pad_freq
 
-                dest_idx = (bid - 1i32) * n_mats_per_block * D1 * D2 + raw_idx
-                src_idx = start_offset + offset + lid - 1i32 + padded_amount
+            dest_idx = (bid - 1i32) * n_mats_per_block * D1 * D2 + raw_idx
+            src_idx = start_offset + offset + lid - 1i32 + padded_amount
 
-                global_arr[dest_idx] = shmem[src_idx]
-            end
-
-            offset += 32i32
+            global_arr[dest_idx] = shmem[src_idx]
         end
+
+        # offset += 32i32
     end
 
     return nothing
+end
+
+@inline function scalar_stage!(
+    shmem,
+    val::T,
+    lid::Int32,
+    warp_matrix_id::Int32,
+    block_matrix_id::Int32,
+    active::Bool,
+    ::Val{D}
+) where {T,D}
+    is_leader = lid == (warp_matrix_id - 1i32) * D + 1i32
+    if is_leader && active
+        shmem[block_matrix_id] = val
+    end
+end
+
+@inline function scalar_write!(
+    global_arr,
+    shmem,
+    n_mats_per_block::Int32,
+)
+    tid = threadIdx().x
+    base = (blockIdx().x - 1i32) * n_mats_per_block
+    if tid <= n_mats_per_block
+        @inbounds global_arr[base + tid] = shmem[tid]
+    end
 end

@@ -110,6 +110,119 @@
     end
 end
 
+@testitem "Kalman Cov" begin
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+    using BatchedKernels
+    import StaticArrays: @MVector
+
+    include("kalman_kernels.jl")
+
+    # Test parameters
+    nthreads = 2^8
+    N = 2^9 + 1
+    # Test for both independent and consequtive modes
+
+    function cpu_kalman_cov(P, A, Q, H, R)
+        # Predict step
+        P_pred = A * P * A' + Q
+
+        # Update step
+        S = H * P_pred * H' + R
+        K = P_pred * H' / S
+        P_new = P_pred - K * S * K'
+
+        return P_new
+    end
+
+    for D in 2:11
+        nblocks = cld(N, nthreads ÷ 32 * (32 ÷ D))
+        n_mats_per_warp = 32 ÷ D
+        n_warps = nthreads ÷ 32
+        padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32), 32)
+        pad_interval = div(32, D & -D) * D
+
+        shmem_elems = (n_mats_per_warp * D + padding) * D * n_warps
+        shmem_size_fixed = D * D + (D * D - 1) ÷ pad_interval
+
+        shmem_bytes = sizeof(Float32) * (
+            3 * shmem_elems + 4 * shmem_size_fixed
+        )
+
+        # Generate test data
+        A_elem = rand(Float32, D, D) / Float32(D)
+        Q_elem = rand(Float32, D, D) / Float32(D)^2
+        Q_elem = Q_elem * Q_elem' + 0.01f0 * I
+
+        H_elem = rand(Float32, D, D) / Float32(D)
+        R_elem = rand(Float32, D, D) / Float32(D)^2
+        R_elem = R_elem * R_elem' + 0.01f0 * I
+
+        P_cpu = Array{Float32}(undef, D, D, N)
+        for i in 1:N
+            P_i = rand(Float32, D, D) / Float32(D)
+            P_i = P_i * P_i' + 0.1f0 * I
+            P_cpu[:, :, i] = P_i
+        end
+
+        P_in = CuArray(P_cpu)
+
+        A_gpu = CuArray(A_elem)
+        Q_gpu = CuArray(Q_elem)
+        H_gpu = CuArray(H_elem)
+        R_gpu = CuArray(R_elem)
+
+        P_out = CuArray{Float32}(undef, D, D, N)
+
+        kernel = @cuda launch=false kernel_kalman_cov!(
+            P_out,
+            P_in,
+            A_gpu,
+            Q_gpu,
+            H_gpu,
+            R_gpu,
+            Val(Int32(D)),
+            Val(Int32(nthreads)),
+            Int32(1),
+            Int32(N),
+            Val(:small),
+        )
+        CUDA.cuFuncSetAttribute(kernel.fun, CUDA.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, shmem_bytes)
+
+        CUDA.@sync kernel(
+            P_out,
+            P_in,
+            A_gpu,
+            Q_gpu,
+            H_gpu,
+            R_gpu,
+            Val(Int32(D)),
+            Val(Int32(nthreads)),
+            Int32(1),
+            Int32(N),
+            Val(:small);
+            threads = nthreads, blocks = nblocks, shmem = shmem_bytes,
+        )
+
+        # Validate P_new (complete Kalman filter output)
+        P_out_cpu = Array(P_out)
+        max_error_P = 0.0
+        print("checking D=$D")
+        for i in 1:N
+            P_new_ref = cpu_kalman_cov(
+                P_cpu[:, :, i], A_elem, Q_elem, H_elem, R_elem,
+            )
+
+            P_new_cpu = P_out_cpu[:, :, i]
+            error_mat = maximum(abs.(P_new_ref .- P_new_cpu))
+
+            max_error_P = max(max_error_P, error_mat)
+        end
+        @test max_error_P < 1e-5
+    end
+end
+
 @testitem "Kalman full (shared, vmap)" begin
     using BatchedKernels
     using GeneralisedFilters
@@ -275,7 +388,7 @@ end
         b = BatchedCuVector(cu(b_cpu))
         z = BatchedCuVector(cu(z_cpu))
 
-        kalman_vmap = BatchedKernels.vmap(kalman_filter)
+        kalman_vmap = BatchedKernels.vmap(kalman_filter, debug = true)
 
         P_out, µ_out = kalman_vmap(P_in, A, Q, H, R, µ, b, z)
         P_out_cpu = Array(P_out.data)
@@ -684,6 +797,206 @@ end
 
             @test max_error < 1e-3
         end
+    end
+end
+
+@testitem "Sqrt Kalman" begin
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+    using BatchedKernels
+    using Random
+
+    include("kalman_kernels.jl")
+
+    nthreads = 2^8
+    N = 2^9 + 1
+    THRESH = 10
+    n_steps = 2
+
+    function cpu_kalman_cov(P, A, Q, H, R, n_steps)
+        for _ in 1:n_steps
+            P_pred = A * P * A' + Q
+            S = H * P_pred * H' + R
+            K = P_pred * H' / S
+            P = P_pred - K * S * K'
+        end
+        return P
+    end
+
+    for D in 16:32
+        Random.seed!(1234)
+        nblocks = cld(N, nthreads ÷ 32 * (32 ÷ D))
+
+        A_elem = rand(Float32, D, D) / Float32(D)
+        Q_elem = rand(Float32, D, D) / Float32(D)^2
+        Q_elem = Q_elem * Q_elem' + 0.01f0 * I
+
+        H_elem = rand(Float32, D, D) / Float32(D)
+        R_elem = rand(Float32, D, D) / Float32(D)^2
+        R_elem = R_elem * R_elem' + 0.01f0 * I
+
+        S_Q_elem = Float32.(Matrix(cholesky(Q_elem).L))
+        S_R_elem = Float32.(Matrix(cholesky(R_elem).L))
+
+        # Generate batched S = cholesky(P).L
+        S_cpu = Array{Float32}(undef, D, D, N)
+        P_cpu = Array{Float32}(undef, D, D, N)
+        for i in 1:N
+            P_i = rand(Float32, D, D) / Float32(D)
+            P_i = P_i * P_i' + 0.1f0 * I
+            P_cpu[:, :, i] = P_i
+            S_cpu[:, :, i] = Float32.(Matrix(cholesky(P_i).L))
+        end
+
+        S_in = CuArray(S_cpu)
+        A_gpu = CuArray(A_elem)
+        S_Q_gpu = CuArray(S_Q_elem)
+        H_gpu = CuArray(H_elem)
+        S_R_gpu = CuArray(S_R_elem)
+
+        S_out = CuArray{Float32}(undef, D, D, N)
+
+        n_mats_per_warp = 32 ÷ D
+        n_warps = nthreads ÷ 32
+        dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32), 32)
+        pad_interval = div(32, D & -D) * D
+
+        warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
+        shmem_elems = warp_shmem_size * n_warps
+        shmem_size_fixed = D * D + (D * D - 1) ÷ pad_interval
+        shmem_bytes = (2 * shmem_elems + 4 * shmem_size_fixed) * sizeof(Float32)
+
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks shmem = shmem_bytes kernel_sqrt_kalman!(
+            S_out,
+            S_in,
+            A_gpu,
+            S_Q_gpu,
+            H_gpu,
+            S_R_gpu,
+            Val(Int32(D)),
+            Val(Int32(THRESH)),
+            Val(Int32(nthreads)),
+            Int32(n_steps),
+            Int32(N),
+            Val(:small),
+        )
+
+        S_out_cpu = Array(S_out)
+        max_error = 0.0
+
+        for i in 1:N
+            P_new_ref = cpu_kalman_cov(P_cpu[:, :, i], A_elem, Q_elem, H_elem, R_elem, n_steps)
+            P_new_sqrt = S_out_cpu[:, :, i] * S_out_cpu[:, :, i]'
+
+            err = maximum(abs.(P_new_ref - P_new_sqrt))
+            max_error = max(max_error, err)
+            if max_error > 1e-4
+                println("error at i=$i for D=$D: $max_error")
+                break
+            end
+        end
+        println("D=$D, max_error=$max_error")
+        @test max_error < 1e-4
+    end
+end
+
+@testitem "Sqrt Kalman padded" begin
+    using CUDA
+    using CUDA: i32
+    using LinearAlgebra
+    using BatchedKernels
+    using Random
+
+    include("kalman_kernels.jl")
+
+    nthreads = 2^8
+    N = 2^10 + 113
+    n_steps = 2
+
+    function cpu_kalman_cov(P, A, Q, H, R, n_steps)
+        for _ in 1:n_steps
+            P_pred = A * P * A' + Q
+            S = H * P_pred * H' + R
+            K = P_pred * H' / S
+            P = P_pred - K * S * K'
+        end
+        return P
+    end
+
+    for Ddiv2 in 2:8
+        D = 2 * Ddiv2
+        Random.seed!(1234)
+        nblocks = cld(N, nthreads ÷ 32 * (32 ÷ D))
+
+        A_elem = rand(Float32, Ddiv2, Ddiv2) / Float32(Ddiv2)
+        Q_elem = rand(Float32, Ddiv2, Ddiv2) / Float32(Ddiv2)^2
+        Q_elem = Q_elem * Q_elem' + 0.01f0 * I
+
+        H_elem = rand(Float32, Ddiv2, Ddiv2) / Float32(Ddiv2)
+        R_elem = rand(Float32, Ddiv2, Ddiv2) / Float32(Ddiv2)^2
+        R_elem = R_elem * R_elem' + 0.01f0 * I
+
+        S_Q_elem = Float32.(Matrix(cholesky(Q_elem).L))
+        S_R_elem = Float32.(Matrix(cholesky(R_elem).L))
+
+        # Generate batched S = cholesky(P).L
+        S_cpu = Array{Float32}(undef, Ddiv2, Ddiv2, N)
+        P_cpu = Array{Float32}(undef, Ddiv2, Ddiv2, N)
+        for i in 1:N
+            P_i = rand(Float32, Ddiv2, Ddiv2) / Float32(Ddiv2)
+            P_i = P_i * P_i' + 0.1f0 * I
+            P_cpu[:, :, i] = P_i
+            S_cpu[:, :, i] = Float32.(Matrix(cholesky(P_i).L))
+        end
+
+        S_in = CuArray(S_cpu)
+        A_gpu = CuArray(A_elem)
+        S_Q_gpu = CuArray(S_Q_elem)
+        H_gpu = CuArray(H_elem)
+        S_R_gpu = CuArray(S_R_elem)
+
+        S_out = CuArray{Float32}(undef, Ddiv2, Ddiv2, N)
+
+        n_mats_per_warp = 32 ÷ D
+        n_warps = nthreads ÷ 32
+        dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32), 32)
+        pad_interval = div(32, Ddiv2 & -Ddiv2) * Ddiv2
+
+        warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
+        shmem_elems = warp_shmem_size * n_warps
+        shmem_size_fixed = Ddiv2 * Ddiv2 + (Ddiv2 * Ddiv2 - 1) ÷ pad_interval
+        shmem_bytes = (2 * shmem_elems + 4 * shmem_size_fixed) * sizeof(Float32)
+
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks shmem = shmem_bytes kernel_sqrt_kalman_padded!(
+            S_out,
+            S_in,
+            A_gpu,
+            S_Q_gpu,
+            H_gpu,
+            S_R_gpu,
+            Val(Int32(D)),
+            Val(Int32(nthreads)),
+            Int32(n_steps),
+            Int32(N),
+            Val(:small),
+        )
+
+        S_out_cpu = Array(S_out)
+        max_error = 0.0
+
+        for i in 1:N
+            P_new_ref = cpu_kalman_cov(P_cpu[:, :, i], A_elem, Q_elem, H_elem, R_elem, n_steps)
+            P_new_sqrt = S_out_cpu[:, :, i] * S_out_cpu[:, :, i]'
+
+            err = maximum(abs.(P_new_ref - P_new_sqrt))
+            max_error = max(max_error, err)
+            if max_error > 1e-4
+                println("error at i=$i for D=$D: $max_error")
+                break
+            end
+        end
+        @test max_error < 1e-4
     end
 end
 
