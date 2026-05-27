@@ -1,0 +1,21 @@
+[deps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+GeneralisedFilters = "3ef92589-7ab8-43f9-b5b9-a3a0c86ecbb7"
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Magma = "a4173727-5e3e-4567-b12d-2e3cf2fa2f28"
+PDMats = "90014a1f-27ba-587c-ab20-58faa44d9150"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
+TestItems = "1c621080-faea-4a02-84b6-bbd5e436b8fe"
+
+[compat]
+CUDA = "5.5.2"
+Distributions = "0.25.123"
+LinearAlgebra = "1.11.0"
+PDMats = "0.11.35"
+TestItemRunner = "1.1.0"
+TestItems = "1.0.0"

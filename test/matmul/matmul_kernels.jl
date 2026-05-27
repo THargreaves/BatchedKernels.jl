@@ -134,6 +134,50 @@ end
     return nothing
 end
 
+@inline function kernel_trig_matmul!(
+    C, A, L, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32,
+) where {D1,D2,D,nthreads}
+    # shape(A) = (D1,D2)
+    # shape(L) = (D2,D2)
+
+    n_mats_per_warp = 32i32 ÷ D
+    n_warps = nthreads ÷ 32i32
+    n_mats_per_block = n_warps * n_mats_per_warp
+    dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
+
+    tid = threadIdx().x
+    bid = blockIdx().x
+    lid = mod1(tid, 32i32)
+    wid = div(tid - 1i32, 32i32) + 1i32
+    warp_matrix_id = div(lid - 1i32, D) + 1i32
+    d = mod1(lid, D)
+    grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+
+    warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
+    shmem_elems = warp_shmem_size * n_warps
+    shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
+    shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
+    shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
+    M1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+    M2 = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+    M3 = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
+
+    # Load M1 <- A
+    intermediate_layout_load!(shmem_3, A, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+    interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+
+    # Load M2 <- L
+    intermediate_layout_load!(shmem_3, L, Val(D2), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+    interm_to_dual_transfer!(shmem_2, shmem_3, Val(D2), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+
+    if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
+        batch_op!(*, M3, M1, LowerTriangular(M2), d, Val(D1), Val(D2), Val(D), Val(:small))
+    end
+
+    dual_to_interm_transfer!(shmem_1, M3, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_write!(C, shmem_1, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+end
+
 @inline function kernel_gram!(
     Gs,
     As,

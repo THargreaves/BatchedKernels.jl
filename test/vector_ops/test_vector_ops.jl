@@ -384,6 +384,7 @@ end
 
 @testitem "Matrix-Vector Multiplication (vmap)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -400,18 +401,18 @@ end
             Dmax = max(D1, D2)
             for extra in 0:2
                 D = Dmax + extra
-                dummy = CUDA.zeros(Float32, D, D, N)
+                dummy = BatchedCuMatrix(CUDA.zeros(Float32, D, D, N))
 
                 CUDA.seed!(1234)
 
-                As = CUDA.rand(Float32, D1, D2, N)
-                xs = CUDA.rand(Float32, D2, N)
-                As_cpu = Array(As)
-                xs_cpu = Array(xs)
+                As = BatchedCuMatrix(CUDA.rand(Float32, D1, D2, N))
+                xs = BatchedCuVector(CUDA.rand(Float32, D2, N))
+                As_cpu = Array(As.data)
+                xs_cpu = Array(xs.data)
 
                 matvec_vmap = BatchedKernels.vmap(matvec)
                 ys = matvec_vmap(As, xs, dummy)
-                ys_result = Array(ys)
+                ys_result = Array(ys.data)
 
                 # CPU comparison
                 ys_cpu = similar(ys_result)
@@ -428,6 +429,7 @@ end
 
 @testitem "Matrix-Vector Multiplication (shared, vmap)" begin
     using BatchedKernels
+    using GeneralisedFilters
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -444,22 +446,19 @@ end
             Dmax = max(D1, D2)
             for extra in 0:2
                 D = Dmax + extra
-                dummy = CUDA.zeros(Float32, D, D, N)
+                dummy = BatchedCuMatrix(CUDA.zeros(Float32, D, D, N))
 
                 # Make A shared
                 CUDA.seed!(1234)
 
-                A = CUDA.rand(Float32, D1, D2)
-                xs = CUDA.rand(Float32, D2, N)
-                A_cpu = Array(A)
-                xs_cpu = Array(xs)
+                A = SharedCuMatrix(CUDA.rand(Float32, D1, D2), N)
+                xs = BatchedCuVector(CUDA.rand(Float32, D2, N))
+                A_cpu = Array(A.data)
+                xs_cpu = Array(xs.data)
 
-                matvec_vmap = BatchedKernels.vmap(
-                    matvec,
-                    in_type = (:shared, :batched, :batched)
-                )
+                matvec_vmap = BatchedKernels.vmap(matvec)
                 ys = matvec_vmap(A, xs, dummy)
-                ys_result = Array(ys)
+                ys_result = Array(ys.data)
 
                 # CPU comparison
                 ys_cpu = similar(ys_result)
@@ -473,17 +472,14 @@ end
                 # Make x shared
                 CUDA.seed!(1234)
 
-                As = CUDA.rand(Float32, D1, D2, N)
-                x = CUDA.rand(Float32, D2)
-                As_cpu = Array(As)
-                x_cpu = Array(x)
+                As = BatchedCuMatrix(CUDA.rand(Float32, D1, D2, N))
+                x = SharedCuVector(CUDA.rand(Float32, D2), N)
+                As_cpu = Array(As.data)
+                x_cpu = Array(x.data)
 
-                matvec_vmap = BatchedKernels.vmap(
-                    matvec,
-                    in_type = (:batched, :shared, :batched)
-                )
+                matvec_vmap = BatchedKernels.vmap(matvec)
                 ys = matvec_vmap(As, x, dummy)
-                ys_result = Array(ys)
+                ys_result = Array(ys.data)
 
                 # CPU comparison
                 ys_cpu = similar(ys_result)

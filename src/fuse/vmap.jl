@@ -1,47 +1,40 @@
 export vmap
 
-const InType = Union{Val{:batched}, Val{:shared}}
-
-@inline function infer_from_input(input, tag::Union{Nothing,InType})
-    dims = ndims(input)
-    T = input isa Number ? typeof(input) : Base.eltype(input)
-    tag = tag === nothing ? Val(:batched) : tag
-
-    if tag === Val(:batched)
-        if dims == 3
-            D1, D2, N = size(input)
-            return max(D1, D2), N, T
-        elseif dims == 2
-            D1, N = size(input)
-            return D1, N, T
-        elseif dims == 1
-            N = length(input)
-            return nothing, N, T
-        else
-            return nothing, nothing, T
-        end
-    else
-        if dims == 2
-            D1, D2 = size(input)
-            return max(D1, D2), nothing, T
-        elseif dims == 1
-            D1 = length(input)
-            return D1, nothing, T
-        else
-            return nothing, nothing, T
-        end
-    end
+function infer_from_input(x::BatchedCuMatrix{T,M}) where {T,M}
+    D1 = size(x.data, 1)
+    D2 = size(x.data, 2)
+    D = max(D1, D2)
+    N = size(x.data, 3)
+    return D, N, T
 end
 
+function infer_from_input(x::BatchedCuVector{T,M}) where {T,M}
+    D1 = size(x.data, 1)
+    N = size(x.data, 2)
+    return D1, N, T
+end
+
+function infer_from_input(x::SharedCuMatrix{T,M}) where {T,M}
+    D1 = size(x.data, 1)
+    D2 = size(x.data, 2)
+    D = max(D1, D2)
+    return D, nothing, T
+end
+
+function infer_from_input(x::SharedCuVector{T,M}) where {T,M}
+    D1 = length(x.data)
+    return D1, nothing, T
+end
+
+
 "Helper function to infer D and N from the inputs."
-function infer_D_N(inputs...; in_type::Union{Nothing,Tuple{Vararg{InType}}})
+function infer_D_N(inputs...)
     D_inferred = nothing
     N_inferred = nothing
     T_inferred = nothing
 
-    for (i, x) in enumerate(inputs)
-        tag = in_type !== nothing ? in_type[i] : nothing
-        D, N, T = infer_from_input(x, tag)
+    for x in inputs
+        D, N, T = infer_from_input(x)
 
         if D !== nothing
             if D_inferred === nothing
@@ -70,40 +63,36 @@ function infer_D_N(inputs...; in_type::Union{Nothing,Tuple{Vararg{InType}}})
     return D_inferred::Int, N_inferred::Int, T_inferred::DataType
 end
 
-function get_spec(input, i::Int, in_type::Union{Nothing,Tuple{Vararg{InType}}})
-    dims = ndims(input)
-    sym = Symbol(:_param, i)
-    tag = in_type === nothing ? Val(:batched) : in_type[i]
+get_sym(i::Int) = Symbol(:_param, i)
 
-    if tag === Val(:batched)
-        if dims == 3
-            D1, D2, _ = size(input)
-            return Mat(sym, D1, D2)
-        elseif dims == 2
-            D1, _ = size(input)
-            return Vec(sym, D1)
-        elseif dims == 1
-            return Scal(sym)
-        else
-            error("Each input must have 1 <= ndims <= 3")
-        end
-    else
-        if dims == 2
-            D1, D2 = size(input)
-            return SharedMat(sym, D1, D2)
-        elseif dims == 1
-            D1 = length(input)
-            return SharedVec(sym, D1)
-        elseif dims == 0
-            return SharedScal(sym)
-        else
-            error("Non-batched shared input must have ndims <= 2")
-        end
-    end
+function get_spec(x::BatchedCuMatrix{T,M}, i::Int) where {T,M}
+    sym = get_sym(i)
+    D1 = size(x.data, 1)
+    D2 = size(x.data, 2)
+    return Mat(sym, D1, D2)
 end
 
-get_output(::Type{<:MatKind}, shape::MatShape; T::Type, N::Int) = CUDA.zeros(T, shape.D1, shape.D2, N)
-get_output(::Type{<:VecKind}, shape::VecShape; T::Type, N::Int) = CUDA.zeros(T, shape.D1, N)
+function get_spec(x::BatchedCuVector{T,M}, i::Int) where {T,M}
+    sym = get_sym(i)
+    D1 = size(x.data, 1)
+    return Vec(sym, D1)
+end
+
+function get_spec(x::SharedCuMatrix{T,M}, i::Int) where {T,M}
+    sym = get_sym(i)
+    D1 = size(x.data, 1)
+    D2 = size(x.data, 2)
+    return SharedMat(sym, D1, D2)
+end
+
+function get_spec(x::SharedCuVector{T,M}, i) where {T,M}
+    sym = get_sym(i)
+    D1 = length(x.data)
+    return SharedVec(sym, D1)
+end
+
+get_output(::Type{<:MatKind}, shape::MatShape; T::Type, N::Int) = BatchedCuMatrix(CUDA.zeros(T, shape.D1, shape.D2, N))
+get_output(::Type{<:VecKind}, shape::VecShape; T::Type, N::Int) = BatchedCuVector(CUDA.zeros(T, shape.D1, N))
 get_output(::Type{<:SymKind}, ::ScalShape; T::Type, N::Int) = error("Unsupported output kind")
 
 "Cache key for kernels."
@@ -124,7 +113,6 @@ end
 mutable struct VMap{F}
     f::F
     fid::UInt
-    in_type::Union{Nothing,Tuple{Vararg{InType}}}
     debug::Bool
     cache::Dict{KernelKey,Tuple{UInt64,Tuple,Tuple}}  # Values are (pid, out_kinds, out_shapes)
 end
@@ -132,29 +120,22 @@ end
 "Returns a callable object that launches a fused batched kernel for f."
 function vmap(
     f;
-    in_type::Union{Nothing,Tuple{Vararg{Symbol}}} = nothing,
     debug::Bool = false,
 )
-    in_type_tags = in_type === nothing ? nothing :
-        Tuple(map(in_type) do in_axis::Symbol
-            in_axis === :batched && return Val(:batched)
-            in_axis === :shared && return Val(:shared)
-            error("in_type must either be nothing or entries must be :batched or :shared")
-        end)
-    return VMap(f, UInt(objectid(f)), in_type_tags, debug, Dict{KernelKey,Tuple{UInt64,Tuple,Tuple}}())
+    return VMap(f, UInt(objectid(f)), debug, Dict{KernelKey,Tuple{UInt64,Tuple,Tuple}}())
 end
 
 "Entry point of the vmapped function."
 function (g::VMap)(inputs...; threads::Int = 256)
     inTs = typeof(inputs)
-    D, N, T = infer_D_N(inputs...; in_type = g.in_type)
+    D, N, T = infer_D_N(inputs...)
     D <= 32 || error("D=$D unsupported, must be <= 32")
     threads % 32 == 0 || error("Number of threads must be a multiple of 32")
     key = KernelKey(g.fid, inTs, D, threads)
     nblocks = cld(N, (threads ÷ 32) * (32 ÷ D))
 
     (pid, out_kinds, out_shapes) = get!(g.cache, key) do 
-        specs = ntuple(i -> get_spec(getfield(inputs, i), i, g.in_type), length(inputs))
+        specs = ntuple(i -> get_spec(getfield(inputs, i), i), length(inputs))
         prog = trace(g.f, specs; T=T, D=D, nthreads=threads)
 
         out_kinds = Tuple(prog.kinds[vid] for vid in prog.outputs)
@@ -167,7 +148,7 @@ function (g::VMap)(inputs...; threads::Int = 256)
     outputs = Tuple(get_output(kind, shape; T=T, N=N) for (kind, shape) in zip(out_kinds, out_shapes))
 
     Base.invokelatest() do
-        @cuda threads=threads blocks=nblocks BatchedKernels._fused_kernel(Val(pid), outputs..., inputs..., Int32(N))
+        @cuda threads=threads blocks=nblocks BatchedKernels._fused_kernel(Val(pid), getproperty.(outputs, :data)..., getproperty.(inputs, :data)..., Int32(N))
     end
     
     return length(outputs) == 1 ? outputs[1] : outputs
