@@ -287,6 +287,37 @@ function emit_primitive(
     ))
 end
 
+# `_qr_Q_multiply` — lazy Q-multiply. Args are (R, tau, B, Val(Adj)) where
+# Adj is splice-inlined as a `Val{true}`/`Val{false}` literal via the
+# `ConstNode` returned by `arg_kernel_expr`.
+function emit_primitive(
+    ::typeof(_qr_Q_multiply), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
+    R_view, tau_view, B_view, adj_val = args
+    # types: (TraceMatrix R, TraceVector tau, TraceMatrix B, Val{Adj} const)
+    D_R, _ = shape(types[1])
+    B_D1, B_D2 = shape(types[3])
+    D_R == D_MAX || error(
+        "emit_primitive(_qr_Q_multiply): Q*B currently requires D == D_MAX (got D=$D_R, D_MAX=$D_MAX)",
+    )
+    return :(batch_op!(
+        Val(:qr_Q_multiply),
+        $adj_val,
+        $dest,
+        $R_view,
+        $B_view,
+        d,
+        $tau_view,
+        Val(Int32($D_R)),
+        Val(Int32($D_R)),
+        Val(Int32($B_D1)),
+        Val(Int32($B_D2)),
+        Val(Int32($D_MAX)),
+        warp_matrix_id,
+        Val(:small),
+    ))
+end
+
 # =============================================================================
 # Scalar-producing reductions
 # =============================================================================

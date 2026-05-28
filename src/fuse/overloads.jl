@@ -195,6 +195,18 @@ struct QRResult{T,D}
     tau::TraceVector{T,D}
 end
 
+# Lazy Q operator: holds refs to R+reflectors and the tau vector; does not
+# materialise Q. `Q*B` / `Q'*B` dispatch through explicit overloads below
+# that emit `:qr_Q_multiply` CallNodes with the right adjoint flag.
+struct LazyQTrace{T,D,Adj}
+    R_ref::NodeRef
+    tau_ref::NodeRef
+    tape::Tape
+end
+
+# Internal opcode for the Q-multiply CallNode.
+function _qr_Q_multiply end
+
 function LinearAlgebra.qr(A::TraceMatrix{T,D,D}) where {T,D}
     tape = A.tape
     # `_alloc_vec` has no args, so `emit_call!` would compute lifecycle =
@@ -213,9 +225,35 @@ end
 # `.R` returns an `UpperTriangular` view over the R+reflectors slot. The
 # triangular wrapper masks the reflector entries below the diagonal so
 # downstream triangular-solve / matmul consumers only see R.
+#
+# `.Q` returns a `LazyQTrace` (no kernel materialisation); subsequent `Q*B`
+# / `Q'*B` dispatch via the explicit overloads below.
 function Base.getproperty(q::QRResult{T,D}, s::Symbol) where {T,D}
     s === :R && return UpperTriangular(getfield(q, :R))
+    s === :Q && return LazyQTrace{T,D,false}(
+        getfield(q, :R).ref, getfield(q, :tau).ref, getfield(q, :R).tape
+    )
     return getfield(q, s)
+end
+
+# Q' just flips the Adj flag; nothing to emit until a consumer hits.
+Base.adjoint(q::LazyQTrace{T,D,Adj}) where {T,D,Adj} =
+    LazyQTrace{T,D,!Adj}(q.R_ref, q.tau_ref, q.tape)
+
+# Q * B and Q' * B share this single overload — the Adj flag is encoded in
+# the LazyQTrace's type parameter and emitted as a `ConstNode(Val(Adj))`
+# arg that `emit_primitive(_qr_Q_multiply)` reads.
+function Base.:*(
+    q::LazyQTrace{T,D,Adj}, B::TraceMatrix{T,D,K}
+) where {T,D,Adj,K}
+    adj_ref = emit_const!(q.tape, Val(Adj))
+    out = emit_call!(
+        q.tape,
+        _qr_Q_multiply,
+        NodeRef[q.R_ref, q.tau_ref, B.ref, adj_ref],
+        TraceMatrix{T,D,K},
+    )
+    return TraceMatrix{T,D,K}(q.tape, out)
 end
 
 # --- cholesky(::Symmetric) --------------------------------------------------
