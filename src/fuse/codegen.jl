@@ -75,14 +75,19 @@ function codegen(
     push!(stmts, :(grid_mtrx_id = block_matrix_id + (bid - 1i32) * $n_mats_per_block))
     push!(stmts, :(active = warp_matrix_id <= $n_mats_per_warp && grid_mtrx_id <= N))
 
-    # Matrix slot shmem allocations.
+    # Matrix slot shmem allocations. Each slot is sized to hold a dual-layout
+    # block, which is also enough room for a single-layout buffer of the same
+    # `D_MAX×D_MAX` extent — so the LoadNode (writing the single layout) and
+    # the TransferNode (writing the dual layout) can target any slot from the
+    # pool. There is no separate dedicated staging buffer for input loads or
+    # output writes; both are planner-allocated slots that the free-list
+    # recycles.
     matrix_slot_syms = Symbol[]
     for s in 1:(planner.num_matrix_slots)
         sym = Symbol("shmem_M", s)
         push!(matrix_slot_syms, sym)
         push!(stmts, :($sym = CuStaticSharedArray($T, ($mat_shmem_elems,))))
     end
-    push!(stmts, :(shmem_load = CuStaticSharedArray($T, ($mat_shmem_elems,))))
 
     # Vector slot shmem allocations.
     vector_slot_syms = Symbol[]
@@ -222,59 +227,34 @@ function codegen(
         return slot.kind === :M ? matrix_slot_syms[slot.idx] : vector_slot_syms[slot.idx]
     end
 
+    # Matrix inputs are loaded by `_load_to_single` + `_single_to_dual` tape
+    # nodes — see the inline branches in the main walk below. Vector inputs
+    # don't go through a dual-layout transfer (only single-layout shmem), so
+    # they're still loaded lazily here on first reference.
     loaded = Set{Int}()
     function maybe_load_batched_input!(node_id::Int)
         node_id in loaded && return nothing
         node = tape.nodes[node_id]
         meta = tape.metas[node_id]
         (node isa InputNode && meta.lifecycle == BATCHED) || return nothing
+        meta.type <: TraceVector || return nothing
         slot = planner.slots[node_id]
         global_in = input_sym[node_id]
-        if slot.kind === :M
-            D_M, D_N = shape(meta.type)
-            push!(
-                stmts,
-                :(intermediate_layout_load!(
-                    shmem_load,
-                    $global_in,
-                    Val(Int32($D_M)),
-                    Val(Int32($D_N)),
-                    Val($D32),
-                    Val($nthreads32),
-                    N,
-                    Val(:small),
-                )),
-            )
-            push!(
-                stmts,
-                :(interm_to_dual_transfer!(
-                    $(slot_shmem_sym(slot)),
-                    shmem_load,
-                    Val(Int32($D_M)),
-                    Val(Int32($D_N)),
-                    Val($D32),
-                    Val($nthreads32),
-                    N,
-                    Val(:small),
-                )),
-            )
-        else
-            D_M, = shape(meta.type)
-            D_M == D_MAX || error(
-                "codegen: batched vector with D_M=$D_M ≠ D_MAX=$D_MAX not yet supported (masked vector view pending).",
-            )
-            push!(
-                stmts,
-                :(vector_load!(
-                    $(slot_shmem_sym(slot)),
-                    $global_in,
-                    Val(Int32($D_M)),
-                    Val($D32),
-                    Val($nthreads32),
-                    N,
-                )),
-            )
-        end
+        D_M, = shape(meta.type)
+        D_M == D_MAX || error(
+            "codegen: batched vector with D_M=$D_M ≠ D_MAX=$D_MAX not yet supported (masked vector view pending).",
+        )
+        push!(
+            stmts,
+            :(vector_load!(
+                $(slot_shmem_sym(slot)),
+                $global_in,
+                Val(Int32($D_M)),
+                Val($D32),
+                Val($nthreads32),
+                N,
+            )),
+        )
         node_view_sym[node_id] = slot_view_sym(slot)
         return push!(loaded, node_id)
     end
@@ -297,6 +277,73 @@ function codegen(
         if node isa NewNode
             continue
         end
+        # Layout-transition opcodes: emit raw `intermediate_layout_load!` /
+        # `interm_to_dual_transfer!` / `dual_to_interm_transfer!` calls using
+        # slot shmem directly. These are cooperative across the block (no
+        # `if active` wrapping), unlike per-thread compute primitives.
+        if node.fn === _load_to_single
+            input_ref = node.args[1]
+            in_sym = input_sym[input_ref.id]
+            dest_slot = planner.slots[i]
+            dest_shmem = matrix_slot_syms[dest_slot.idx]
+            D_M, D_N = shape(meta.type)
+            push!(
+                stmts,
+                :(intermediate_layout_load!(
+                    $dest_shmem,
+                    $in_sym,
+                    Val(Int32($D_M)),
+                    Val(Int32($D_N)),
+                    Val($D32),
+                    Val($nthreads32),
+                    N,
+                    Val(:small),
+                )),
+            )
+            continue
+        elseif node.fn === _single_to_dual
+            src_ref = node.args[1]
+            src_shmem = matrix_slot_syms[planner.slots[src_ref.id].idx]
+            dest_slot = planner.slots[i]
+            dest_shmem = matrix_slot_syms[dest_slot.idx]
+            D_M, D_N = shape(meta.type)
+            push!(
+                stmts,
+                :(interm_to_dual_transfer!(
+                    $dest_shmem,
+                    $src_shmem,
+                    Val(Int32($D_M)),
+                    Val(Int32($D_N)),
+                    Val($D32),
+                    Val($nthreads32),
+                    N,
+                    Val(:small),
+                )),
+            )
+            node_view_sym[i] = slot_view_sym(dest_slot)
+            continue
+        elseif node.fn === _dual_to_single
+            src_ref = node.args[1]
+            src_expr = arg_kernel_expr(tape, src_ref, node_view_sym)
+            dest_slot = planner.slots[i]
+            dest_shmem = matrix_slot_syms[dest_slot.idx]
+            D_M, D_N = shape(meta.type)
+            push!(
+                stmts,
+                :(dual_to_interm_transfer!(
+                    $dest_shmem,
+                    $src_expr,
+                    Val(Int32($D_M)),
+                    Val(Int32($D_N)),
+                    Val($D32),
+                    Val($nthreads32),
+                    N,
+                    Val(:small),
+                )),
+            )
+            continue
+        end
+
         for ref in node.args
             maybe_load_batched_inputs_for_ref!(ref)
         end
@@ -318,45 +365,27 @@ function codegen(
         push!(stmts, Expr(:if, :active, Expr(:block, emit_expr)))
     end
 
-    # Ensure any batched inputs reachable only via the output tree (e.g. a
-    # parent matrix consumed only by an `IAddSubWrapped` output wrapper) are
-    # loaded into their slots before the output write reads from them.
+    # Ensure any batched *vector* inputs reachable only via the output tree
+    # are loaded into their slots before the output write reads from them.
+    # Matrix inputs are loaded eagerly via `_load_to_single` tape nodes, so
+    # this is a no-op for them.
     maybe_load_batched_inputs_for_ref!(tape.output)
 
     # Matrix and vector output leaves; scalar leaves are handled below.
+    # Matrix leaves point at the `_dual_to_single` tape node that already
+    # transferred their value into a single-layout shmem slot, so we just
+    # emit the final shmem → global write here.
     for (k, leaf) in enumerate(leaves)
         leaf.trace_type <: TraceScalar && continue
         out_sym = out_syms[k]
         leaf_slot = leaf.slot
         if leaf_slot.kind === :M
-            if leaf.iaddsub === nothing
-                leaf_view = slot_view_sym(leaf_slot)
-            else
-                # `aI + bM` view returned as output: substitute the wrapper as
-                # the transfer source. `leaf_slot` is the parent's slot.
-                parent_view = slot_view_sym(leaf_slot)
-                a_val, b_val = leaf.iaddsub
-                leaf_view = :(IAddSubGetterMatrix($parent_view, $a_val, $b_val))
-            end
             D_M, D_N = shape(leaf.trace_type)
-            push!(
-                stmts,
-                :(dual_to_interm_transfer!(
-                    shmem_load,
-                    $leaf_view,
-                    Val(Int32($D_M)),
-                    Val(Int32($D_N)),
-                    Val($D32),
-                    Val($nthreads32),
-                    N,
-                    Val(:small),
-                )),
-            )
             push!(
                 stmts,
                 :(intermediate_layout_write!(
                     $out_sym,
-                    shmem_load,
+                    $(matrix_slot_syms[leaf_slot.idx]),
                     Val(Int32($D_M)),
                     Val(Int32($D_N)),
                     Val($D32),

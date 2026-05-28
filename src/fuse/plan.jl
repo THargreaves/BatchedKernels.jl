@@ -125,6 +125,15 @@ function plan_memory(tape::Tape)
     for (i, (node, meta)) in enumerate(zip(tape.nodes, tape.metas))
         sk = slot_kind(node, meta)
         sk in (:batched, :scalar) || continue
+        # Batched matrix InputNodes are not slot-backed: their value lives in
+        # global memory and reaches a shmem slot only via the LoadNode +
+        # TransferNode pair pushed at trace time. The InputNode itself is just
+        # a handle to the global pointer. Vectors keep their direct
+        # InputNode-backed slot (no dual-layout buffer, so no Load/Transfer
+        # split).
+        if node isa InputNode && meta.type <: TraceMatrix
+            continue
+        end
 
         # Destination slot allocation: only matrix/vector consumers get a slot.
         # Scalars live in registers, so we skip this for sk == :scalar — but we

@@ -11,6 +11,27 @@
 # Scalar indexing is forbidden so user-side mistakes don't silently descend into
 # stdlib's generic AbstractMatrix fallbacks.
 
+# -----------------------------------------------------------------------------
+# Internal layout-transition opcodes (A6)
+# -----------------------------------------------------------------------------
+#
+# These three placeholders are the `fn` of CallNodes that model the
+# global↔single↔dual layout transitions for batched matrix inputs and outputs.
+# Codegen handles them *inline* (not via `emit_primitive`) because they operate
+# at the raw shmem-buffer level rather than the slot-view level. Wrapping them
+# in the IR means the planner sees each transient single-layout buffer as a
+# regular matrix slot and the free-list can recycle it (no more dedicated
+# `shmem_load`).
+#
+# `_load_to_single(input)`     :: global → single-layout shmem matrix
+# `_single_to_dual(single)`    :: single → dual-layout shmem matrix
+# `_dual_to_single(value)`     :: dual (possibly wrapped) → single-layout buffer
+#                                used as the output write's staging area
+
+function _load_to_single end
+function _single_to_dual end
+function _dual_to_single end
+
 struct TraceMatrix{T,D_M,D_N} <: AbstractMatrix{T}
     tape::Tape
     ref::NodeRef
@@ -347,6 +368,25 @@ function _reconstruct_trace_arg!(tape::Tape, spec::LeafInput)
     push!(tape.inputs, ref)
     (spec.trace_type <: TraceMatrix || spec.trace_type <: TraceVector) ||
         error("trace: leaf input type $(spec.trace_type) not supported")
+    # Batched matrix inputs are loaded via LoadNode (global → single layout)
+    # and TransferNode (single → dual layout). The downstream user code
+    # traces against the dual-layout value, so the rest of the tape
+    # references the TransferNode rather than the raw InputNode. Shared
+    # inputs and vectors skip this — shared matrices are loaded once at
+    # block start, vectors only need single-layout shmem.
+    if spec.trace_type <: TraceMatrix && spec.lifecycle == BATCHED
+        load_ref = push_node!(
+            tape,
+            CallNode(_load_to_single, NodeRef[ref]),
+            NodeMeta(spec.trace_type, BATCHED),
+        )
+        transfer_ref = push_node!(
+            tape,
+            CallNode(_single_to_dual, NodeRef[load_ref]),
+            NodeMeta(spec.trace_type, BATCHED),
+        )
+        return spec.trace_type(tape, transfer_ref)
+    end
     return spec.trace_type(tape, ref)
 end
 
@@ -360,8 +400,21 @@ function _reconstruct_trace_arg!(tape::Tape, spec::CompositeInput)
     return spec.T(vals...)
 end
 
-# Convert the user function's return value into a tape output ref.
-result_to_ref!(tape::Tape, M::TraceMatrix) = M.ref
+# Convert the user function's return value into a tape output ref. Matrix
+# outputs are wrapped in a `_dual_to_single` transfer so the staging buffer
+# the global write reads from is a planner-allocated slot rather than a
+# dedicated shmem region — symmetric with the load-time `_load_to_single`
+# treatment of inputs. Vectors and scalars skip this: vectors write to
+# global directly from their single-layout slot, scalars stage via a
+# separate `:Sout` shmem buffer.
+function result_to_ref!(tape::Tape, M::TraceMatrix{T,D_M,D_N}) where {T,D_M,D_N}
+    meta_at(tape, M.ref).lifecycle == BATCHED || return M.ref
+    return push_node!(
+        tape,
+        CallNode(_dual_to_single, NodeRef[M.ref]),
+        NodeMeta(TraceMatrix{T,D_M,D_N}, BATCHED),
+    )
+end
 result_to_ref!(tape::Tape, v::TraceVector) = v.ref
 result_to_ref!(::Tape, s::TraceScalar) = s.ref
 function result_to_ref!(tape::Tape, x::Union{Number,AbstractChar,Bool,Nothing})
