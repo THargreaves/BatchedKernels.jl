@@ -99,6 +99,31 @@ function codegen(
         push!(stmts, :($sym = CuStaticSharedArray($T, ($vec_shmem_elems,))))
     end
 
+    # Scalar output staging slots: one `n_mats_per_block`-sized shmem buffer per
+    # distinct scalar terminal in the output tree. Used in the output epilogue
+    # to cross from leader-lane registers to a coalesced cross-warp write.
+    sout_shmem_syms = Dict{Int,Symbol}()  # scalar node id -> shmem symbol
+    for (node_id, slot) in planner.scalar_output_slots
+        shmem_sym = Symbol("shmem_Sout", slot.idx)
+        sout_shmem_syms[node_id] = shmem_sym
+        push!(stmts, :($shmem_sym = CuStaticSharedArray($T, ($n_mats_per_block,))))
+    end
+
+    # Scalar tape locals: each BATCHED `TraceScalar` node lives in a Julia local
+    # `s{id}`, replicated across the D lanes of a warp-matrix after the
+    # producing reduction's shfl-broadcast. Pre-initialised here so the
+    # variables exist outside the per-primitive `if active` blocks (a value
+    # computed only when `active` would otherwise be undefined for inactive
+    # lanes).
+    scalar_node_sym = Dict{Int,Symbol}()
+    for (i, (node, meta)) in enumerate(zip(tape.nodes, tape.metas))
+        if slot_kind(node, meta) == :scalar
+            sym = Symbol("s", i)
+            scalar_node_sym[i] = sym
+            push!(stmts, :($sym = zero($T)))
+        end
+    end
+
     # Shared-matrix and shared-vector input slot allocations + loads.
     shared_input_view_syms = Dict{Int,Symbol}()
     shared_load_order = Int[]  # parallel array; one shared input per warp
@@ -286,11 +311,17 @@ function codegen(
         arg_exprs = Any[arg_kernel_expr(tape, ref, node_view_sym) for ref in node.args]
         arg_types = Any[tape.metas[ref.id].type for ref in node.args]
 
-        dest_slot = planner.slots[i]
-        dest_view = slot_view_sym(dest_slot)
-        node_view_sym[i] = dest_view
+        if slot_kind(node, meta) == :scalar
+            # Scalar destinations write into the Julia local — the corresponding
+            # emit_primitive method returns an assignment (`s_i = …`).
+            dest = scalar_node_sym[i]
+        else
+            dest_slot = planner.slots[i]
+            dest = slot_view_sym(dest_slot)
+        end
+        node_view_sym[i] = dest
 
-        emit_expr = emit_primitive(node.fn, dest_view, arg_exprs, arg_types, D_MAX)
+        emit_expr = emit_primitive(node.fn, dest, arg_exprs, arg_types, D_MAX)
         push!(stmts, Expr(:if, :active, Expr(:block, emit_expr)))
     end
 
