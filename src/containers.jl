@@ -15,7 +15,7 @@
 # - `BatchedStruct`: struct-of-arrays representation of a batch of composite
 #   scalar values.
 
-export BatchedCuMatrix, BatchedCuVector
+export BatchedCuMatrix, BatchedCuVector, BatchedCuScalar
 export SharedCuMatrix, SharedCuVector
 export SharedValue, BatchedStruct
 
@@ -56,6 +56,23 @@ batch_size(x::BatchedCuVector) = size(x.data, 2)
 Base.size(x::BatchedCuVector) = (batch_size(x),)
 Base.IndexStyle(::Type{<:BatchedCuVector}) = IndexLinear()
 Base.getindex(x::BatchedCuVector, i::Integer) = view(x.data, :, i)
+
+# -----------------------------------------------------------------------------
+# BatchedCuScalar
+# -----------------------------------------------------------------------------
+#
+# One scalar per batch entry, backed by a length-N device vector. Output-only
+# in A3 (no top-level scalar input dispatch yet): produced by reductions and
+# returned by the broadcast surface.
+
+struct BatchedCuScalar{T,A<:AbstractVector{T}} <: AbstractVector{T}
+    data::A
+end
+BatchedCuScalar(data::A) where {T,A<:AbstractVector{T}} = BatchedCuScalar{T,A}(data)
+batch_size(x::BatchedCuScalar) = length(x.data)
+Base.size(x::BatchedCuScalar) = size(x.data)
+Base.IndexStyle(::Type{<:BatchedCuScalar}) = IndexLinear()
+Base.getindex(x::BatchedCuScalar, i::Integer) = x.data[i]
 
 # -----------------------------------------------------------------------------
 # SharedCuMatrix
@@ -99,10 +116,13 @@ Base.getindex(x::SharedCuVector, ::Integer) = x.data
 # Shared union and helpers
 # -----------------------------------------------------------------------------
 
-const BatchedOrShared = Union{BatchedCuMatrix,BatchedCuVector,SharedCuMatrix,SharedCuVector}
+const BatchedOrShared = Union{
+    BatchedCuMatrix,BatchedCuVector,BatchedCuScalar,SharedCuMatrix,SharedCuVector
+}
 
 is_shared_type(::Type{<:BatchedCuMatrix}) = false
 is_shared_type(::Type{<:BatchedCuVector}) = false
+is_shared_type(::Type{<:BatchedCuScalar}) = false
 is_shared_type(::Type{<:SharedCuMatrix}) = true
 is_shared_type(::Type{<:SharedCuVector}) = true
 

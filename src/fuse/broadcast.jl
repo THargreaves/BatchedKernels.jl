@@ -275,6 +275,7 @@ end
 
 _component_element_type(c::BatchedCuMatrix{T,D1,D2}) where {T,D1,D2} = AbstractMatrix{T}
 _component_element_type(c::BatchedCuVector{T,D}) where {T,D} = AbstractVector{T}
+_component_element_type(c::BatchedCuScalar{T}) where {T} = T
 _component_element_type(c::BatchedStruct{T}) where {T} = T
 _component_element_type(c::SharedValue{T}) where {T} = T
 _component_element_type(c) = typeof(c)
@@ -296,6 +297,7 @@ _component_element_type(c) = typeof(c)
 scalar_form(::Type{T}) where {T<:Union{Number,AbstractChar,Bool,Nothing}} = T
 scalar_form(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N} = AbstractMatrix{T}
 scalar_form(::Type{TraceVector{T,D_M}}) where {T,D_M} = AbstractVector{T}
+scalar_form(::Type{TraceScalar{T}}) where {T} = T
 
 @generated function scalar_form(::Type{TT}) where {TT<:Tuple}
     sfs = Type[scalar_form(p) for p in TT.parameters]
@@ -337,6 +339,9 @@ function batchify_type(::Type{TraceVector{T,D_M}}) where {T,D_M}
     return BatchedCuVector{
         T,D_M,CuArray{T,2,CUDA.DeviceMemory},CuArray{T,1,CUDA.DeviceMemory}
     }
+end
+function batchify_type(::Type{TraceScalar{T}}) where {T}
+    return BatchedCuScalar{T,CuArray{T,1,CUDA.DeviceMemory}}
 end
 
 @generated function batchify_type(::Type{TT}) where {TT<:Tuple}

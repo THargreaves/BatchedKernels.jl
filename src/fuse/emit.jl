@@ -195,6 +195,7 @@ end
 # delegate to their underlying type, with adjoint swapping for matrices.
 shape(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N} = (D_M, D_N)
 shape(::Type{TraceVector{T,D_M}}) where {T,D_M} = (D_M,)
+shape(::Type{<:TraceScalar}) = ()
 shape(::Type{<:Adjoint{T,S}}) where {T,S} = reverse(shape(S))
 shape(::Type{<:LowerTriangular{T,S}}) where {T,S} = shape(S)
 shape(::Type{<:UpperTriangular{T,S}}) where {T,S} = shape(S)

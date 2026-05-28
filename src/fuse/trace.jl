@@ -57,6 +57,25 @@ Base.setindex!(::TraceVector, _, ::Vararg) =
     error("setindex! on TraceVector is forbidden.")
 
 # -----------------------------------------------------------------------------
+# TraceScalar
+# -----------------------------------------------------------------------------
+#
+# Trace-time representative of a batched scalar. Lives in registers, replicated
+# across the D lanes of a warp-matrix (broadcast via `shfl_sync` after each
+# reduction). No shared-memory slot; planner tracks only liveness.
+#
+# Subtypes `Number` so `log(s)`, `s + 0.5`, etc. dispatch through normal Number
+# overloads. Trace operations are defined explicitly so promotion does not
+# materialise a TraceScalar where a real Number is expected.
+
+struct TraceScalar{T} <: Number
+    tape::Tape
+    ref::NodeRef
+end
+
+Base.eltype(::Type{<:TraceScalar{T}}) where {T} = T
+
+# -----------------------------------------------------------------------------
 # Runtime-container → trace-element type map
 # -----------------------------------------------------------------------------
 
@@ -71,6 +90,9 @@ function trace_element_type(::Type{<:BatchedCuVector{T,D}}) where {T,D}
 end
 function trace_element_type(::Type{<:SharedCuVector{T,D}}) where {T,D}
     return TraceVector{T,D}
+end
+function trace_element_type(::Type{<:BatchedCuScalar{T}}) where {T}
+    return TraceScalar{T}
 end
 trace_element_type(::Type{SharedValue{T}}) where {T} = T
 
@@ -248,6 +270,7 @@ end
 # Convert the user function's return value into a tape output ref.
 result_to_ref!(tape::Tape, M::TraceMatrix) = M.ref
 result_to_ref!(tape::Tape, v::TraceVector) = v.ref
+result_to_ref!(::Tape, s::TraceScalar) = s.ref
 function result_to_ref!(tape::Tape, x::Union{Number,AbstractChar,Bool,Nothing})
     return emit_const!(tape, x)
 end
