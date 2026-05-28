@@ -195,3 +195,37 @@ function LinearAlgebra.logdet(
 ) where {T<:Real,D_M}
     return logdet(cholesky(M))
 end
+
+# --- Scalar arithmetic ------------------------------------------------------
+#
+# Lane-replicated: every D lanes of the warp-matrix hold the canonical scalar
+# value (a reduction's shfl-broadcast establishes that; subsequent arithmetic
+# is per-lane). The 1/D utilisation is the cost of keeping the result a
+# regular Julia local — no additional sync, no extra shmem.
+#
+# Number literals get folded as `ConstNode(T(x))` so they bake into the
+# generated kernel at the trace eltype.
+
+for _op in (:+, :-, :*)
+    @eval begin
+        function Base.$_op(a::TraceScalar{T}, b::TraceScalar{T}) where {T}
+            out = emit_call!(a.tape, $_op, NodeRef[a.ref, b.ref], TraceScalar{T})
+            return TraceScalar{T}(a.tape, out)
+        end
+        function Base.$_op(a::TraceScalar{T}, b::Number) where {T}
+            bref = emit_const!(a.tape, T(b))
+            out = emit_call!(a.tape, $_op, NodeRef[a.ref, bref], TraceScalar{T})
+            return TraceScalar{T}(a.tape, out)
+        end
+        function Base.$_op(a::Number, b::TraceScalar{T}) where {T}
+            aref = emit_const!(b.tape, T(a))
+            out = emit_call!(b.tape, $_op, NodeRef[aref, b.ref], TraceScalar{T})
+            return TraceScalar{T}(b.tape, out)
+        end
+    end
+end
+
+function Base.:-(s::TraceScalar{T}) where {T}
+    out = emit_call!(s.tape, -, NodeRef[s.ref], TraceScalar{T})
+    return TraceScalar{T}(s.tape, out)
+end

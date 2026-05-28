@@ -19,9 +19,24 @@
 
 function emit_primitive end
 
+# Scalar-op dispatch: true when every operand is either a `TraceScalar` or a
+# plain `Number` (so the result is a register-resident scalar, not a slot).
+# `UniformScaling` is NOT `<: Number`, so the `I - M` case still routes to
+# the matrix branch.
+_is_scalar_op(types) = all(t -> t <: TraceScalar || t <: Number, types)
+
+# Lower a scalar primitive to `$dest = fn(args...)`. The destination is the
+# scalar's pre-initialised Julia local (allocated in codegen.jl), so the
+# assignment writes through to the function-level binding.
+_emit_scalar_assign(fn, dest::Symbol, args::Vector) =
+    :($dest = $(Expr(:call, fn, args...)))
+
 function emit_primitive(
     ::typeof(*), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
 )
+    if _is_scalar_op(types)
+        return _emit_scalar_assign(*, dest, args)
+    end
     A, B = args
     if types[2] <: AbstractVector
         # Matvec: A is (D_M, D_N), x is (D_N,) -> y is (D_M,).
@@ -63,6 +78,9 @@ end
 function emit_primitive(
     ::typeof(+), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
 )
+    if _is_scalar_op(types)
+        return _emit_scalar_assign(+, dest, args)
+    end
     A, B = args
     if types[1] <: AbstractVector
         D_M, = shape(types[1])
@@ -96,6 +114,13 @@ end
 function emit_primitive(
     ::typeof(-), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
 )
+    if length(args) == 1
+        # Unary scalar negation.
+        return :($dest = -($(args[1])))
+    end
+    if _is_scalar_op(types)
+        return _emit_scalar_assign(-, dest, args)
+    end
     if types[1] <: AbstractVector && types[2] <: AbstractVector
         # Vector subtraction.
         a, b = args
