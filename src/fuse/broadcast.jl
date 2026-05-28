@@ -215,7 +215,13 @@ function _broadcast_impl(bc::Broadcasted{BatchedStyle})
     # allocate uninitialised.
     leaf_arrays = [
         let s = shape(leaf.trace_type)
-            length(s) == 2 ? CuArray{T}(undef, s[1], s[2], N) : CuArray{T}(undef, s[1], N)
+            if length(s) == 2
+                CuArray{T}(undef, s[1], s[2], N)
+            elseif length(s) == 1
+                CuArray{T}(undef, s[1], N)
+            else
+                CuArray{T}(undef, N)  # scalar
+            end
         end for leaf in leaves
     ]
 
@@ -237,7 +243,13 @@ end
 function _assemble_output(spec::LeafOutput, leaf_arrays::Vector, idx::Ref{Int}, N::Int)
     idx[] += 1
     arr = leaf_arrays[idx[]]
-    return ndims(arr) == 3 ? BatchedCuMatrix(arr) : BatchedCuVector(arr)
+    if ndims(arr) == 3
+        return BatchedCuMatrix(arr)
+    elseif ndims(arr) == 2
+        return BatchedCuVector(arr)
+    else
+        return BatchedCuScalar(arr)
+    end
 end
 _assemble_output(spec::LiteralOutput, _leaf_arrays, _idx, N::Int) =
     SharedValue(spec.val, N)

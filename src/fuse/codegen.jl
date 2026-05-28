@@ -71,15 +71,8 @@ function codegen(
     push!(stmts, :(wid = div(tid - 1i32, 32i32) + 1i32))
     push!(stmts, :(warp_matrix_id = div(lid - 1i32, $D32) + 1i32))
     push!(stmts, :(d = mod1(lid, $D32)))
-    push!(
-        stmts,
-        :(
-            grid_mtrx_id =
-                warp_matrix_id +
-                (wid - 1i32) * $n_mats_per_warp +
-                (bid - 1i32) * $n_mats_per_block
-        ),
-    )
+    push!(stmts, :(block_matrix_id = warp_matrix_id + (wid - 1i32) * $n_mats_per_warp))
+    push!(stmts, :(grid_mtrx_id = block_matrix_id + (bid - 1i32) * $n_mats_per_block))
     push!(stmts, :(active = warp_matrix_id <= $n_mats_per_warp && grid_mtrx_id <= N))
 
     # Matrix slot shmem allocations.
@@ -325,8 +318,9 @@ function codegen(
         push!(stmts, Expr(:if, :active, Expr(:block, emit_expr)))
     end
 
-    # Output leaves.
+    # Matrix and vector output leaves; scalar leaves are handled below.
     for (k, leaf) in enumerate(leaves)
+        leaf.trace_type <: TraceScalar && continue
         out_sym = out_syms[k]
         leaf_slot = leaf.slot
         if leaf_slot.kind === :M
@@ -374,6 +368,38 @@ function codegen(
                 )),
             )
         end
+    end
+
+    # Scalar output leaves. Pattern: stage each leader's register value into its
+    # :Sout slot, sync_threads once, then cooperatively write each slot to its
+    # global out buffer. `scalar_stage!` is leader-and-active-gated internally,
+    # so we call it unconditionally outside the `if active` block.
+    scalar_leaf_indices = Int[k for (k, leaf) in enumerate(leaves) if leaf.trace_type <: TraceScalar]
+    for k in scalar_leaf_indices
+        leaf = leaves[k]
+        s_local = scalar_node_sym[leaf.node_id]
+        shmem_sym = sout_shmem_syms[leaf.node_id]
+        push!(
+            stmts,
+            :(scalar_stage!(
+                $shmem_sym,
+                $s_local,
+                lid,
+                warp_matrix_id,
+                block_matrix_id,
+                active,
+                Val($D32),
+            )),
+        )
+    end
+    if !isempty(scalar_leaf_indices)
+        push!(stmts, :(sync_threads()))
+    end
+    for k in scalar_leaf_indices
+        leaf = leaves[k]
+        out_sym = out_syms[k]
+        shmem_sym = sout_shmem_syms[leaf.node_id]
+        push!(stmts, :(scalar_write!($out_sym, $shmem_sym, $n_mats_per_block)))
     end
 
     push!(stmts, :(return nothing))

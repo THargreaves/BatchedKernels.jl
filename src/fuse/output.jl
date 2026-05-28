@@ -11,6 +11,8 @@ abstract type OutputSpec end
 struct LeafOutput <: OutputSpec
     slot::SlotAssignment
     trace_type::Type
+    node_id::Int            # tape ref the leaf was extracted from; codegen uses
+                            # it to look up the scalar local / :Sout shmem.
 end
 
 struct CompositeOutput <: OutputSpec
@@ -35,9 +37,18 @@ function _extract_spec(tape::Tape, planner::PlannerOutput, ref::NodeRef)
     elseif node isa ConstNode
         return LiteralOutput(node.val)
     else
+        meta = tape.metas[ref.id]
+        # Scalar leaves go through the :Sout staging-slot pool, not the
+        # compute-slot pool.
+        if meta.type <: TraceScalar
+            haskey(planner.scalar_output_slots, ref.id) || error(
+                "extract_output_spec: scalar leaf %$(ref.id) has no :Sout slot",
+            )
+            return LeafOutput(planner.scalar_output_slots[ref.id], meta.type, ref.id)
+        end
         haskey(planner.slots, ref.id) ||
             error("extract_output_spec: leaf %$(ref.id) has no batched slot")
-        return LeafOutput(planner.slots[ref.id], tape.metas[ref.id].type)
+        return LeafOutput(planner.slots[ref.id], meta.type, ref.id)
     end
 end
 
