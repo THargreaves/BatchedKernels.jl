@@ -218,14 +218,51 @@ end
 # In-place primitive registry
 # -----------------------------------------------------------------------------
 #
-# A method here returns the 1-based index of the argument explicitly overwritten
-# by a mutating scalar operation, so the planner can alias the result's slot to
-# that argument's slot. Non-mutating scalar calls such as `cholesky(A)` and
-# `L \ A` must not register here.
+# Two registries with different semantics:
+#
+# `inplace_arg(fn, types...)` — *semantic mutation*. Returns the 1-based index
+# of the operand explicitly overwritten by a mutating scalar call (`cholesky!`,
+# `ldiv!`). The planner must alias the result's slot to that operand's slot
+# whether or not the operand is dead afterwards; failing to alias would change
+# scalar Julia semantics.
+#
+# `inplace_safe_args(fn, types...)` — *optimisation opportunity*. Returns a
+# tuple of 1-based operand positions whose slot the sub-kernel may overwrite
+# *without* a read-after-write hazard. Auto in-place (planner pass) is allowed
+# only when the operand at one of these positions is dead at the current node;
+# the alias is purely a slot-reuse optimisation and the operand value is gone
+# after the op either way.
+#
+# Whether `*(A, B)` could in-place over A or B depends on the sub-kernel, not
+# the operator — matmul iterates A over multiple columns, so writing C[i,d]
+# before reading A[i,d+1] would race across the warp. Hence the per-operator,
+# per-arg-types registry: declarations live with the trace overloads.
 
 inplace_arg(::typeof(cholesky!), ::Type{<:TraceMatrix}) = 1
 inplace_arg(::typeof(ldiv!), ::Type{<:LowerTriangular}, ::Type{<:TraceMatrix}) = 2
 inplace_arg(::typeof(ldiv!), ::Type{<:UpperTriangular}, ::Type{<:TraceMatrix}) = 2
+
+# Default: no operand is alias-safe.
+inplace_safe_args(::Any, ::Type...) = ()
+
+# `+` / `-` on matrices and vectors: thread d operates entirely on column d
+# (matrix) or element d (vector); reading and writing the same slot location
+# within a single thread is fine.
+inplace_safe_args(::typeof(+), ::Type{<:TraceMatrix}, ::Type{<:TraceMatrix}) = (1, 2)
+inplace_safe_args(::typeof(-), ::Type{<:TraceMatrix}, ::Type{<:TraceMatrix}) = (1, 2)
+inplace_safe_args(::typeof(+), ::Type{<:TraceVector}, ::Type{<:TraceVector}) = (1, 2)
+inplace_safe_args(::typeof(-), ::Type{<:TraceVector}, ::Type{<:TraceVector}) = (1, 2)
+
+# Non-mutating `cholesky(A) -> U`: each thread d touches only column d of both
+# A and U, reading A[i,d] then writing U[i,d] within the same iteration.
+inplace_safe_args(::typeof(cholesky), ::Type{<:TraceMatrix}) = (1,)
+
+# Triangular solve: thread d copies RHS column d into a register vector, then
+# writes the result column. The LHS (triangular factor) is read across the
+# whole sweep and must not be aliased. Only the RHS (arg 2) is alias-safe.
+inplace_safe_args(::typeof(\), ::Type{<:LowerTriangular}, ::Type{<:TraceMatrix}) = (2,)
+inplace_safe_args(::typeof(\), ::Type{<:UpperTriangular}, ::Type{<:TraceMatrix}) = (2,)
+inplace_safe_args(::typeof(\), ::Type{<:LowerTriangular}, ::Type{<:TraceVector}) = (2,)
 
 # =============================================================================
 # Trace entry point

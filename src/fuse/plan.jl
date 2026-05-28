@@ -9,6 +9,12 @@
 #   - Batched values are placed via a greedy free-list-by-last-use allocator.
 #   - Explicit mutating primitives (registered in `inplace_arg`) alias the
 #     result's slot to the overwritten argument's slot.
+#   - Auto in-place: for non-mutating primitives, if any operand declared
+#     safe by `inplace_safe_args` is dead at the current node and directly
+#     slot-backed (not wrapped through a NewNode chain — wrappers like
+#     Adjoint/IAddSubWrapped remap reads and aliasing through them would
+#     race against the in-place write), alias the result's slot to that
+#     operand's. This is a pure slot-reuse optimisation.
 #
 # Matrix and vector slots come from separate pools because the shared-memory
 # layouts differ: matrix slots reserve a dual-access D_MAX×D_MAX region per
@@ -129,6 +135,9 @@ function plan_memory(tape::Tape)
             free_list = k === :M ? free_M : free_V
 
             in_place_idx = _maybe_inplace_idx(tape, node)
+            auto_inplace_slot =
+                in_place_idx === nothing ?
+                _maybe_auto_inplace_slot(tape, node, i, k, slots, last_use) : nothing
             if in_place_idx !== nothing
                 target_ref = node.args[in_place_idx]
                 owner = resolve_slot_owner(tape, target_ref)
@@ -136,6 +145,8 @@ function plan_memory(tape::Tape)
                     "plan_memory: in-place op at %$i references unassigned slot (owner %$owner).",
                 )
                 slots[i] = slots[owner]
+            elseif auto_inplace_slot !== nothing
+                slots[i] = auto_inplace_slot
             elseif isempty(free_list)
                 if k === :M
                     slots[i] = SlotAssignment(:M, next_M)
@@ -239,4 +250,44 @@ function _maybe_inplace_idx(tape::Tape, node::TapeNode)
     arg_types = Tuple(meta_at(tape, r).type for r in node.args)
     applicable(inplace_arg, node.fn, arg_types...) || return nothing
     return inplace_arg(node.fn, arg_types...)
+end
+
+# Auto in-place: return a SlotAssignment to alias onto, or `nothing` if no
+# eligible operand. Eligibility requires:
+#   - the operand is declared safe by `inplace_safe_args` for this primitive;
+#   - it is a direct slot-backed CallNode/InputNode (not wrapped through a
+#     NewNode chain — Adjoint/IAddSubWrapped/etc. remap reads and aliasing
+#     through them would race against the in-place write);
+#   - its owner is in the batched-slot table (not shared, not unallocated);
+#   - its pool kind matches the destination's;
+#   - its last use is the current node (so no later consumer is lost).
+function _maybe_auto_inplace_slot(
+    tape::Tape,
+    node::TapeNode,
+    i::Int,
+    dest_kind::Symbol,
+    slots::Dict{Int,SlotAssignment},
+    last_use::Dict{Int,Int},
+)
+    node isa CallNode || return nothing
+    arg_types = Tuple(meta_at(tape, r).type for r in node.args)
+    applicable(inplace_safe_args, node.fn, arg_types...) || return nothing
+    safe_positions = inplace_safe_args(node.fn, arg_types...)
+    isempty(safe_positions) && return nothing
+
+    for k in safe_positions
+        1 <= k <= length(node.args) || continue
+        ref = node.args[k]
+        arg_node = tape.nodes[ref.id]
+        # Skip wrapped / literal operands: aliasing through a NewNode wrapper
+        # would either race (the wrapper remaps reads against the destination's
+        # writes) or has no slot to alias to (ConstNode).
+        (arg_node isa CallNode || arg_node isa InputNode) || continue
+        haskey(slots, ref.id) || continue
+        slot = slots[ref.id]
+        slot.kind === dest_kind || continue
+        get(last_use, ref.id, 0) == i || continue
+        return slot
+    end
+    return nothing
 end
