@@ -169,25 +169,18 @@ function plan_memory(tape::Tape)
             end
         end
 
+        # Recurse through NewNode wrappers so a value consumed only through a
+        # wrapper chain (`LowerTriangular(chol.U') \ x`, `(I - KH) * P_pred`,
+        # `K_T' * H`, …) still has its slot freed at the wrapper's last use.
+        # Without recursion the underlying value's slot stays live to the end
+        # of the kernel, inflating the slot count by one per such value.
+        dest_slot = sk == :batched ? slots[i] : nothing
+        freed_here = Set{Tuple{Symbol,Int}}()
         for ref in node_refs(node)
-            args_meta = tape.metas[ref.id]
-            args_node = tape.nodes[ref.id]
-            slot_kind(args_node, args_meta) == :batched || continue
-            get(last_use, ref.id, 0) == i && ref.id != i || continue
-            owner = resolve_slot_owner(tape, ref)
-            haskey(slots, owner) || continue
-            # Skip when this op was in-placed onto the arg's slot — the result
-            # still lives in it.
-            if sk == :batched && slots[owner].idx == slots[i].idx &&
-                slots[owner].kind === slots[i].kind
-                continue
-            end
-            owner_slot = slots[owner]
-            if owner_slot.kind === :M
-                push!(free_M, owner_slot.idx)
-            else
-                push!(free_V, owner_slot.idx)
-            end
+            _free_dead_arg!(
+                tape, slots, last_use, free_M, free_V, freed_here,
+                ref, i, sk, dest_slot,
+            )
         end
     end
 
@@ -252,6 +245,55 @@ function resolve_slot_owner(tape::Tape, ref::NodeRef)
     else
         return ref.id
     end
+end
+
+# Walk an arg ref and free the slot of every dead slot-backed value reachable
+# through any NewNode wrapper chain. `freed_here` dedupes when the same
+# underlying value is reached through multiple paths (e.g. `a + a`, or a tuple
+# with two refs to the same node) so we don't push the same slot index onto
+# the free list twice.
+function _free_dead_arg!(
+    tape::Tape,
+    slots::Dict{Int,SlotAssignment},
+    last_use::Dict{Int,Int},
+    free_M::Vector{Int},
+    free_V::Vector{Int},
+    freed_here::Set{Tuple{Symbol,Int}},
+    ref::NodeRef,
+    pos::Int,
+    sk::Symbol,
+    dest_slot::Union{SlotAssignment,Nothing},
+)
+    arg_node = tape.nodes[ref.id]
+    if arg_node isa NewNode
+        for (_, child) in arg_node.fields
+            _free_dead_arg!(
+                tape, slots, last_use, free_M, free_V, freed_here,
+                child, pos, sk, dest_slot,
+            )
+        end
+        return nothing
+    end
+    haskey(slots, ref.id) || return nothing
+    get(last_use, ref.id, 0) == pos || return nothing
+    ref.id == pos && return nothing
+    owner_slot = slots[ref.id]
+    # Don't free the dest's own slot when the current op was in-placed onto
+    # this arg — the result lives in it now.
+    if dest_slot !== nothing &&
+       owner_slot.idx == dest_slot.idx &&
+       owner_slot.kind === dest_slot.kind
+        return nothing
+    end
+    key = (owner_slot.kind, owner_slot.idx)
+    key in freed_here && return nothing
+    push!(freed_here, key)
+    if owner_slot.kind === :M
+        push!(free_M, owner_slot.idx)
+    else
+        push!(free_V, owner_slot.idx)
+    end
+    return nothing
 end
 
 function _maybe_inplace_idx(tape::Tape, node::TapeNode)
