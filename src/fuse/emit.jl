@@ -161,13 +161,35 @@ end
 function emit_primitive(
     ::typeof(\), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
 )
-    LU, M = args
+    LU, R = args
+    if types[2] <: AbstractVector
+        # Triangular \ vector. Only LowerTriangular has a sub-kernel today;
+        # UpperTriangular vector solves would need a new `batch_op!` variant
+        # in operations.jl.
+        types[1] <: LowerTriangular || error(
+            "emit_primitive(\\): triangular-vector solve only implemented for LowerTriangular (got $(types[1]))",
+        )
+        D_M, = shape(types[2])
+        # Middle `Val` in the sub-kernel signature is an unused placeholder.
+        return :(batch_op!(
+            \,
+            $dest,
+            $LU,
+            $R,
+            d,
+            Val(Int32($D_M)),
+            Val(Int32(0)),
+            Val(Int32($D_MAX)),
+            warp_matrix_id,
+            Val(:small),
+        ))
+    end
     D_M, D_N = shape(types[2])
     return :(batch_op!(
         \,
         $dest,
         $LU,
-        $M,
+        $R,
         d,
         Val(Int32($D_M)),
         Val(Int32($D_N)),
@@ -200,3 +222,66 @@ shape(::Type{<:Adjoint{T,S}}) where {T,S} = reverse(shape(S))
 shape(::Type{<:LowerTriangular{T,S}}) where {T,S} = shape(S)
 shape(::Type{<:UpperTriangular{T,S}}) where {T,S} = shape(S)
 shape(::Type{<:Symmetric{T,S}}) where {T,S} = shape(S)
+
+# =============================================================================
+# Scalar-producing reductions
+# =============================================================================
+#
+# Reductions go through a `batch_op!(Val(:…), …)` sub-kernel that uses
+# `warp_reduce_sum` internally, leaving the canonical value in the leader lane
+# of each warp-matrix group (other lanes hold partial garbage). We then
+# `shfl_sync` the leader's value to all D lanes so the TraceScalar local is
+# uniformly correct — downstream scalar arithmetic on `(dest)` then produces
+# the right value on every lane.
+
+# Emit the boilerplate: call `reduction_call`, build the per-warp-matrix mask
+# from (D_op, D_MAX), shuffle the leader's value, assign to `dest`.
+function _emit_warp_reduction_broadcast(
+    reduction_call::Expr, dest::Symbol, D_op::Int, D_MAX::Int
+)
+    val_sym = gensym(:val)
+    base_sym = gensym(:base)
+    mask_sym = gensym(:mask)
+    return quote
+        $val_sym = $reduction_call
+        $base_sym = (warp_matrix_id - 1i32) * $(Int32(D_MAX))
+        $mask_sym =
+            ((UInt32(1) << ($(Int32(D_op)) % UInt32)) - UInt32(1)) <<
+            ($base_sym % UInt32)
+        $dest = shfl_sync($mask_sym, $val_sym, ($base_sym + 1i32) % UInt32)
+    end
+end
+
+function emit_primitive(
+    ::typeof(logdet), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
+    M, = args
+    D_M = shape(types[1])[1]
+    reduction = :(batch_op!(
+        Val(:log_det),
+        UpperTriangular($M),
+        d,
+        Val(Int32($D_M)),
+        Val(Int32($D_MAX)),
+        warp_matrix_id,
+        Val(:small),
+    ))
+    return _emit_warp_reduction_broadcast(reduction, dest, D_M, D_MAX)
+end
+
+function emit_primitive(
+    ::typeof(_norm_sq), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
+    v, = args
+    D_M, = shape(types[1])
+    reduction = :(batch_op!(
+        Val(:mahal_dist),
+        $v,
+        d,
+        Val(Int32($D_M)),
+        Val(Int32($D_MAX)),
+        warp_matrix_id,
+        Val(:small),
+    ))
+    return _emit_warp_reduction_broadcast(reduction, dest, D_M, D_MAX)
+end

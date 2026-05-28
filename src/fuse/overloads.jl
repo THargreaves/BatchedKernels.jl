@@ -141,3 +141,55 @@ function Base.:-(a::TraceVector{T,D_M}, b::TraceVector{T,D_M}) where {T,D_M}
     out = emit_call!(a.tape, -, NodeRef[a.ref, b.ref], TraceVector{T,D_M})
     return TraceVector{T,D_M}(a.tape, out)
 end
+
+# --- Triangular \ Vector ----------------------------------------------------
+
+function Base.:\(
+    L::LowerTriangular{T,S}, v::TraceVector{T,D_M}
+) where {T,D_M,S<:AbstractMatrix{T}}
+    tape = v.tape
+    Lref = register_wrapped!(tape, L)
+    out = emit_call!(tape, \, NodeRef[Lref, v.ref], TraceVector{T,D_M})
+    return TraceVector{T,D_M}(tape, out)
+end
+
+# --- cholesky(::Symmetric) --------------------------------------------------
+#
+# Stdlib's `logdet(::Symmetric)` lowers to `logdet(cholesky(A))`, so this needs
+# to dispatch to our trace overload rather than to stdlib's generic cholesky
+# which would iterate scalar entries.
+
+function LinearAlgebra.cholesky(A::Symmetric{T,<:TraceMatrix{T,D_M,D_M}}) where {T,D_M}
+    return cholesky(A.data)
+end
+
+# --- Reductions to scalar ---------------------------------------------------
+#
+# Internal opcode for `‖v‖²`. Backed by the existing `:mahal_dist` sub-kernel
+# (a one-vector squared-norm reduction); `dot(v, v)` and `sum(abs2, v)` share
+# this single CallNode opcode.
+
+function _norm_sq end
+
+function Base.sum(::typeof(abs2), v::TraceVector{T,D_M}) where {T,D_M}
+    out = emit_call!(v.tape, _norm_sq, NodeRef[v.ref], TraceScalar{T})
+    return TraceScalar{T}(v.tape, out)
+end
+
+function LinearAlgebra.dot(v::TraceVector{T,D_M}, w::TraceVector{T,D_M}) where {T,D_M}
+    v.ref == w.ref || error(
+        "BatchedKernels: dot(u, v) with distinct tape values is not supported; use sum(abs2, v) / dot(v, v)",
+    )
+    out = emit_call!(v.tape, _norm_sq, NodeRef[v.ref], TraceScalar{T})
+    return TraceScalar{T}(v.tape, out)
+end
+
+function LinearAlgebra.logdet(C::Cholesky{T,<:TraceMatrix{T,D_M,D_M}}) where {T,D_M}
+    tape = C.factors.tape
+    out = emit_call!(tape, logdet, NodeRef[C.factors.ref], TraceScalar{T})
+    return TraceScalar{T}(tape, out)
+end
+
+function LinearAlgebra.logdet(M::Symmetric{T,<:TraceMatrix{T,D_M,D_M}}) where {T,D_M}
+    return logdet(cholesky(M))
+end
