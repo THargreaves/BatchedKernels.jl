@@ -13,19 +13,27 @@
 # Matrix and vector slots come from separate pools because the shared-memory
 # layouts differ: matrix slots reserve a dual-access D_MAX×D_MAX region per
 # batch element, vector slots reserve a single-access D_MAX region. A slot
-# assignment is tagged with its kind (`:M` or `:V`) and an index within its
-# pool.
+# assignment is tagged with its kind (`:M`, `:V`, or `:Sout`) and an index
+# within its pool.
+#
+# Scalars (`TraceScalar`) do not occupy a shared-memory slot during compute —
+# they live in registers, replicated across the D lanes of a warp-matrix. The
+# only shmem they need is one `n_mats_per_block`-sized staging buffer per
+# distinct scalar terminal in the output tree, used to cross from leader-lane
+# registers to a coalesced cross-warp write. These are the `:Sout` slots.
 
 struct SlotAssignment
-    kind::Symbol            # :M (matrix) or :V (vector)
+    kind::Symbol            # :M (matrix), :V (vector), or :Sout (scalar output staging)
     idx::Int                # 1-based index within the pool
 end
 
 struct PlannerOutput
     slots::Dict{Int,SlotAssignment}             # batched node -> slot
     shared_slots::Dict{Int,SlotAssignment}      # shared input -> slot
+    scalar_output_slots::Dict{Int,SlotAssignment}  # scalar tape ref -> :Sout slot
     num_matrix_slots::Int
     num_vector_slots::Int
+    num_scalar_out_slots::Int
     num_shared_matrix_slots::Int
     num_shared_vector_slots::Int
     last_use::Dict{Int,Int}
@@ -35,7 +43,7 @@ function slot_kind(node::TapeNode, meta::NodeMeta)
     node isa ConstNode && return :literal
     node isa NewNode && return :inline
     if meta.lifecycle == BATCHED
-        return :batched
+        return meta.type <: TraceScalar ? :scalar : :batched
     elseif meta.lifecycle == SHARED
         return :shared
     else
@@ -109,57 +117,102 @@ function plan_memory(tape::Tape)
     next_V = 1
 
     for (i, (node, meta)) in enumerate(zip(tape.nodes, tape.metas))
-        slot_kind(node, meta) == :batched || continue
-        k = pool_kind(meta)
-        free_list = k === :M ? free_M : free_V
+        sk = slot_kind(node, meta)
+        sk in (:batched, :scalar) || continue
 
-        in_place_idx = _maybe_inplace_idx(tape, node)
-        if in_place_idx !== nothing
-            target_ref = node.args[in_place_idx]
-            owner = resolve_slot_owner(tape, target_ref)
-            haskey(slots, owner) || error(
-                "plan_memory: in-place op at %$i references unassigned slot (owner %$owner).",
-            )
-            slots[i] = slots[owner]
-        elseif isempty(free_list)
-            if k === :M
-                slots[i] = SlotAssignment(:M, next_M)
-                next_M += 1
+        # Destination slot allocation: only matrix/vector consumers get a slot.
+        # Scalars live in registers, so we skip this for sk == :scalar — but we
+        # still fall through to the free-list pass so any matrix/vector inputs
+        # the scalar consumed can be recycled.
+        if sk == :batched
+            k = pool_kind(meta)
+            free_list = k === :M ? free_M : free_V
+
+            in_place_idx = _maybe_inplace_idx(tape, node)
+            if in_place_idx !== nothing
+                target_ref = node.args[in_place_idx]
+                owner = resolve_slot_owner(tape, target_ref)
+                haskey(slots, owner) || error(
+                    "plan_memory: in-place op at %$i references unassigned slot (owner %$owner).",
+                )
+                slots[i] = slots[owner]
+            elseif isempty(free_list)
+                if k === :M
+                    slots[i] = SlotAssignment(:M, next_M)
+                    next_M += 1
+                else
+                    slots[i] = SlotAssignment(:V, next_V)
+                    next_V += 1
+                end
             else
-                slots[i] = SlotAssignment(:V, next_V)
-                next_V += 1
+                slots[i] = SlotAssignment(k, pop!(free_list))
             end
-        else
-            slots[i] = SlotAssignment(k, pop!(free_list))
         end
 
         for ref in node_refs(node)
             args_meta = tape.metas[ref.id]
             args_node = tape.nodes[ref.id]
             slot_kind(args_node, args_meta) == :batched || continue
-            if get(last_use, ref.id, 0) == i && ref.id != i
-                owner = resolve_slot_owner(tape, ref)
-                if haskey(slots, owner) && slots[owner].idx != slots[i].idx
-                    owner_slot = slots[owner]
-                    if owner_slot.kind === :M
-                        push!(free_M, owner_slot.idx)
-                    else
-                        push!(free_V, owner_slot.idx)
-                    end
-                end
+            get(last_use, ref.id, 0) == i && ref.id != i || continue
+            owner = resolve_slot_owner(tape, ref)
+            haskey(slots, owner) || continue
+            # Skip when this op was in-placed onto the arg's slot — the result
+            # still lives in it.
+            if sk == :batched && slots[owner].idx == slots[i].idx &&
+                slots[owner].kind === slots[i].kind
+                continue
+            end
+            owner_slot = slots[owner]
+            if owner_slot.kind === :M
+                push!(free_M, owner_slot.idx)
+            else
+                push!(free_V, owner_slot.idx)
             end
         end
     end
 
+    scalar_output_slots = Dict{Int,SlotAssignment}()
+    next_Sout = Ref(1)
+    _collect_scalar_output_slots!(scalar_output_slots, next_Sout, tape, tape.output)
+
     return PlannerOutput(
         slots,
         shared_slots,
+        scalar_output_slots,
         next_M - 1,
         next_V - 1,
+        next_Sout[] - 1,
         next_shared_M - 1,
         next_shared_V - 1,
         last_use,
     )
+end
+
+# Walk the output tree; allocate one :Sout staging slot per distinct scalar
+# tape ref reached as a (non-NewNode, non-ConstNode) leaf. The same scalar
+# value reused in two output positions shares one staging slot — two
+# `scalar_write!` calls then read from it for two independent global writes.
+function _collect_scalar_output_slots!(
+    scalar_out::Dict{Int,SlotAssignment},
+    next_idx::Ref{Int},
+    tape::Tape,
+    ref::NodeRef,
+)
+    node = tape.nodes[ref.id]
+    if node isa NewNode
+        for (_, child) in node.fields
+            _collect_scalar_output_slots!(scalar_out, next_idx, tape, child)
+        end
+    elseif node isa ConstNode
+        return nothing
+    else
+        meta = tape.metas[ref.id]
+        if meta.type <: TraceScalar && !haskey(scalar_out, ref.id)
+            scalar_out[ref.id] = SlotAssignment(:Sout, next_idx[])
+            next_idx[] += 1
+        end
+    end
+    return nothing
 end
 
 node_refs(::InputNode) = NodeRef[]
