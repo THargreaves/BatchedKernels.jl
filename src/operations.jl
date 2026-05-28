@@ -519,6 +519,7 @@ end
 @inline function batch_op!(
     ::typeof(qr),
     R::AbstractMatrix{T},
+    tau::AbstractVector{T},
     A::AbstractMatrix{T},
     d::Int32,
     ::Val{D1},
@@ -534,7 +535,7 @@ end
 
     # Padding (i > D1) rows do participate
     if lid > active_lanes
-        return zero(T)
+        return nothing
     end
 
     i = d
@@ -647,7 +648,16 @@ end
         end
     end
 
-    return tau_storage
+    # Each lane writes its row's tau into the tau vector slot. Householder
+    # steps run for j in 1..min(D1-1, D2); only those lanes produced a
+    # meaningful tau_storage (others stay at zero(T) from initialisation).
+    # Writing the full min(D1, D2) range is safe — the unused position is
+    # zero and never read by the Q-multiply downstream.
+    if i <= min(D1, D2)
+        @inbounds tau[i] = tau_storage
+    end
+
+    return nothing
 end
 
 @inline function batch_op!(
@@ -776,7 +786,7 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
     R::AbstractMatrix{T},
     B::AbstractMatrix{T},
     d::Int32,
-    tau::Float32,
+    tau::AbstractVector{T},
     ::Val{D1},  # Rows of the original matrix that qr was called on, independent of whether Q is transposed or not
     ::Val{D2},  # Columns of the original matrix
     ::Val{B_D1},  # Rows of B
@@ -789,11 +799,11 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
     lid = mod1(tid, 32i32)
     n_mats_per_warp = 32i32 ÷ D
     active_lanes = n_mats_per_warp * D
-    
+
     if lid > active_lanes || d > max(D1, B_D1, B_D2)
         return nothing
     end
-    
+
     i = d
 
     @inbounds if C !== B && i <= B_D1
@@ -813,11 +823,11 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
         width = D1 - j + 1i32
         mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
         mask = mask << ((base + j - 1i32) % UInt32)
-        
-        tau_j = zero(T)
-        if i >= j
-            tau_j = shfl_sync(mask, tau, max(lid - i + j, 1i32) % UInt32)  # Get tau from 'leader' thread
-        end
+
+        # tau_j is read directly from the vector slot (all lanes broadcast
+        # the same value). The result is only used under `if i >= j` below,
+        # so reading unconditionally is fine.
+        @inbounds tau_j = tau[j]
 
         w_i = C[j, i]  # first element in v = 1, not stored in R
         @unroll for t in 1i32:D1
