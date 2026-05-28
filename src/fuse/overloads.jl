@@ -173,6 +173,51 @@ function Base.:\(
     return TraceVector{T,D_M}(tape, out)
 end
 
+# --- QR ---------------------------------------------------------------------
+#
+# `qr(A)` writes both the R+reflectors slot AND a per-householder-step tau
+# vector. Modelled as two single-output CallNodes: an `_alloc_vec` placeholder
+# that gives the planner a vector slot to allocate, and the qr CallNode that
+# takes A and the alloc'd tau slot as args. The qr emit_primitive emits one
+# kernel call that writes both slots. Downstream `Q*B` consumers reference
+# both the R ref and the tau ref so the planner keeps their slots live.
+#
+# `:alloc_vec` is the placeholder opcode — empty function name; emit_primitive
+# returns a no-op. The slot view is constructed by the standard batched-vector
+# prologue in codegen.
+#
+# A4 scope: square A only. Rectangular QR is a future refinement.
+
+function _alloc_vec end
+
+struct QRResult{T,D}
+    R::TraceMatrix{T,D,D}
+    tau::TraceVector{T,D}
+end
+
+function LinearAlgebra.qr(A::TraceMatrix{T,D,D}) where {T,D}
+    tape = A.tape
+    # `_alloc_vec` has no args, so `emit_call!` would compute lifecycle =
+    # LITERAL (empty parent set) and the planner would skip slot allocation.
+    # The semantic lifecycle of an alloc'd batched tau slot is BATCHED — set
+    # it explicitly here via push_node!.
+    tau_ref = push_node!(
+        tape, CallNode(_alloc_vec, NodeRef[]), NodeMeta(TraceVector{T,D}, BATCHED)
+    )
+    R_ref = emit_call!(tape, qr, NodeRef[A.ref, tau_ref], TraceMatrix{T,D,D})
+    R = TraceMatrix{T,D,D}(tape, R_ref)
+    tau = TraceVector{T,D}(tape, tau_ref)
+    return QRResult{T,D}(R, tau)
+end
+
+# `.R` returns an `UpperTriangular` view over the R+reflectors slot. The
+# triangular wrapper masks the reflector entries below the diagonal so
+# downstream triangular-solve / matmul consumers only see R.
+function Base.getproperty(q::QRResult{T,D}, s::Symbol) where {T,D}
+    s === :R && return UpperTriangular(getfield(q, :R))
+    return getfield(q, s)
+end
+
 # --- cholesky(::Symmetric) --------------------------------------------------
 #
 # Stdlib's `logdet(::Symmetric)` lowers to `logdet(cholesky(A))`, so this needs

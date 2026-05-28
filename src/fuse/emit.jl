@@ -243,6 +243,51 @@ shape(::Type{<:Symmetric{T,S}}) where {T,S} = shape(S)
 shape(::Type{<:IAddSubWrapped{T,D_M}}) where {T,D_M} = (D_M, D_M)
 
 # =============================================================================
+# QR
+# =============================================================================
+#
+# `_alloc_vec` is a placeholder primitive whose only job is to give the
+# planner a vector slot to allocate. The slot view (`V{idx}`) is constructed
+# by the standard batched-vector prologue in codegen. No kernel code emitted.
+
+function emit_primitive(
+    ::typeof(_alloc_vec), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
+    return :(nothing)
+end
+
+# `qr` takes A and the alloc'd tau vector slot as args; writes R+reflectors
+# into `dest` and tau values into `tau_view`.
+#
+# A4 scope: square only and `D == D_MAX` (no rectangular, no masked variant).
+# The masked rectangular case would mirror the cholesky / matmul rectangular
+# variants; not in scope.
+function emit_primitive(
+    ::typeof(qr), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
+    A, tau_view = args
+    D_M, D_N = shape(types[1])
+    D_M == D_N || error(
+        "emit_primitive(qr): rectangular QR not yet supported (got $(D_M)×$(D_N))",
+    )
+    D_M == D_MAX || error(
+        "emit_primitive(qr): QR currently requires D == D_MAX (got D=$D_M, D_MAX=$D_MAX); mix-with-larger-matrix kernels are out of A4 scope",
+    )
+    return :(batch_op!(
+        qr,
+        $dest,
+        $tau_view,
+        $A,
+        d,
+        Val(Int32($D_M)),
+        Val(Int32($D_M)),
+        Val(Int32($D_MAX)),
+        warp_matrix_id,
+        Val(:small),
+    ))
+end
+
+# =============================================================================
 # Scalar-producing reductions
 # =============================================================================
 #

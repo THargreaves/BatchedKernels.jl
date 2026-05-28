@@ -589,14 +589,16 @@ end
         # calculating R
         v_elem = v_elem / v1
 
-        # tau's algebraic identity
-        tau = (beta - alpha) / beta
+        # tau's algebraic identity. Renamed from `tau` to `tau_j` to avoid
+        # shadowing the `tau::AbstractVector{T}` function parameter introduced
+        # for the vector-tau API.
+        tau_j = (beta - alpha) / beta
 
         if j == i
-            tau_storage = tau
+            tau_storage = tau_j
         end
 
-        tau_v_elem = tau * v_elem
+        tau_v_elem = tau_j * v_elem
 
         # 3. Computing H = I - tau * v * v^T, A <- HA = A - tau * v * (v^T A)
 
