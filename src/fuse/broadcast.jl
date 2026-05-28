@@ -23,7 +23,7 @@ Base.BroadcastStyle(::BatchedStyle, ::BatchedStyle) = BatchedStyle()
 struct CompiledKernel
     fn::Any
     sig::KernelSignature
-    D::Int
+    D_MAX::Int
     nthreads::Int
     T::Type
     output_spec::OutputSpec
@@ -32,32 +32,35 @@ end
 
 const KERNEL_CACHE = Dict{Any,CompiledKernel}()
 
-function _infer_D_T_from_specs!(D_ref::Ref, T_ref::Ref, specs)
+# `D_MAX` is the max over every per-input row/col extent across all leaf
+# trace-matrix inputs. It drives slot allocation and the warp→matrix mapping.
+# Per-operand dims live in each TraceMatrix's type parameters and are extracted
+# at emit_primitive time via `shape`.
+function _infer_D_MAX_T_from_specs!(D_ref::Ref, T_ref::Ref, specs)
     for spec in specs
-        _infer_D_T_from_spec!(D_ref, T_ref, spec)
+        _infer_D_MAX_T_from_spec!(D_ref, T_ref, spec)
     end
     return D_ref[], T_ref[]
 end
 
-function _infer_D_T_from_spec!(D_ref::Ref, T_ref::Ref, spec::LeafInput)
+function _infer_D_MAX_T_from_spec!(D_ref::Ref, T_ref::Ref, spec::LeafInput)
     TT = spec.trace_type
     TT <: TraceMatrix || return nothing
-    ish = shape(TT)
-    ish[1] == ish[2] || error("Prototype requires square matrices")
-    d_param = ish[1]
+    D_M, D_N = shape(TT)
     t_param = eltype(TT)
+    leaf_max = max(D_M, D_N)
     if D_ref[] === nothing
-        D_ref[] = d_param
+        D_ref[] = leaf_max
         T_ref[] = t_param
     else
-        D_ref[] == d_param || error("Inconsistent inner dim across inputs")
+        D_ref[] = max(D_ref[], leaf_max)
         T_ref[] == t_param || error("Inconsistent eltype across inputs")
     end
     return nothing
 end
-_infer_D_T_from_spec!(::Ref, ::Ref, ::LiteralInput) = nothing
-function _infer_D_T_from_spec!(D_ref::Ref, T_ref::Ref, spec::CompositeInput)
-    _infer_D_T_from_specs!(D_ref, T_ref, (child for (_, child) in spec.fields))
+_infer_D_MAX_T_from_spec!(::Ref, ::Ref, ::LiteralInput) = nothing
+function _infer_D_MAX_T_from_spec!(D_ref::Ref, T_ref::Ref, spec::CompositeInput)
+    _infer_D_MAX_T_from_specs!(D_ref, T_ref, (child for (_, child) in spec.fields))
     return nothing
 end
 
@@ -115,10 +118,10 @@ function _ensure_compiled!(f, args::Tuple)
 
     D_ref = Ref{Any}(nothing)
     T_ref = Ref{Any}(nothing)
-    _infer_D_T_from_specs!(D_ref, T_ref, input_specs)
-    D = D_ref[]
+    _infer_D_MAX_T_from_specs!(D_ref, T_ref, input_specs)
+    D_MAX = D_ref[]
     T = T_ref[]
-    D === nothing && error("Could not infer matrix dimension from inputs")
+    D_MAX === nothing && error("Could not infer matrix dimension from inputs")
     T === nothing && error("Could not infer element type from inputs")
     nthreads = 256
 
@@ -127,11 +130,17 @@ function _ensure_compiled!(f, args::Tuple)
     output_spec = extract_output_spec(tape, planner)
     leaves = flatten_leaves(output_spec)
     fn_expr, sig = codegen(
-        tape, planner, leaves; D=D, nthreads=nthreads, T=T, fn_name=gensym(:fused_kernel)
+        tape,
+        planner,
+        leaves;
+        D_MAX=D_MAX,
+        nthreads=nthreads,
+        T=T,
+        fn_name=gensym(:fused_kernel),
     )
     compiled_fn = Core.eval(@__MODULE__, fn_expr)
     entry = CompiledKernel(
-        compiled_fn, sig, D, nthreads, T, output_spec, Base.get_world_counter()
+        compiled_fn, sig, D_MAX, nthreads, T, output_spec, Base.get_world_counter()
     )
     KERNEL_CACHE[key] = entry
     return entry
@@ -173,7 +182,7 @@ function _broadcast_impl(bc::Broadcasted{BatchedStyle})
 
     entry = _ensure_compiled!(f, args)
     compiled_fn = entry.fn
-    D, nthreads, T = entry.D, entry.nthreads, entry.T
+    D_MAX, nthreads, T = entry.D_MAX, entry.nthreads, entry.T
 
     N_ref = Ref{Union{Nothing,Int}}(nothing)
     batched_args = Any[]
@@ -185,9 +194,13 @@ function _broadcast_impl(bc::Broadcasted{BatchedStyle})
     N === nothing && error("At least one batched matrix input required")
 
     leaves = flatten_leaves(entry.output_spec)
-    leaf_arrays = [CUDA.zeros(T, D, D, N) for _ in leaves]
+    leaf_arrays = [
+        let (D_M, D_N) = shape(leaf.trace_type)
+            CUDA.zeros(T, D_M, D_N, N)
+        end for leaf in leaves
+    ]
 
-    nblocks = cld(N, (nthreads ÷ 32) * (32 ÷ D))
+    nblocks = cld(N, (nthreads ÷ 32) * (32 ÷ D_MAX))
     Base.invokelatest() do
         @cuda threads = nthreads blocks = nblocks compiled_fn(
             leaf_arrays..., batched_args..., shared_args..., Int32(N)
@@ -260,7 +273,7 @@ _component_element_type(c) = typeof(c)
 
 # Leaf scalar_form rules
 scalar_form(::Type{T}) where {T<:Union{Number,AbstractChar,Bool,Nothing}} = T
-scalar_form(::Type{TraceMatrix{T,D1,D2}}) where {T,D1,D2} = AbstractMatrix{T}
+scalar_form(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N} = AbstractMatrix{T}
 
 @generated function scalar_form(::Type{TT}) where {TT<:Tuple}
     sfs = Type[scalar_form(p) for p in TT.parameters]
@@ -293,9 +306,9 @@ end
 # Leaf batchify_type rules
 batchify_type(::Type{T}) where {T<:Union{Number,AbstractChar,Bool,Nothing}} =
     SharedValue{T}
-function batchify_type(::Type{TraceMatrix{T,D1,D2}}) where {T,D1,D2}
+function batchify_type(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N}
     return BatchedCuMatrix{
-        T,D1,D2,CuArray{T,3,CUDA.DeviceMemory},CuArray{T,2,CUDA.DeviceMemory}
+        T,D_M,D_N,CuArray{T,3,CUDA.DeviceMemory},CuArray{T,2,CUDA.DeviceMemory}
     }
 end
 

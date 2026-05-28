@@ -11,16 +11,16 @@
 # Scalar indexing is forbidden so user-side mistakes don't silently descend into
 # stdlib's generic AbstractMatrix fallbacks.
 
-struct TraceMatrix{T,D1,D2} <: AbstractMatrix{T}
+struct TraceMatrix{T,D_M,D_N} <: AbstractMatrix{T}
     tape::Tape
     ref::NodeRef
 end
 
-Base.size(::TraceMatrix{T,D1,D2}) where {T,D1,D2} = (D1, D2)
-Base.size(::TraceMatrix{T,D1,D2}, i::Int) where {T,D1,D2} =
-    i == 1 ? D1 : (i == 2 ? D2 : 1)
-Base.length(::TraceMatrix{T,D1,D2}) where {T,D1,D2} = D1 * D2
-Base.axes(::TraceMatrix{T,D1,D2}) where {T,D1,D2} = (Base.OneTo(D1), Base.OneTo(D2))
+Base.size(::TraceMatrix{T,D_M,D_N}) where {T,D_M,D_N} = (D_M, D_N)
+Base.size(::TraceMatrix{T,D_M,D_N}, i::Int) where {T,D_M,D_N} =
+    i == 1 ? D_M : (i == 2 ? D_N : 1)
+Base.length(::TraceMatrix{T,D_M,D_N}) where {T,D_M,D_N} = D_M * D_N
+Base.axes(::TraceMatrix{T,D_M,D_N}) where {T,D_M,D_N} = (Base.OneTo(D_M), Base.OneTo(D_N))
 Base.IndexStyle(::Type{<:TraceMatrix}) = IndexCartesian()
 Base.eltype(::Type{<:TraceMatrix{T}}) where {T} = T
 
@@ -35,7 +35,7 @@ Base.setindex!(::TraceMatrix, _, ::Vararg) =
 # -----------------------------------------------------------------------------
 
 function trace_element_type(::Type{<:BatchedCuMatrix{T,D1,D2}}) where {T,D1,D2}
-    return TraceMatrix{T,D1,D2}
+    return TraceMatrix{T,D1,D2}  # BatchedCuMatrix's (D1,D2) become TraceMatrix's (D_M,D_N)
 end
 function trace_element_type(::Type{<:SharedCuMatrix{T,D1,D2}}) where {T,D1,D2}
     return TraceMatrix{T,D1,D2}

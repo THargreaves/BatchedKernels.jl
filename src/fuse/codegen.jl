@@ -22,12 +22,12 @@ function codegen(
     tape::Tape,
     planner::PlannerOutput,
     leaves::Vector{LeafOutput};
-    D::Int,
+    D_MAX::Int,
     nthreads::Int,
     T::Type,
     fn_name::Symbol=:_fused_kernel,
 )
-    D32 = Int32(D)
+    D32 = Int32(D_MAX)
     nthreads32 = Int32(nthreads)
     n_mats_per_warp = Int32(32) ÷ D32
     n_warps = nthreads32 ÷ Int32(32)
@@ -85,19 +85,25 @@ function codegen(
     push!(stmts, :(shmem_load = CuStaticSharedArray($T, ($mat_shmem_elems,))))
 
     shared_slot_syms = Symbol[]
+    shared_slot_dims = Tuple{Int,Int}[]
     for (k, id) in enumerate(shared_input_ids)
         slot_idx = planner.shared_slots[id]
         sym = Symbol("shmem_S", slot_idx)
         push!(shared_slot_syms, sym)
-        pad_interval = div(Int32(32), D32 & -D32) * D32
-        shmem_size_fixed = D32 * D32 + (D32 * D32 - Int32(1)) ÷ pad_interval
+        D_M, D_N = shape(tape.metas[id].type)
+        push!(shared_slot_dims, (D_M, D_N))
+        D_M32 = Int32(D_M)
+        pad_interval = div(Int32(32), D_M32 & -D_M32) * D_M32
+        shmem_size_fixed = D_M * D_N + (D_M * D_N - 1) ÷ pad_interval
         push!(stmts, :($sym = CuStaticSharedArray($T, ($shmem_size_fixed,))))
         push!(
             stmts,
             Expr(
                 :if,
                 :(wid == $(Int32(k))),
-                :(shared_matrix_load!($sym, $(s_in_syms[k]), Val($D32))),
+                :(shared_matrix_load!(
+                    $sym, $(s_in_syms[k]), Val(Int32($D_M)), Val(Int32($D_N))
+                )),
             ),
         )
     end
@@ -110,7 +116,15 @@ function codegen(
     for (k, id) in enumerate(shared_input_ids)
         sym = Symbol("S", planner.shared_slots[id])
         shared_view_syms[id] = sym
-        push!(stmts, :($sym = SharedMatrix($(shared_slot_syms[k]), Val($D32))))
+        D_M, D_N = shared_slot_dims[k]
+        push!(
+            stmts,
+            :(
+                $sym = SharedMatrix(
+                    $(shared_slot_syms[k]), Val(Int32($D_M)), Val(Int32($D_N))
+                )
+            ),
+        )
     end
 
     for s in 1:(planner.num_batched_slots)
@@ -140,10 +154,18 @@ function codegen(
         slot = planner.slots[node_id]
         view = slot_view_sym_by_slot(slot)
         global_in = input_sym[node_id]
+        D_M, D_N = shape(meta.type)
         push!(
             stmts,
             :(intermediate_layout_load!(
-                shmem_load, $global_in, Val($D32), Val($nthreads32), N, Val(:small)
+                shmem_load,
+                $global_in,
+                Val(Int32($D_M)),
+                Val(Int32($D_N)),
+                Val($D32),
+                Val($nthreads32),
+                N,
+                Val(:small),
             )),
         )
         push!(
@@ -151,6 +173,8 @@ function codegen(
             :(interm_to_dual_transfer!(
                 $(batched_slot_syms[slot]),
                 shmem_load,
+                Val(Int32($D_M)),
+                Val(Int32($D_N)),
                 Val($D32),
                 Val($nthreads32),
                 N,
@@ -190,17 +214,25 @@ function codegen(
         dest_view = slot_view_sym_by_slot(dest_slot)
         node_view_sym[i] = dest_view
 
-        emit_expr = emit_primitive(node.fn, dest_view, arg_exprs, arg_types)
+        emit_expr = emit_primitive(node.fn, dest_view, arg_exprs, arg_types, D_MAX)
         push!(stmts, Expr(:if, :active, Expr(:block, emit_expr)))
     end
 
     for (k, leaf) in enumerate(leaves)
         out_sym = out_syms[k]
-        leaf_shmem = batched_slot_syms[leaf.slot]
+        leaf_view = slot_view_sym_by_slot(leaf.slot)
+        D_M, D_N = shape(leaf.trace_type)
         push!(
             stmts,
             :(dual_to_interm_transfer!(
-                shmem_load, $leaf_shmem, Val($D32), Val($nthreads32), N, Val(:small)
+                shmem_load,
+                $leaf_view,
+                Val(Int32($D_M)),
+                Val(Int32($D_N)),
+                Val($D32),
+                Val($nthreads32),
+                N,
+                Val(:small),
             )),
         )
         push!(
@@ -208,11 +240,12 @@ function codegen(
             :(intermediate_layout_write!(
                 $out_sym,
                 shmem_load,
+                Val(Int32($D_M)),
+                Val(Int32($D_N)),
                 Val($D32),
                 Val($nthreads32),
                 N,
                 Val(:small),
-                Val(:indep),
             )),
         )
     end

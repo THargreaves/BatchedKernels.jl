@@ -1334,6 +1334,17 @@ end
     return nothing
 end
 
+"""
+Rectangular `dual_to_interm_transfer!` (`(D1,D2)` over dual-layout slot dim
+`D`). The second argument `M_dual` is accessed as `M_dual[row, col]`, i.e. as
+any 2D-indexable view of the dual slot: `DualAccessMatrix` for a dense write,
+or a stdlib wrapper like `UpperTriangular(view)`, `LowerTriangular(view)`,
+`Adjoint(view)` to write only that structural part (the wrapper's `getindex`
+returns zero for masked positions). This asymmetry vs the load path —
+`interm_to_dual_transfer!` reads raw shmem — is deliberate: structured *output*
+views appear in QR, triangular Kalman writes, etc., whereas the load path
+always pulls plain dense blocks from global memory.
+"""
 @inline function dual_to_interm_transfer!(
     shmem_interm, M_dual, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small},
 ) where {D,D1,D2,nthreads}
@@ -1368,6 +1379,11 @@ end
     return nothing
 end
 
+"""
+As above, but with a runtime `Val(n_mats_per_block)` overriding the value
+derived from `nthreads ÷ 32 * (32 ÷ D)`. Same wrapper-accepting `M_dual`
+contract as the no-`n_mats_per_block` variant.
+"""
 @inline function dual_to_interm_transfer!(
     shmem_interm, M_dual, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, ::Val{n_mats_per_block}, N::Int32, ::Val{:small},
 ) where {D,D1,D2,n_mats_per_block,nthreads}
