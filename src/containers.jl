@@ -125,9 +125,6 @@ batch_size(x::SharedValue) = x.batch_n
 # BatchedStruct
 # -----------------------------------------------------------------------------
 
-_component_at(x::AbstractVector, i::Integer) = x[i]
-_component_at(x, ::Integer) = x
-
 struct BatchedStruct{T,C<:NamedTuple} <: AbstractVector{T}
     components::C
     batch_n::Int
@@ -139,13 +136,11 @@ Base.IndexStyle(::Type{<:BatchedStruct}) = IndexLinear()
 @generated function Base.getindex(x::BatchedStruct{T}, i::Integer) where {T}
     if T <: Tuple
         n = length(T.parameters)
-        cs = [:(_component_at(getfield(x, :components)[$k], i)) for k in 1:n]
+        cs = [:(getfield(x, :components)[$k][i]) for k in 1:n]
         return :(tuple($(cs...)))
     else
         fields = fieldnames(T)
-        cs = [
-            :(_component_at(getfield(x, :components)[$(QuoteNode(f))], i)) for f in fields
-        ]
+        cs = [:(getfield(x, :components)[$(QuoteNode(f))][i]) for f in fields]
         return :(T($(cs...)))
     end
 end
