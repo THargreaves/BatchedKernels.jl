@@ -182,6 +182,39 @@ function register_wrapped!(tape::Tape, S::Symmetric{T,M}) where {T,M}
 end
 
 # -----------------------------------------------------------------------------
+# IAddSubWrapped — tag type for the `aI + bM` getter wrapper
+# -----------------------------------------------------------------------------
+#
+# Used as the `NewNode.T` tag for an `aI + bM` view. The `±sI ± M` overloads
+# eagerly emit a 3-field NewNode (`:parent => M.ref, :a => ConstNode,
+# :b => ConstNode`) and return a `TraceMatrix{T,D_M,D_M}` whose `.ref` points
+# at it — so downstream code dispatches through the ordinary
+# `*(::TraceMatrix, ::TraceMatrix)` (and any other consumer) without
+# wrapper-specific overloads. `arg_kernel_expr` lowers the NewNode to
+# `IAddSubGetterMatrix(parent_view, a, b)`, folding the I-shift into the
+# consuming sub-kernel for free.
+#
+# The struct is empty: it exists only so we can spell the type tag
+# `IAddSubWrapped{T,D_M}` in `NewNode.T`, `arg_kernel_expr`, and `shape`.
+# Instances are never constructed.
+
+struct IAddSubWrapped{T,D_M} end
+
+function _emit_iaddsub_wrap(M::TraceMatrix{T,D_M,D_M}, a::T, b::T) where {T,D_M}
+    tape = M.tape
+    aref = emit_const!(tape, a)
+    bref = emit_const!(tape, b)
+    fields = Pair{Symbol,NodeRef}[:parent => M.ref, :a => aref, :b => bref]
+    lc = meta_at(tape, M.ref).lifecycle
+    ref = push_node!(
+        tape,
+        NewNode(IAddSubWrapped{T,D_M}, fields),
+        NodeMeta(IAddSubWrapped{T,D_M}, lc),
+    )
+    return TraceMatrix{T,D_M,D_M}(tape, ref)
+end
+
+# -----------------------------------------------------------------------------
 # In-place primitive registry
 # -----------------------------------------------------------------------------
 #

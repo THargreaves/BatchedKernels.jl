@@ -21,8 +21,6 @@ function emit_primitive end
 
 # Scalar-op dispatch: true when every operand is either a `TraceScalar` or a
 # plain `Number` (so the result is a register-resident scalar, not a slot).
-# `UniformScaling` is NOT `<: Number`, so the `I - M` case still routes to
-# the matrix branch.
 _is_scalar_op(types) = all(t -> t <: TraceScalar || t <: Number, types)
 
 # Lower a scalar primitive to `$dest = fn(args...)`. The destination is the
@@ -121,27 +119,22 @@ function emit_primitive(
     if _is_scalar_op(types)
         return _emit_scalar_assign(-, dest, args)
     end
-    if types[1] <: AbstractVector && types[2] <: AbstractVector
-        # Vector subtraction.
-        a, b = args
-        D_M, = shape(types[1])
-        return :(batch_op!(
-            -,
-            $dest,
-            $a,
-            $b,
-            d,
-            Val(Int32($D_M)),
-            Val(Int32(0)),
-            Val(Int32($D_MAX)),
-            Val(:small),
-        ))
-    end
-    # I - M: first arg is the UniformScaling literal (passed through as-is);
-    # second is the matrix slot expression. Always square.
-    _, M = args
-    D_M = shape(types[2])[1]
-    return :(_batch_op_I_minus!($dest, $M, d, Val(Int32($D_M))))
+    # Vector subtraction. (Matrix `I - M` does not reach this method — it is
+    # captured as an `IAddSubWrapped` value at the overload site and consumed
+    # lazily by `arg_kernel_expr`, not as a `-` CallNode.)
+    a, b = args
+    D_M, = shape(types[1])
+    return :(batch_op!(
+        -,
+        $dest,
+        $a,
+        $b,
+        d,
+        Val(Int32($D_M)),
+        Val(Int32(0)),
+        Val(Int32($D_MAX)),
+        Val(:small),
+    ))
 end
 
 function emit_primitive(
@@ -247,6 +240,7 @@ shape(::Type{<:Adjoint{T,S}}) where {T,S} = reverse(shape(S))
 shape(::Type{<:LowerTriangular{T,S}}) where {T,S} = shape(S)
 shape(::Type{<:UpperTriangular{T,S}}) where {T,S} = shape(S)
 shape(::Type{<:Symmetric{T,S}}) where {T,S} = shape(S)
+shape(::Type{<:IAddSubWrapped{T,D_M}}) where {T,D_M} = (D_M, D_M)
 
 # =============================================================================
 # Scalar-producing reductions

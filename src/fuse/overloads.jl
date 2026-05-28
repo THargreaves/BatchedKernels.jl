@@ -51,13 +51,33 @@ function Base.:+(
     return TraceMatrix{T,D_M,D_N}(A.tape, out)
 end
 
-# --- I - Matrix -------------------------------------------------------------
+# --- aI + bM as a zero-cost wrapper -----------------------------------------
+#
+# `±sI ± M` (and `M ± sI`) emits an IAddSubWrapped NewNode eagerly and returns
+# a `TraceMatrix{T,D_M,D_M}` whose `.ref` points at the wrapper. Consumers
+# (matmul, etc.) dispatch through the ordinary `*(::TraceMatrix, ::TraceMatrix)`
+# overload — no wrapper-specific overloads needed — and `arg_kernel_expr`
+# lowers the NewNode to `IAddSubGetterMatrix(parent_view, a, b)`, folding the
+# I-shift into the consuming sub-kernel.
+#
+# Scope: `b ∈ {+1, -1}` (driven by the `+` / `-` operator); `a = ±s.λ` from
+# the `UniformScaling`. Generalising to `b = λ_M` (i.e. `I ± λM`) requires a
+# `Number × TraceMatrix` overload — deferred with the rest of `Scalar × Matrix`.
 
-function Base.:-(scaling::UniformScaling, M::TraceMatrix{T,D_M,D_M}) where {T,D_M}
-    tape = M.tape
-    sref = emit_const!(tape, scaling)
-    out = emit_call!(tape, -, NodeRef[sref, M.ref], TraceMatrix{T,D_M,D_M})
-    return TraceMatrix{T,D_M,D_M}(tape, out)
+function Base.:-(s::UniformScaling, M::TraceMatrix{T,D_M,D_M}) where {T,D_M}
+    return _emit_iaddsub_wrap(M, T(s.λ), -one(T))
+end
+
+function Base.:-(M::TraceMatrix{T,D_M,D_M}, s::UniformScaling) where {T,D_M}
+    return _emit_iaddsub_wrap(M, T(-s.λ), one(T))
+end
+
+function Base.:+(s::UniformScaling, M::TraceMatrix{T,D_M,D_M}) where {T,D_M}
+    return _emit_iaddsub_wrap(M, T(s.λ), one(T))
+end
+
+function Base.:+(M::TraceMatrix{T,D_M,D_M}, s::UniformScaling) where {T,D_M}
+    return _emit_iaddsub_wrap(M, T(s.λ), one(T))
 end
 
 # --- cholesky ---------------------------------------------------------------

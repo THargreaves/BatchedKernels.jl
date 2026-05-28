@@ -318,13 +318,26 @@ function codegen(
         push!(stmts, Expr(:if, :active, Expr(:block, emit_expr)))
     end
 
+    # Ensure any batched inputs reachable only via the output tree (e.g. a
+    # parent matrix consumed only by an `IAddSubWrapped` output wrapper) are
+    # loaded into their slots before the output write reads from them.
+    maybe_load_batched_inputs_for_ref!(tape.output)
+
     # Matrix and vector output leaves; scalar leaves are handled below.
     for (k, leaf) in enumerate(leaves)
         leaf.trace_type <: TraceScalar && continue
         out_sym = out_syms[k]
         leaf_slot = leaf.slot
         if leaf_slot.kind === :M
-            leaf_view = slot_view_sym(leaf_slot)
+            if leaf.iaddsub === nothing
+                leaf_view = slot_view_sym(leaf_slot)
+            else
+                # `aI + bM` view returned as output: substitute the wrapper as
+                # the transfer source. `leaf_slot` is the parent's slot.
+                parent_view = slot_view_sym(leaf_slot)
+                a_val, b_val = leaf.iaddsub
+                leaf_view = :(IAddSubGetterMatrix($parent_view, $a_val, $b_val))
+            end
             D_M, D_N = shape(leaf.trace_type)
             push!(
                 stmts,
@@ -429,6 +442,17 @@ function arg_kernel_expr(tape::Tape, ref::NodeRef, node_view_sym::Dict{Int,Symbo
         elseif T <: Symmetric
             inner = arg_kernel_expr(tape, n.fields[1].second, node_view_sym)
             return :(Symmetric($inner))
+        elseif T <: IAddSubWrapped
+            # Lower `(a*I + b*M)` to `IAddSubGetterMatrix(parent_view, a, b)`.
+            # The 3-field NewNode is `[:parent, :a, :b]` (see register_wrapped!
+            # in trace.jl); `a` and `b` are ConstNodes whose values bake in.
+            parent_ref = n.fields[1].second
+            a_ref = n.fields[2].second
+            b_ref = n.fields[3].second
+            inner = arg_kernel_expr(tape, parent_ref, node_view_sym)
+            a_val = arg_kernel_expr(tape, a_ref, node_view_sym)
+            b_val = arg_kernel_expr(tape, b_ref, node_view_sym)
+            return :(IAddSubGetterMatrix($inner, $a_val, $b_val))
         else
             error("arg_kernel_expr: unsupported wrapper type $T")
         end

@@ -1815,18 +1815,3 @@ end
 
     return mahal_dist
 end
-
-# Materialise `I - M` into a fresh slot. A5 in the merge plan will replace this
-# with getter/setter wrappers that fold `I ± λM` into the consuming operation
-# (no extra slot, no extra kernel).
-@inline function _batch_op_I_minus!(
-    C::AbstractMatrix{T}, M::AbstractMatrix{T}, d::Int32, ::Val{D}
-) where {T,D}
-    if d > D
-        return nothing
-    end
-    @inbounds for i in (Int32(1)):D
-        C[i, d] = (i == d ? one(T) : zero(T)) - M[i, d]
-    end
-    return nothing
-end
