@@ -9,7 +9,7 @@
 abstract type OutputSpec end
 
 struct LeafOutput <: OutputSpec
-    slot::Int
+    slot::SlotAssignment
     trace_type::Type
 end
 

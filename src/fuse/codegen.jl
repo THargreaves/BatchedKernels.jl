@@ -3,13 +3,16 @@
 # =============================================================================
 #
 # `codegen` walks the tape + planner and emits a single CUDA kernel `Expr`:
-#   - allocates shared-memory slots (one per batched slot, one per shared
-#     input, plus a dedicated single-access load buffer — A6 in the merge plan
-#     will fold the load buffer into the regular free-list);
-#   - loads each batched input via global→single→dual transfer the first time
-#     it's needed;
+#   - allocates shared-memory slots (one per batched matrix slot, one per
+#     batched vector slot, one per shared input, plus a dedicated single-access
+#     load buffer — A6 in the merge plan will fold the load buffer into the
+#     regular free-list);
+#   - loads each batched input the first time it's needed: matrices go via
+#     global→single→dual transfer; vectors go directly into single-access
+#     layout, skipping the dual buffer;
 #   - emits the per-primitive operation for each CallNode (under `if active`);
-#   - writes each output leaf back via dual→single→global transfer.
+#   - writes each output leaf back: matrices via dual→single→global, vectors
+#     directly to global.
 
 struct KernelSignature
     fn_name::Symbol
@@ -35,6 +38,9 @@ function codegen(
     dual_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D32, Int32(32)), Int32(32))
     mat_shmem_elems =
         (n_mats_per_warp * D32 * D32 + dual_padding * (D32 - Int32(1))) * n_warps
+    # Vector slots use the single-access layout: n_vecs_per_warp == n_mats_per_warp
+    # vectors of length D_MAX per warp, no padding.
+    vec_shmem_elems = n_mats_per_warp * D32 * n_warps
 
     input_ids = [r.id for r in tape.inputs]
     batched_input_ids = filter(
@@ -76,74 +82,127 @@ function codegen(
     )
     push!(stmts, :(active = warp_matrix_id <= $n_mats_per_warp && grid_mtrx_id <= N))
 
-    batched_slot_syms = Symbol[]
-    for s in 1:(planner.num_batched_slots)
+    # Matrix slot shmem allocations.
+    matrix_slot_syms = Symbol[]
+    for s in 1:(planner.num_matrix_slots)
         sym = Symbol("shmem_M", s)
-        push!(batched_slot_syms, sym)
+        push!(matrix_slot_syms, sym)
         push!(stmts, :($sym = CuStaticSharedArray($T, ($mat_shmem_elems,))))
     end
     push!(stmts, :(shmem_load = CuStaticSharedArray($T, ($mat_shmem_elems,))))
 
-    shared_slot_syms = Symbol[]
-    shared_slot_dims = Tuple{Int,Int}[]
+    # Vector slot shmem allocations.
+    vector_slot_syms = Symbol[]
+    for s in 1:(planner.num_vector_slots)
+        sym = Symbol("shmem_V", s)
+        push!(vector_slot_syms, sym)
+        push!(stmts, :($sym = CuStaticSharedArray($T, ($vec_shmem_elems,))))
+    end
+
+    # Shared-matrix and shared-vector input slot allocations + loads.
+    shared_input_view_syms = Dict{Int,Symbol}()
+    shared_load_order = Int[]  # parallel array; one shared input per warp
     for (k, id) in enumerate(shared_input_ids)
-        slot_idx = planner.shared_slots[id]
-        sym = Symbol("shmem_S", slot_idx)
-        push!(shared_slot_syms, sym)
-        D_M, D_N = shape(tape.metas[id].type)
-        push!(shared_slot_dims, (D_M, D_N))
-        D_M32 = Int32(D_M)
-        pad_interval = div(Int32(32), D_M32 & -D_M32) * D_M32
-        shmem_size_fixed = D_M * D_N + (D_M * D_N - 1) ÷ pad_interval
-        push!(stmts, :($sym = CuStaticSharedArray($T, ($shmem_size_fixed,))))
-        push!(
-            stmts,
-            Expr(
-                :if,
-                :(wid == $(Int32(k))),
-                :(shared_matrix_load!(
-                    $sym, $(s_in_syms[k]), Val(Int32($D_M)), Val(Int32($D_N))
-                )),
-            ),
-        )
+        push!(shared_load_order, id)
+        meta = tape.metas[id]
+        slot = planner.shared_slots[id]
+        if slot.kind === :M
+            shmem_sym = Symbol("shmem_SM", slot.idx)
+            view_sym = Symbol("SM", slot.idx)
+            D_M, D_N = shape(meta.type)
+            D_M32 = Int32(D_M)
+            pad_interval = div(Int32(32), D_M32 & -D_M32) * D_M32
+            shmem_size_fixed = D_M * D_N + (D_M * D_N - 1) ÷ pad_interval
+            push!(stmts, :($shmem_sym = CuStaticSharedArray($T, ($shmem_size_fixed,))))
+            push!(
+                stmts,
+                Expr(
+                    :if,
+                    :(wid == $(Int32(k))),
+                    :(shared_matrix_load!(
+                        $shmem_sym, $(s_in_syms[k]), Val(Int32($D_M)), Val(Int32($D_N))
+                    )),
+                ),
+            )
+            shared_input_view_syms[id] = view_sym
+        else
+            shmem_sym = Symbol("shmem_SV", slot.idx)
+            view_sym = Symbol("SV", slot.idx)
+            D_M, = shape(meta.type)
+            push!(stmts, :($shmem_sym = CuStaticSharedArray($T, ($D_M,))))
+            push!(
+                stmts,
+                Expr(
+                    :if,
+                    :(wid == $(Int32(k))),
+                    :(shared_vector_load!($shmem_sym, $(s_in_syms[k]), Val(Int32($D_M)))),
+                ),
+            )
+            shared_input_view_syms[id] = view_sym
+        end
     end
 
     if !isempty(shared_input_ids)
         push!(stmts, :(sync_threads()))
     end
 
-    shared_view_syms = Dict{Int,Symbol}()
-    for (k, id) in enumerate(shared_input_ids)
-        sym = Symbol("S", planner.shared_slots[id])
-        shared_view_syms[id] = sym
-        D_M, D_N = shared_slot_dims[k]
-        push!(
-            stmts,
-            :(
-                $sym = SharedMatrix(
-                    $(shared_slot_syms[k]), Val(Int32($D_M)), Val(Int32($D_N))
-                )
-            ),
-        )
+    # Shared-input view constructors (after sync).
+    for id in shared_load_order
+        slot = planner.shared_slots[id]
+        meta = tape.metas[id]
+        if slot.kind === :M
+            shmem_sym = Symbol("shmem_SM", slot.idx)
+            view_sym = Symbol("SM", slot.idx)
+            D_M, D_N = shape(meta.type)
+            push!(
+                stmts,
+                :(
+                    $view_sym = SharedMatrix(
+                        $shmem_sym, Val(Int32($D_M)), Val(Int32($D_N))
+                    )
+                ),
+            )
+        else
+            shmem_sym = Symbol("shmem_SV", slot.idx)
+            view_sym = Symbol("SV", slot.idx)
+            D_M, = shape(meta.type)
+            push!(stmts, :($view_sym = SharedVector($shmem_sym, Val(Int32($D_M)))))
+        end
     end
 
-    for s in 1:(planner.num_batched_slots)
+    # Batched matrix slot view constructors.
+    for s in 1:(planner.num_matrix_slots)
         view_sym = Symbol("M", s)
         push!(
             stmts,
             :(
                 $view_sym = DualAccessMatrix(
-                    $(batched_slot_syms[s]), Val($D32), warp_matrix_id, Val(:small)
+                    $(matrix_slot_syms[s]), Val($D32), warp_matrix_id, Val(:small)
                 )
             ),
         )
     end
 
+    # Batched vector slot view constructors.
+    for s in 1:(planner.num_vector_slots)
+        view_sym = Symbol("V", s)
+        push!(
+            stmts,
+            :($view_sym = BatchedVector($(vector_slot_syms[s]), Val($D32), warp_matrix_id)),
+        )
+    end
+
     node_view_sym = Dict{Int,Symbol}()
     for id in shared_input_ids
-        node_view_sym[id] = shared_view_syms[id]
+        node_view_sym[id] = shared_input_view_syms[id]
     end
-    slot_view_sym_by_slot(s) = Symbol("M", s)
+
+    function slot_view_sym(slot::SlotAssignment)
+        return Symbol(slot.kind === :M ? "M" : "V", slot.idx)
+    end
+    function slot_shmem_sym(slot::SlotAssignment)
+        return slot.kind === :M ? matrix_slot_syms[slot.idx] : vector_slot_syms[slot.idx]
+    end
 
     loaded = Set{Int}()
     function maybe_load_batched_input!(node_id::Int)
@@ -152,36 +211,53 @@ function codegen(
         meta = tape.metas[node_id]
         (node isa InputNode && meta.lifecycle == BATCHED) || return nothing
         slot = planner.slots[node_id]
-        view = slot_view_sym_by_slot(slot)
         global_in = input_sym[node_id]
-        D_M, D_N = shape(meta.type)
-        push!(
-            stmts,
-            :(intermediate_layout_load!(
-                shmem_load,
-                $global_in,
-                Val(Int32($D_M)),
-                Val(Int32($D_N)),
-                Val($D32),
-                Val($nthreads32),
-                N,
-                Val(:small),
-            )),
-        )
-        push!(
-            stmts,
-            :(interm_to_dual_transfer!(
-                $(batched_slot_syms[slot]),
-                shmem_load,
-                Val(Int32($D_M)),
-                Val(Int32($D_N)),
-                Val($D32),
-                Val($nthreads32),
-                N,
-                Val(:small),
-            )),
-        )
-        node_view_sym[node_id] = view
+        if slot.kind === :M
+            D_M, D_N = shape(meta.type)
+            push!(
+                stmts,
+                :(intermediate_layout_load!(
+                    shmem_load,
+                    $global_in,
+                    Val(Int32($D_M)),
+                    Val(Int32($D_N)),
+                    Val($D32),
+                    Val($nthreads32),
+                    N,
+                    Val(:small),
+                )),
+            )
+            push!(
+                stmts,
+                :(interm_to_dual_transfer!(
+                    $(slot_shmem_sym(slot)),
+                    shmem_load,
+                    Val(Int32($D_M)),
+                    Val(Int32($D_N)),
+                    Val($D32),
+                    Val($nthreads32),
+                    N,
+                    Val(:small),
+                )),
+            )
+        else
+            D_M, = shape(meta.type)
+            D_M == D_MAX || error(
+                "codegen: batched vector with D_M=$D_M ≠ D_MAX=$D_MAX not yet supported (masked vector view pending).",
+            )
+            push!(
+                stmts,
+                :(vector_load!(
+                    $(slot_shmem_sym(slot)),
+                    $global_in,
+                    Val(Int32($D_M)),
+                    Val($D32),
+                    Val($nthreads32),
+                    N,
+                )),
+            )
+        end
+        node_view_sym[node_id] = slot_view_sym(slot)
         return push!(loaded, node_id)
     end
 
@@ -211,43 +287,62 @@ function codegen(
         arg_types = Any[tape.metas[ref.id].type for ref in node.args]
 
         dest_slot = planner.slots[i]
-        dest_view = slot_view_sym_by_slot(dest_slot)
+        dest_view = slot_view_sym(dest_slot)
         node_view_sym[i] = dest_view
 
         emit_expr = emit_primitive(node.fn, dest_view, arg_exprs, arg_types, D_MAX)
         push!(stmts, Expr(:if, :active, Expr(:block, emit_expr)))
     end
 
+    # Output leaves.
     for (k, leaf) in enumerate(leaves)
         out_sym = out_syms[k]
-        leaf_view = slot_view_sym_by_slot(leaf.slot)
-        D_M, D_N = shape(leaf.trace_type)
-        push!(
-            stmts,
-            :(dual_to_interm_transfer!(
-                shmem_load,
-                $leaf_view,
-                Val(Int32($D_M)),
-                Val(Int32($D_N)),
-                Val($D32),
-                Val($nthreads32),
-                N,
-                Val(:small),
-            )),
-        )
-        push!(
-            stmts,
-            :(intermediate_layout_write!(
-                $out_sym,
-                shmem_load,
-                Val(Int32($D_M)),
-                Val(Int32($D_N)),
-                Val($D32),
-                Val($nthreads32),
-                N,
-                Val(:small),
-            )),
-        )
+        leaf_slot = leaf.slot
+        if leaf_slot.kind === :M
+            leaf_view = slot_view_sym(leaf_slot)
+            D_M, D_N = shape(leaf.trace_type)
+            push!(
+                stmts,
+                :(dual_to_interm_transfer!(
+                    shmem_load,
+                    $leaf_view,
+                    Val(Int32($D_M)),
+                    Val(Int32($D_N)),
+                    Val($D32),
+                    Val($nthreads32),
+                    N,
+                    Val(:small),
+                )),
+            )
+            push!(
+                stmts,
+                :(intermediate_layout_write!(
+                    $out_sym,
+                    shmem_load,
+                    Val(Int32($D_M)),
+                    Val(Int32($D_N)),
+                    Val($D32),
+                    Val($nthreads32),
+                    N,
+                    Val(:small),
+                )),
+            )
+        else
+            D_M, = shape(leaf.trace_type)
+            D_M == D_MAX || error(
+                "codegen: batched vector output with D_M=$D_M ≠ D_MAX=$D_MAX not yet supported.",
+            )
+            push!(
+                stmts,
+                :(vector_write!(
+                    $out_sym,
+                    $(slot_shmem_sym(leaf_slot)),
+                    Val($D32),
+                    Val($nthreads32),
+                    N,
+                )),
+            )
+        end
     end
 
     push!(stmts, :(return nothing))

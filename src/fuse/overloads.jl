@@ -111,3 +111,33 @@ function LinearAlgebra.ldiv!(
     out = emit_call!(tape, ldiv!, NodeRef[Uref, M.ref], TraceMatrix{T,D_M,D_N})
     return TraceMatrix{T,D_M,D_N}(tape, out)
 end
+
+# --- Matrix * Vector --------------------------------------------------------
+
+function Base.:*(
+    A::TraceMatrix{T,D_M,D_N}, x::TraceVector{T,D_N}
+) where {T,D_M,D_N}
+    out = emit_call!(A.tape, *, NodeRef[A.ref, x.ref], TraceVector{T,D_M})
+    return TraceVector{T,D_M}(A.tape, out)
+end
+
+function Base.:*(
+    A::Adjoint{T,TraceMatrix{T,D_N,D_M}}, x::TraceVector{T,D_N}
+) where {T,D_M,D_N}
+    tape = x.tape
+    Aref = register_wrapped!(tape, A)
+    out = emit_call!(tape, *, NodeRef[Aref, x.ref], TraceVector{T,D_M})
+    return TraceVector{T,D_M}(tape, out)
+end
+
+# --- Vector + / - Vector ----------------------------------------------------
+
+function Base.:+(a::TraceVector{T,D_M}, b::TraceVector{T,D_M}) where {T,D_M}
+    out = emit_call!(a.tape, +, NodeRef[a.ref, b.ref], TraceVector{T,D_M})
+    return TraceVector{T,D_M}(a.tape, out)
+end
+
+function Base.:-(a::TraceVector{T,D_M}, b::TraceVector{T,D_M}) where {T,D_M}
+    out = emit_call!(a.tape, -, NodeRef[a.ref, b.ref], TraceVector{T,D_M})
+    return TraceVector{T,D_M}(a.tape, out)
+end

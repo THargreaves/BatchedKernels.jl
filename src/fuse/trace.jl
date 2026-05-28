@@ -31,6 +31,32 @@ Base.setindex!(::TraceMatrix, _, ::Vararg) =
     error("setindex! on TraceMatrix is forbidden.")
 
 # -----------------------------------------------------------------------------
+# TraceVector
+# -----------------------------------------------------------------------------
+#
+# Trace-time representative of a batched scalar vector. Like `TraceMatrix` but
+# 1D — lives in a slot with the single-access layout only (no dual-access
+# second buffer), so the load path skips the interm→dual transfer.
+
+struct TraceVector{T,D_M} <: AbstractVector{T}
+    tape::Tape
+    ref::NodeRef
+end
+
+Base.size(::TraceVector{T,D_M}) where {T,D_M} = (D_M,)
+Base.size(::TraceVector{T,D_M}, i::Int) where {T,D_M} = i == 1 ? D_M : 1
+Base.length(::TraceVector{T,D_M}) where {T,D_M} = D_M
+Base.axes(::TraceVector{T,D_M}) where {T,D_M} = (Base.OneTo(D_M),)
+Base.IndexStyle(::Type{<:TraceVector}) = IndexLinear()
+Base.eltype(::Type{<:TraceVector{T}}) where {T} = T
+
+Base.getindex(::TraceVector, ::Vararg) = error(
+    "Scalar indexing on TraceVector is forbidden inside a vmapped function."
+)
+Base.setindex!(::TraceVector, _, ::Vararg) =
+    error("setindex! on TraceVector is forbidden.")
+
+# -----------------------------------------------------------------------------
 # Runtime-container → trace-element type map
 # -----------------------------------------------------------------------------
 
@@ -39,6 +65,12 @@ function trace_element_type(::Type{<:BatchedCuMatrix{T,D1,D2}}) where {T,D1,D2}
 end
 function trace_element_type(::Type{<:SharedCuMatrix{T,D1,D2}}) where {T,D1,D2}
     return TraceMatrix{T,D1,D2}
+end
+function trace_element_type(::Type{<:BatchedCuVector{T,D}}) where {T,D}
+    return TraceVector{T,D}
+end
+function trace_element_type(::Type{<:SharedCuVector{T,D}}) where {T,D}
+    return TraceVector{T,D}
 end
 trace_element_type(::Type{SharedValue{T}}) where {T} = T
 
@@ -143,6 +175,12 @@ end
 function input_spec(x::SharedCuMatrix)
     return LeafInput(trace_element_type(typeof(x)), SHARED)
 end
+function input_spec(x::BatchedCuVector)
+    return LeafInput(trace_element_type(typeof(x)), BATCHED)
+end
+function input_spec(x::SharedCuVector)
+    return LeafInput(trace_element_type(typeof(x)), SHARED)
+end
 function input_spec(x::SharedValue)
     return LiteralInput(x.value)
 end
@@ -192,7 +230,7 @@ function _reconstruct_trace_arg!(tape::Tape, spec::LeafInput)
         NodeMeta(spec.trace_type, spec.lifecycle),
     )
     push!(tape.inputs, ref)
-    spec.trace_type <: TraceMatrix ||
+    (spec.trace_type <: TraceMatrix || spec.trace_type <: TraceVector) ||
         error("trace: leaf input type $(spec.trace_type) not supported")
     return spec.trace_type(tape, ref)
 end
@@ -209,6 +247,7 @@ end
 
 # Convert the user function's return value into a tape output ref.
 result_to_ref!(tape::Tape, M::TraceMatrix) = M.ref
+result_to_ref!(tape::Tape, v::TraceVector) = v.ref
 function result_to_ref!(tape::Tape, x::Union{Number,AbstractChar,Bool,Nothing})
     return emit_const!(tape, x)
 end

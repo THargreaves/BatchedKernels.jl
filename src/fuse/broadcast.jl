@@ -14,7 +14,9 @@
 
 struct BatchedStyle <: Broadcast.BroadcastStyle end
 Base.BroadcastStyle(::Type{<:BatchedCuMatrix}) = BatchedStyle()
+Base.BroadcastStyle(::Type{<:BatchedCuVector}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:SharedCuMatrix}) = BatchedStyle()
+Base.BroadcastStyle(::Type{<:SharedCuVector}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:SharedValue}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:BatchedStruct}) = BatchedStyle()
 Base.BroadcastStyle(::BatchedStyle, ::Broadcast.DefaultArrayStyle{0}) = BatchedStyle()
@@ -45,10 +47,9 @@ end
 
 function _infer_D_MAX_T_from_spec!(D_ref::Ref, T_ref::Ref, spec::LeafInput)
     TT = spec.trace_type
-    TT <: TraceMatrix || return nothing
-    D_M, D_N = shape(TT)
+    (TT <: TraceMatrix || TT <: TraceVector) || return nothing
+    leaf_max = maximum(shape(TT))
     t_param = eltype(TT)
-    leaf_max = max(D_M, D_N)
     if D_ref[] === nothing
         D_ref[] = leaf_max
         T_ref[] = t_param
@@ -81,7 +82,21 @@ function _collect_runtime_inputs!(
     return nothing
 end
 function _collect_runtime_inputs!(
+    batched_args::Vector, shared_args::Vector, N_ref::Ref, x::BatchedCuVector
+)
+    _set_or_check_batch_n!(N_ref, batch_size(x))
+    push!(batched_args, x.data)
+    return nothing
+end
+function _collect_runtime_inputs!(
     batched_args::Vector, shared_args::Vector, N_ref::Ref, x::SharedCuMatrix
+)
+    N_ref[] !== nothing && _set_or_check_batch_n!(N_ref, batch_size(x))
+    push!(shared_args, x.data)
+    return nothing
+end
+function _collect_runtime_inputs!(
+    batched_args::Vector, shared_args::Vector, N_ref::Ref, x::SharedCuVector
 )
     N_ref[] !== nothing && _set_or_check_batch_n!(N_ref, batch_size(x))
     push!(shared_args, x.data)
@@ -194,9 +209,13 @@ function _broadcast_impl(bc::Broadcasted{BatchedStyle})
     N === nothing && error("At least one batched matrix input required")
 
     leaves = flatten_leaves(entry.output_spec)
+    # Outputs are fully written by the kernel (every in-bounds element gets a
+    # store; the per-write `grid_mtrx_write <= N` / `grid_vec_store <= N`
+    # guards only handle out-of-bounds tail lanes), so we skip the memset and
+    # allocate uninitialised.
     leaf_arrays = [
-        let (D_M, D_N) = shape(leaf.trace_type)
-            CUDA.zeros(T, D_M, D_N, N)
+        let s = shape(leaf.trace_type)
+            length(s) == 2 ? CuArray{T}(undef, s[1], s[2], N) : CuArray{T}(undef, s[1], N)
         end for leaf in leaves
     ]
 
@@ -217,7 +236,8 @@ end
 
 function _assemble_output(spec::LeafOutput, leaf_arrays::Vector, idx::Ref{Int}, N::Int)
     idx[] += 1
-    return BatchedCuMatrix(leaf_arrays[idx[]])
+    arr = leaf_arrays[idx[]]
+    return ndims(arr) == 3 ? BatchedCuMatrix(arr) : BatchedCuVector(arr)
 end
 _assemble_output(spec::LiteralOutput, _leaf_arrays, _idx, N::Int) =
     SharedValue(spec.val, N)
@@ -254,6 +274,7 @@ function _runtime_composite_type(::Type{T}, components::NamedTuple) where {T}
 end
 
 _component_element_type(c::BatchedCuMatrix{T,D1,D2}) where {T,D1,D2} = AbstractMatrix{T}
+_component_element_type(c::BatchedCuVector{T,D}) where {T,D} = AbstractVector{T}
 _component_element_type(c::BatchedStruct{T}) where {T} = T
 _component_element_type(c::SharedValue{T}) where {T} = T
 _component_element_type(c) = typeof(c)
@@ -274,6 +295,7 @@ _component_element_type(c) = typeof(c)
 # Leaf scalar_form rules
 scalar_form(::Type{T}) where {T<:Union{Number,AbstractChar,Bool,Nothing}} = T
 scalar_form(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N} = AbstractMatrix{T}
+scalar_form(::Type{TraceVector{T,D_M}}) where {T,D_M} = AbstractVector{T}
 
 @generated function scalar_form(::Type{TT}) where {TT<:Tuple}
     sfs = Type[scalar_form(p) for p in TT.parameters]
@@ -309,6 +331,11 @@ batchify_type(::Type{T}) where {T<:Union{Number,AbstractChar,Bool,Nothing}} =
 function batchify_type(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N}
     return BatchedCuMatrix{
         T,D_M,D_N,CuArray{T,3,CUDA.DeviceMemory},CuArray{T,2,CUDA.DeviceMemory}
+    }
+end
+function batchify_type(::Type{TraceVector{T,D_M}}) where {T,D_M}
+    return BatchedCuVector{
+        T,D_M,CuArray{T,2,CUDA.DeviceMemory},CuArray{T,1,CUDA.DeviceMemory}
     }
 end
 
