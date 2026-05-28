@@ -68,7 +68,6 @@ Base.getindex(x::BatchedCuVector, i::Integer) = view(x.data, :, i)
 struct BatchedCuScalar{T,A<:AbstractVector{T}} <: AbstractVector{T}
     data::A
 end
-BatchedCuScalar(data::A) where {T,A<:AbstractVector{T}} = BatchedCuScalar{T,A}(data)
 batch_size(x::BatchedCuScalar) = length(x.data)
 Base.size(x::BatchedCuScalar) = size(x.data)
 Base.IndexStyle(::Type{<:BatchedCuScalar}) = IndexLinear()

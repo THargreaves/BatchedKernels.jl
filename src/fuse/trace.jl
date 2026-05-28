@@ -128,6 +128,29 @@ trace_element_type(::Type{SharedValue{T}}) where {T} = T
 end
 
 # -----------------------------------------------------------------------------
+# Cholesky.{L,U} for trace-backed Cholesky
+# -----------------------------------------------------------------------------
+#
+# Our `cholesky(::TraceMatrix)` overload stores the U factor and tags `uplo`
+# as 'U'. Stdlib's `getproperty(::Cholesky, :L)` for that case does
+# `LowerTriangular(copy(Cfactors'))`, and `copy(::Adjoint{T,<:AbstractMatrix})`
+# materialises via scalar indexing — forbidden on `TraceMatrix`. Overriding
+# `Base.copy` for the trace types would work but is a sharp edge: future code
+# may rely on copy producing an independent object. Overriding the property
+# accessor on `Cholesky{T,<:TraceMatrix}` is a narrower fix.
+
+function Base.getproperty(C::Cholesky{T,<:TraceMatrix}, d::Symbol) where {T}
+    if d === :L
+        return LowerTriangular(getfield(C, :factors)')
+    elseif d === :U
+        return UpperTriangular(getfield(C, :factors))
+    elseif d === :UL
+        return Symmetric(getfield(C, :factors), :U)
+    end
+    return getfield(C, d)
+end
+
+# -----------------------------------------------------------------------------
 # Wrapper capture
 # -----------------------------------------------------------------------------
 #

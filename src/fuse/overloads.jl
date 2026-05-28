@@ -190,6 +190,8 @@ function LinearAlgebra.logdet(C::Cholesky{T,<:TraceMatrix{T,D_M,D_M}}) where {T,
     return TraceScalar{T}(tape, out)
 end
 
-function LinearAlgebra.logdet(M::Symmetric{T,<:TraceMatrix{T,D_M,D_M}}) where {T,D_M}
+function LinearAlgebra.logdet(
+    M::Symmetric{T,<:TraceMatrix{T,D_M,D_M}}
+) where {T<:Real,D_M}
     return logdet(cholesky(M))
 end
