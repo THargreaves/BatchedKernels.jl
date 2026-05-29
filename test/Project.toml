@@ -1,7 +1,6 @@
 [deps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
-GeneralisedFilters = "3ef92589-7ab8-43f9-b5b9-a3a0c86ecbb7"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Magma = "a4173727-5e3e-4567-b12d-2e3cf2fa2f28"

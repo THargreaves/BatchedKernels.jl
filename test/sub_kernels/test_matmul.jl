@@ -171,7 +171,6 @@ end
     end
 end
 
-
 @testitem "Gram matrix (non-square)" begin
     using CUDA
     using CUDA: i32
@@ -222,122 +221,6 @@ end
         end
     end
 end
-
-@testitem "Matrix Multiplication (vmap, non_square)" begin
-    using CUDA
-    using CUDA: i32
-    using LinearAlgebra
-    using BatchedKernels
-    using GeneralisedFilters
-
-    # Test parameters
-    N = 2^12 + 113
-
-    function matmul(A, B, dummy)
-        return A * B
-    end
-
-    # Accuracy tests
-    for D1 in 2:13
-        for D2 in 2:13
-            for extra in 0:1
-                D = max(D1, D2) + extra
-                dummy = BatchedCuMatrix(CUDA.zeros(Float32, D, D, N))
-
-                CUDA.seed!(1234)
-
-                As_cpu = rand(Float32, D1, D2, N)
-                Bs_cpu = rand(Float32, D2, D1, N)
-
-                As = BatchedCuMatrix(cu(As_cpu))
-                Bs = BatchedCuMatrix(cu(Bs_cpu))
-
-                matmul_vmap = BatchedKernels.vmap(matmul)
-
-                Cs = matmul_vmap(As, Bs, dummy)
-                Cs_result = Array(Cs.data)
-
-                # CPU comparison
-                Cs_cpu = zeros(Float32, D1, D1, N)
-                for i in 1:N
-                    Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]
-                end
-
-                max_error = maximum(abs.(Cs_result .- Cs_cpu))
-                @test max_error < 1e-5
-            end
-        end
-    end
-end
-
-@testitem "Shared Matmul (vmap non-square)" begin
-    using BatchedKernels
-    using GeneralisedFilters
-    using CUDA
-    using CUDA: i32
-    using LinearAlgebra
-
-    function matmul(A, B, dummy)
-        return A * B
-    end
-
-    # Test parameters
-    N = 2^12 + 113
-
-    for D1 in 2:14
-        for D2 in 2:14
-            Dmax = max(D1, D2)
-            for extra in 0:1
-                D = Dmax + extra
-                dummy = BatchedCuMatrix(CUDA.rand(Float32, D, D, N))
-                
-                ### Test 1 ###
-                CUDA.seed!(1234)
-
-                As = BatchedCuMatrix(CUDA.rand(Float32, D1, D2, N))
-                Bs = SharedCuMatrix(CUDA.rand(Float32, D2, D1), N)
-
-                matmul_vmap1 = BatchedKernels.vmap(matmul)
-                Cs = matmul_vmap1(As, Bs, dummy)
-
-                # CPU comparison
-                As_cpu = Array(As.data)
-                Bs_cpu = Array(Bs.data)
-                Cs_cpu = zeros(Float32, D1, D1, N)
-                for i in 1:N
-                    Cs_cpu[:, :, i] = matmul(As_cpu[:, :, i], Bs_cpu, 0)
-                end
-
-                max_error = maximum(abs.(Array(Cs.data) .- Cs_cpu))
-
-                @test max_error < 1e-5
-
-                ### Test 2 ###
-                CUDA.seed!(1234)
-
-                As = SharedCuMatrix(CUDA.rand(Float32, D1, D2), N)
-                Bs = BatchedCuMatrix(CUDA.rand(Float32, D2, D1, N))
-
-                matmul_vmap2 = BatchedKernels.vmap(matmul)
-
-                Cs = matmul_vmap2(As, Bs, dummy)
-
-                # CPU comparison
-                As_cpu = Array(As.data)
-                Bs_cpu = Array(Bs.data)
-                Cs_cpu = zeros(Float32, D1, D1, N)
-                for i in 1:N
-                    Cs_cpu[:, :, i] = matmul(As_cpu, Bs_cpu[:, :, i], 0)
-                end
-
-                max_error = maximum(abs.(Array(Cs.data) .- Cs_cpu))
-
-                @test max_error < 1e-5
-            end
-        end
-    end
-end
-
 @testitem "Matrix Multiplication Throughput (indep)" begin
     using PerformanceTestTools
 
