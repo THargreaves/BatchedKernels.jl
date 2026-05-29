@@ -771,8 +771,15 @@ Function for writing matrices from shared memory to global memory, for the case
 where one warp handles multiple matrices. Meant for small matrices.
 
 This is the warp independent version, where one warp only writes matrices that
-the warp was responsible for in previous calculations.
+the warp was responsible for in previous calculations. This is the default mode
+when no `Val(mode)` tag is supplied.
 """
+@inline function intermediate_layout_write!(
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32,
+) where {D,nthreads}
+    return intermediate_layout_write!(global_arr, shmem, Val(D), Val(nthreads), N, Val(:indep))
+end
+
 @inline function intermediate_layout_write!(
     global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:indep},
 ) where {D,nthreads}
