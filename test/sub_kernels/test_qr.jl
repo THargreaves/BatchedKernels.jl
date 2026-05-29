@@ -34,6 +34,8 @@
         shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
         shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
         shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_vec_elems = D * n_mats_per_warp * n_warps
+        shmem_tau = CuStaticSharedArray(Float32, (shmem_vec_elems,))
 
         # Load A
         intermediate_layout_load!(shmem_3, As, Val(D1), Val(D2), Val(D), Val(nthreads), N)
@@ -47,9 +49,10 @@
         R = A
         B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
         C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id)
+        tau = BatchedVector(shmem_tau, Val(D), warp_matrix_id)
 
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-            tau = batch_op!(qr, R, A, d, Val(D1), Val(D2), Val(D), warp_matrix_id)
+            batch_op!(qr, R, tau, A, d, Val(D1), Val(D2), Val(D), warp_matrix_id)
             batch_op!(Val(:qr_Q_multiply), Val(false), C, R, B, d, tau, Val(D1), Val(D2), Val(B_D1), Val(B_D2), Val(D), warp_matrix_id)
         end
 
@@ -157,6 +160,8 @@ end
         shmem_1 = CuStaticSharedArray(Float32, (shmem_elems,))
         shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
         shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
+        shmem_vec_elems = D * n_mats_per_warp * n_warps
+        shmem_tau = CuStaticSharedArray(Float32, (shmem_vec_elems,))
 
         # Load A
         intermediate_layout_load!(shmem_3, As, Val(D1), Val(D2), Val(D), Val(nthreads), N)
@@ -170,9 +175,10 @@ end
         R = A
         B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
         C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id)
+        tau = BatchedVector(shmem_tau, Val(D), warp_matrix_id)
 
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-            tau = batch_op!(qr, R, A, d, Val(D1), Val(D2), Val(D), warp_matrix_id)
+            batch_op!(qr, R, tau, A, d, Val(D1), Val(D2), Val(D), warp_matrix_id)
             batch_op!(Val(:qr_Q_multiply), Val(true), C, R, B, d, tau, Val(D1), Val(D2), Val(B_D1), Val(B_D2), Val(D), warp_matrix_id)
         end
 
