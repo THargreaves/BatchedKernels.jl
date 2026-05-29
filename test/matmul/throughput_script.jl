@@ -35,7 +35,7 @@ for D in 2:15
 
     bench_results = @benchmark begin
         CUDA.@sync @cuda threads = $nthreads blocks = $nblocks kernel_matmul!(
-            $Cs, $As, $Bs, Val(Int32($D)), Val(Int32($nthreads)), Int32($N_bench), $Val(:small), $mode
+            $Cs, $As, $Bs, Val(Int32($D)), Val(Int32($nthreads)), Int32($N_bench), $$mode
         )
     end
 

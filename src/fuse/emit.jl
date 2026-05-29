@@ -51,7 +51,6 @@ function emit_primitive(
             Val(Int32($D_M)),
             Val(Int32($D_N)),
             Val(Int32($D_MAX)),
-            Val(:small),
         ))
     else
         # Matmul: A is (D_M, D_N), B is (D_N, D_P) -> C is (D_M, D_P).
@@ -68,7 +67,6 @@ function emit_primitive(
             Val(Int32($D_M)),
             Val(Int32($D_N)),
             Val(Int32($D_P)),
-            Val(:small),
         ))
     end
 end
@@ -91,7 +89,6 @@ function emit_primitive(
             Val(Int32($D_M)),
             Val(Int32(0)),  # unused dispatch slot
             Val(Int32($D_MAX)),
-            Val(:small),
         ))
     else
         D_M, D_N = shape(types[1])
@@ -104,7 +101,6 @@ function emit_primitive(
             Val(Int32($D_M)),
             Val(Int32($D_N)),
             Val(Int32($D_MAX)),
-            Val(:small),
         ))
     end
 end
@@ -133,7 +129,6 @@ function emit_primitive(
         Val(Int32($D_M)),
         Val(Int32(0)),
         Val(Int32($D_MAX)),
-        Val(:small),
     ))
 end
 
@@ -150,7 +145,6 @@ function emit_primitive(
         Val(Int32($D_M)),
         Val(Int32($D_MAX)),
         warp_matrix_id,
-        Val(:small),
     ))
 end
 
@@ -172,7 +166,6 @@ function emit_primitive(
         Val(Int32($D_MAX)),
         Int32($(32 ÷ D_MAX)),
         warp_matrix_id,
-        Val(:small),
     ))
 end
 
@@ -199,7 +192,6 @@ function emit_primitive(
             Val(Int32(0)),
             Val(Int32($D_MAX)),
             warp_matrix_id,
-            Val(:small),
         ))
     end
     D_M, D_N = shape(types[2])
@@ -212,7 +204,6 @@ function emit_primitive(
         Val(Int32($D_M)),
         Val(Int32($D_N)),
         Val(Int32($D_MAX)),
-        Val(:small),
     ))
 end
 
@@ -227,7 +218,7 @@ function emit_primitive(
     (D_M == D_MAX && D_N == D_MAX) || error(
         "emit_primitive(ldiv!): masked in-place ldiv! not yet supported (D_M=$D_M, D_N=$D_N, D_MAX=$D_MAX)",
     )
-    return :(batch_op!(\, $LU, $M, d, Val(Int32($D_MAX)), Val(:small)))
+    return :(batch_op!(\, $LU, $M, d, Val(Int32($D_MAX))))
 end
 
 # `shape(T)` — extract row/col extents from a (possibly wrapped) trace type.
@@ -283,7 +274,6 @@ function emit_primitive(
         Val(Int32($D_M)),
         Val(Int32($D_MAX)),
         warp_matrix_id,
-        Val(:small),
     ))
 end
 
@@ -314,7 +304,6 @@ function emit_primitive(
         Val(Int32($B_D2)),
         Val(Int32($D_MAX)),
         warp_matrix_id,
-        Val(:small),
     ))
 end
 
@@ -359,7 +348,6 @@ function emit_primitive(
         Val(Int32($D_M)),
         Val(Int32($D_MAX)),
         warp_matrix_id,
-        Val(:small),
     ))
     return _emit_warp_reduction_broadcast(reduction, dest, D_M, D_MAX)
 end
@@ -376,7 +364,6 @@ function emit_primitive(
         Val(Int32($D_M)),
         Val(Int32($D_MAX)),
         warp_matrix_id,
-        Val(:small),
     ))
     return _emit_warp_reduction_broadcast(reduction, dest, D_M, D_MAX)
 end

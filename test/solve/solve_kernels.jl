@@ -1,5 +1,5 @@
 @inline function kernel_backward_solve!(
-    Cs, Us, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{mode},
+    Cs, Us, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
 ) where {D,nthreads,mode}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -21,33 +21,33 @@
     shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
 
     # Load U
-    intermediate_layout_load!(shmem_3, Us, Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_3, Us, Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
 
     # Load B
-    intermediate_layout_load!(shmem_3, Bs, Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_2, shmem_3, Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_3, Bs, Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_2, shmem_3, Val(D), Val(nthreads), N)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         # Create dual-access matrices
-        U_mat = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-        B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
-        C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
+        U_mat = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
+        B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
+        C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id)
 
         # Perform backward solve: C = U \ B
         U = UpperTriangular(U_mat)
-        batch_op!(\, C, U, B, d, Val(D), Val(:small))
+        batch_op!(\, C, U, B, d, Val(D))
     end
 
     # Store C
-    dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N, Val(:small))
-    intermediate_layout_write!(Cs, shmem_1, Val(D), Val(nthreads), N, Val(:small), Val(mode))
+    dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
+    intermediate_layout_write!(Cs, shmem_1, Val(D), Val(nthreads), N, Val(mode))
 
     return nothing
 end
 
 @inline function kernel_backward_solve!(
-    Cs, Us, Bs, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32, ::Val{:small},
+    Cs, Us, Bs, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32,
 ) where {D1,D2,nthreads}
     D = max(D1, D2)
     n_mats_per_warp = 32i32 ÷ D
@@ -70,33 +70,33 @@ end
     shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
 
     # Load U
-    intermediate_layout_load!(shmem_3, Us, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_3, Us, Val(D1), Val(D1), Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D1), Val(D), Val(nthreads), N)
 
     # Load B
-    intermediate_layout_load!(shmem_3, Bs, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_2, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_3, Bs, Val(D1), Val(D2), Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_2, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N)
 
     # Create dual-access matrices
-    U_mat = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-    B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
-    C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
+    U_mat = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
+    B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
+    C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         # Perform backward solve: C = U \ B
         U = UpperTriangular(U_mat)
-        batch_op!(\, C, U, B, d, Val(D1), Val(:small))
+        batch_op!(\, C, U, B, d, Val(D1))
     end
 
     # Store C
-    dual_to_interm_transfer!(shmem_1, C, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
-    intermediate_layout_write!(Cs, shmem_1, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+    dual_to_interm_transfer!(shmem_1, C, Val(D1), Val(D2), Val(D), Val(nthreads), N)
+    intermediate_layout_write!(Cs, shmem_1, Val(D1), Val(D2), Val(D), Val(nthreads), N)
 
     return nothing
 end
 
 @inline function kernel_forward_solve!(
-    Cs, Ls, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{mode},
+    Cs, Ls, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
 ) where {D,nthreads,mode}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -118,33 +118,33 @@ end
     shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
 
     # Load L
-    intermediate_layout_load!(shmem_3, Ls, Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_3, Ls, Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
 
     # Load B
-    intermediate_layout_load!(shmem_3, Bs, Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_2, shmem_3, Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_3, Bs, Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_2, shmem_3, Val(D), Val(nthreads), N)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         # Create dual-access matrices
-        L_mat = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-        B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
-        C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
+        L_mat = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
+        B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
+        C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id)
 
         # Perform forward solve: C = L \ B
         L = LowerTriangular(L_mat)
-        batch_op!(\, C, L, B, d, Val(D), Val(:small))
+        batch_op!(\, C, L, B, d, Val(D))
     end
 
     # Store C
-    dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N, Val(:small))
-    intermediate_layout_write!(Cs, shmem_1, Val(D), Val(nthreads), N, Val(:small), Val(mode))
+    dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
+    intermediate_layout_write!(Cs, shmem_1, Val(D), Val(nthreads), N, Val(mode))
 
     return nothing
 end
 
 @inline function kernel_forward_solve!(
-    Cs, Ls, Bs, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32, ::Val{:small},
+    Cs, Ls, Bs, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32,
 ) where {D1,D2,nthreads}
     D = max(D1, D2)
     n_mats_per_warp = 32i32 ÷ D
@@ -167,26 +167,26 @@ end
     shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
 
     # Load U
-    intermediate_layout_load!(shmem_3, Ls, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_3, Ls, Val(D1), Val(D1), Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D1), Val(D), Val(nthreads), N)
 
     # Load B
-    intermediate_layout_load!(shmem_3, Bs, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_2, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_3, Bs, Val(D1), Val(D2), Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_2, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N)
 
     # Create dual-access matrices
-    L = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-    B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
-    C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
+    L = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
+    B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
+    C = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         # Perform backward solve: C = U \ B
-        batch_op!(\, C, LowerTriangular(L), B, d, Val(D1), Val(:small))
+        batch_op!(\, C, LowerTriangular(L), B, d, Val(D1))
     end
 
     # Store C
-    dual_to_interm_transfer!(shmem_1, C, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
-    intermediate_layout_write!(Cs, shmem_1, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+    dual_to_interm_transfer!(shmem_1, C, Val(D1), Val(D2), Val(D), Val(nthreads), N)
+    intermediate_layout_write!(Cs, shmem_1, Val(D1), Val(D2), Val(D), Val(nthreads), N)
 
     return nothing
 end

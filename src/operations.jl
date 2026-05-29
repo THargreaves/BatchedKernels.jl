@@ -13,7 +13,6 @@ gram(A) = A' * A
     B::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D}
     @inbounds for i in (1i32):D
         C[i, d] = A[i, d] + B[i, d]
@@ -28,27 +27,9 @@ end
     A::AbstractMatrix{T},
     B::AbstractMatrix{T},
     d::Int32,
-    ::Val{D},
-    ::Val{:large},
-) where {T,D}
-    i = mod1(mat_elem_idx, D)
-    j = (mat_elem_idx - 1i32) ÷ D + 1i32
-
-    @inbounds C[i, j] = A[i, j] + B[i, j]
-
-    return nothing
-end
-
-@inline function batch_op!(
-    ::typeof(+),
-    C::AbstractMatrix{T},
-    A::AbstractMatrix{T},
-    B::AbstractMatrix{T},
-    d::Int32,
     ::Val{D1},
     ::Val{D2},
     ::Val,
-    ::Val{:small},
 ) where {T,D1,D2}
     if d > D2
         return nothing
@@ -67,7 +48,6 @@ end
     B::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D}
     @inbounds for i in (1i32):D
         C[i, d] = A[i, d] - B[i, d]
@@ -85,7 +65,6 @@ end
     ::Val{D1},
     ::Val{D2},
     ::Val,
-    ::Val{:small},
 ) where {T,D1,D2}
     if d > D2
         return nothing
@@ -93,23 +72,6 @@ end
     @inbounds @unroll for i in (1i32):D1
         C[i, d] = A[i, d] - B[i, d]
     end
-
-    return nothing
-end
-
-@inline function batch_op!(
-    ::typeof(-),
-    C::AbstractMatrix{T},
-    A::AbstractMatrix{T},
-    B::AbstractMatrix{T},
-    d::Int32,
-    ::Val{D},
-    ::Val{:large},
-) where {T,D}
-    i = mod1(mat_elem_idx, D)
-    j = (mat_elem_idx - 1i32) ÷ D + 1i32
-
-    @inbounds C[i, j] = A[i, j] - B[i, j]
 
     return nothing
 end
@@ -121,7 +83,6 @@ end
     B::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D}
     # Extract column d of B into registers
     B_col = @MVector zeros(T, Int64(D))
@@ -150,7 +111,6 @@ end
     ::Val{D1},
     ::Val{D2},
     ::Val{D3},
-    ::Val{:small},
 ) where {T,D1,D2,D3}  # (D1,D2) x (D2,D3) -> (D1,D3) multiplication
     if d > D3
         return nothing
@@ -176,7 +136,6 @@ end
     ::Val{D1},
     ::Val{D2},
     ::Val{D},
-    ::Val{:small},
 ) where {T,D1,D2,D}  # (D1,D2) x trig(D2,D2) = (D1,D2)
     if d > D2
         return nothing
@@ -209,7 +168,6 @@ end
     ::Val{D1},
     ::Val{D2},
     ::Val{D},
-    ::Val{:small},
 ) where {T,D1,D2,D}  # (D1,D2) x trig(D2,D2) = (D1,D2)
     if d > D2
         return nothing
@@ -235,61 +193,6 @@ end
 end
 
 @inline function batch_op!(
-    ::typeof(*),
-    C::AbstractMatrix{T},
-    A::AbstractMatrix{T},
-    B::AbstractMatrix{T},
-    ::Val{D},
-    ::Val{:large},
-    ::Val{:conseq},
-) where {T,D}
-    tid = threadIdx().x
-
-    mat_elem_idx = mod1(tid, D * D)
-
-    d = (mat_elem_idx - 1i32) ÷ D + 1i32
-    i = mod1(mat_elem_idx, D)
-
-    tot = zero(T)
-    @inbounds for k in (1i32):D
-        tot += A[i, k] * B[k, d]
-    end
-
-    @inbounds C[i, d] = tot
-
-    return nothing
-end
-
-@inline function batch_op!(
-    ::typeof(*),
-    C::AbstractMatrix{T},
-    A::AbstractMatrix{T},
-    B::AbstractMatrix{T},
-    ::Val{D},
-    ::Val{:large},
-    ::Val{:indep},
-) where {T,D}
-    tid = threadIdx().x
-    lid = mod1(tid, 32i32)
-    wid = div(tid - 1i32, 32i32) + 1i32
-
-    n_cols_per_warp = max(1i32, prevpow(2i32, 32i32 ÷ D))
-    lanes_per_slot = 32i32 ÷ n_cols_per_warp
-    global_d = (wid - 1i32) * n_cols_per_warp + div(lid - 1i32, lanes_per_slot) + 1i32
-    d = mod1(global_d, D)
-    i = mod1(lid, lanes_per_slot)
-
-    tot = zero(T)
-    @inbounds for k in (1i32):D
-        tot += A[i, k] * B[k, d]
-    end
-
-    @inbounds C[i, d] = tot
-
-    return nothing
-end
-
-@inline function batch_op!(
     ::typeof(gram),
     G::AbstractMatrix{T},
     A::AbstractMatrix{T},
@@ -297,7 +200,6 @@ end
     ::Val{D1},
     ::Val{D2},
     ::Val,
-    ::Val{:small},
 ) where {T,D1,D2}
     if d > D2
         return nothing
@@ -335,7 +237,6 @@ end
     ::Val{D},
     n_mats_per_warp::Int32,
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -394,7 +295,6 @@ end
     ::Val{D1},
     ::Val{D},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D1,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -459,7 +359,6 @@ end
     ::Val{D},
     n_mats_per_warp::Int32,
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -526,7 +425,6 @@ end
     ::Val{D2},
     ::Val{D},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D1,D2,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -672,7 +570,6 @@ end
     ::Val{D2},
     ::Val{D},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D1,D2,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -729,7 +626,6 @@ end
     ::Val{D2},
     ::Val{D},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D1,D2,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -795,7 +691,6 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
     ::Val{B_D2},  # Columns of B
     ::Val{D},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,adj,D1,D2,B_D1,B_D2,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -873,7 +768,6 @@ end
     ::Val{2},
     ::Val{1},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -1153,7 +1047,6 @@ end
     ::Val{2},
     ::Val{2},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D,THRESH}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -1359,7 +1252,6 @@ end
     A::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D}
     # Store column d in registers
     x = @MVector zeros(T, Int64(D))
@@ -1395,7 +1287,6 @@ end
     ::Val{D1},
     ::Val{D2},
     ::Val,
-    ::Val{:small},
 ) where {T,D1,D2}
     if d > D2
         return nothing
@@ -1427,9 +1318,8 @@ end
     A::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D}
-    return batch_op!(\, A, U, A, d, Val(D), Val(:small))
+    return batch_op!(\, A, U, A, d, Val(D))
 end
 
 # Out-of-place lower triangular forward solve: C = L \ A
@@ -1440,7 +1330,6 @@ end
     A::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D}
     # Store column d in registers
     y = @MVector zeros(T, Int64(D))
@@ -1475,7 +1364,6 @@ end
     ::Val{D1},
     ::Val{D2},
     ::Val,
-    ::Val{:small},
 ) where {T,D1,D2}
     if d > D2
         return nothing
@@ -1509,9 +1397,8 @@ end
     A::AbstractMatrix{T},
     d::Int32,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D}
-    return batch_op!(\, A, L, A, d, Val(D), Val(:small))
+    return batch_op!(\, A, L, A, d, Val(D))
 end
 
 # L c = b, solve for c
@@ -1525,7 +1412,6 @@ end
     ::Val,
     ::Val{D},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D1,D}
     if d > D1
         return nothing
@@ -1562,7 +1448,6 @@ end
     A::AbstractMatrix{T},
     d::Int32, 
     ::Val{D},
-    ::Val{:small},
 ) where {T,D}
     if A === B
         # Each thread reads column d of A and writes it as row d of B
@@ -1588,7 +1473,6 @@ end
     ::Val{D1},
     ::Val{D2},
     ::Val,
-    ::Val{:small},
 ) where {T,D1,D2}
     if A === B
         if d > max(D1, D2)
@@ -1634,7 +1518,6 @@ end
     x::AbstractVector{T},
     d::Int32,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -1664,7 +1547,6 @@ end
     ::Val{D1},
     ::Val{D2},
     ::Val{D},
-    ::Val{:small},
 ) where {T,D1,D2,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -1692,7 +1574,6 @@ end
     y::AbstractVector{T},
     d::Int32,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -1717,7 +1598,6 @@ end
     ::Val{D1},
     ::Val,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D1,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -1740,7 +1620,6 @@ end
     y::AbstractVector{T},
     d::Int32,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -1765,7 +1644,6 @@ end
     ::Val{D1},
     ::Val,
     ::Val{D},
-    ::Val{:small},
 ) where {T,D1,D}
     tid = threadIdx().x
     lid = mod1(tid, 32i32)
@@ -1788,7 +1666,6 @@ end
     ::Val{D1},
     ::Val{D},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D1,D}
     if d > D1
         return zero(T)
@@ -1812,7 +1689,6 @@ end
     ::Val{D1},
     ::Val{D},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D1,D}
     if d > D1
         return zero(T)

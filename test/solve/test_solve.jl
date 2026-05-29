@@ -29,7 +29,7 @@
             Cs = CUDA.zeros(Float32, D, D, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_backward_solve!(
-                Cs, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
+                Cs, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
             )
 
             # CPU comparison
@@ -75,7 +75,7 @@ end
             Cs = CUDA.zeros(Float32, D1, D2, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_backward_solve!(
-                Cs, Us, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N), Val(:small),
+                Cs, Us, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
             )
 
             # CPU comparison
@@ -122,7 +122,7 @@ end
             Bs_cpu = Array(Bs)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_backward_solve!(
-                Bs, Us, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N), Val(:small),
+                Bs, Us, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
             )
 
             # CPU comparison
@@ -169,7 +169,7 @@ end
             Bs_cpu = Array(Bs)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_backward_solve!(
-                Us, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
+                Us, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
             )
 
             # CPU comparison
@@ -215,7 +215,7 @@ end
             Cs = CUDA.zeros(Float32, D, D, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_forward_solve!(
-                Cs, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
+                Cs, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
             )
 
             # CPU comparison
@@ -261,7 +261,7 @@ end
             Cs = CUDA.zeros(Float32, D1, D2, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_forward_solve!(
-                Cs, Ls, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N), Val(:small),
+                Cs, Ls, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
             )
 
             # CPU comparison
@@ -308,7 +308,7 @@ end
             Bs_cpu = Array(Bs)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_forward_solve!(
-                Bs, Ls, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N), Val(:small),
+                Bs, Ls, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
             )
 
             # CPU comparison
@@ -355,7 +355,7 @@ end
             Bs_cpu = Array(Bs)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_forward_solve!(
-                Ls, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), mode,
+                Ls, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
             )
 
             # CPU comparison
@@ -406,16 +406,16 @@ end
         shmem_vec_elems = D * n_warps * n_mats_per_warp
         shmem_vec_1 = CuDynamicSharedArray(Float32, shmem_vec_elems, 2 * shmem_elems * sizeof(Float32))
 
-        intermediate_layout_load!(shmem_2, Ls, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_load!(shmem_2, Ls, Val(D1), Val(D1), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D1), Val(D), Val(nthreads), N)
 
         vector_load!(shmem_vec_1, bs, Val(D1), Val(D), Val(nthreads), N)
 
-        M1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+        M1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
         v1 = BatchedVector(shmem_vec_1, Val(D), warp_matrix_id)
 
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-            batch_op!(\, v1, LowerTriangular(M1), v1, d, Val(D1), Val(D), Val(D), warp_matrix_id, Val(:small))
+            batch_op!(\, v1, LowerTriangular(M1), v1, d, Val(D1), Val(D), Val(D), warp_matrix_id)
         end
 
         sync_warp()

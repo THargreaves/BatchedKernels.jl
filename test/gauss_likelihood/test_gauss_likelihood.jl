@@ -43,10 +43,10 @@
         vector_load!(shmem_vec_2, µs_in, Val(D1), Val(D), Val(nthreads), N)
 
         # Load Σ
-        intermediate_layout_load!(shmem_2, Σs_in, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_load!(shmem_2, Σs_in, Val(D1), Val(D1), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D1), Val(D), Val(nthreads), N)
 
-        M1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+        M1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
         v1 = BatchedVector(shmem_vec_1, Val(D), warp_matrix_id)
         v2 = BatchedVector(shmem_vec_2, Val(D), warp_matrix_id)
 
@@ -54,20 +54,20 @@
         active = warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         if active
             # δ = x - µ -> v1
-            batch_op!(-, v1, v1, v2, d, Val(D1), Val(D1), Val(D), Val(:small))
+            batch_op!(-, v1, v1, v2, d, Val(D1), Val(D1), Val(D))
 
             # cholesky(Σ).U -> M1
-            batch_op!(cholesky, M1, M1, d, Val(D1), Val(D), warp_matrix_id, Val(:small))
+            batch_op!(cholesky, M1, M1, d, Val(D1), Val(D), warp_matrix_id)
 
             # log det of Σ -> v2
-            log_det = batch_op!(Val(:log_det), UpperTriangular(M1), d, Val(D1), Val(D), warp_matrix_id, Val(:small))
+            log_det = batch_op!(Val(:log_det), UpperTriangular(M1), d, Val(D1), Val(D), warp_matrix_id)
             # Leader threads will have log_det in their registers, others will have garbage
 
             # y = L \ δ -> v1
-            batch_op!(\, v1, LowerTriangular(M1'), v1, d, Val(D1), Val(D1), Val(D), warp_matrix_id, Val(:small))
+            batch_op!(\, v1, LowerTriangular(M1'), v1, d, Val(D1), Val(D1), Val(D), warp_matrix_id)
 
             # mahal = |y|^2
-            mahal_dist = batch_op!(Val(:mahal_dist), v1, d, Val(D1), Val(D), warp_matrix_id, Val(:small))
+            mahal_dist = batch_op!(Val(:mahal_dist), v1, d, Val(D1), Val(D), warp_matrix_id)
             # Leader threads will have mahal in their registers
 
             log_prob = -0.5f0 * (D1 * log(Float32(2π)) + log_det + mahal_dist)        

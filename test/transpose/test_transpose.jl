@@ -9,7 +9,7 @@
     N = 2^12 + 113
 
     function kernel_transpose!(
-        Bs, As, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{mode},
+        Bs, As, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
     ) where {D,nthreads,mode}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
@@ -31,21 +31,21 @@
         shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
 
         # Load A
-        intermediate_layout_load!(shmem_3, As, Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_load!(shmem_3, As, Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
 
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             # Create dual-access matrices
-            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-            B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
+            B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
 
             # Perform out-of-place Cholesky
-            batch_op!(transpose, B, A, d, Val(D), Val(:small))
+            batch_op!(transpose, B, A, d, Val(D))
         end
 
         # Store result
-        dual_to_interm_transfer!(shmem_3, shmem_2, Val(D), Val(nthreads), N, Val(:small))
-        intermediate_layout_write!(Bs, shmem_3, Val(D), Val(nthreads), N, Val(:small), Val(mode))
+        dual_to_interm_transfer!(shmem_3, shmem_2, Val(D), Val(nthreads), N)
+        intermediate_layout_write!(Bs, shmem_3, Val(D), Val(nthreads), N, Val(mode))
 
         return nothing
     end
@@ -61,7 +61,7 @@
         Bs_cpu = permutedims(As_cpu, (2, 1, 3))
 
         CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_transpose!(
-            Bs, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), Val(:indep),
+            Bs, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:indep),
         )
 
         # CPU comparison
@@ -81,7 +81,7 @@ end
     N = 2^12 + 113
 
     function kernel_transpose!(
-        Bs, As, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{mode},
+        Bs, As, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
     ) where {D,nthreads,mode}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
@@ -102,20 +102,20 @@ end
         shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
 
         # Load A
-        intermediate_layout_load!(shmem_2, As, Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_load!(shmem_2, As, Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D), Val(nthreads), N)
 
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             # Create dual-access matrices
-            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
 
             # Perform out-of-place Cholesky
-            batch_op!(transpose, A, A, d, Val(D), Val(:small))
+            batch_op!(transpose, A, A, d, Val(D))
         end
 
         # Store result
-        dual_to_interm_transfer!(shmem_2, shmem_1, Val(D), Val(nthreads), N, Val(:small))
-        intermediate_layout_write!(Bs, shmem_2, Val(D), Val(nthreads), N, Val(:small), Val(mode))
+        dual_to_interm_transfer!(shmem_2, shmem_1, Val(D), Val(nthreads), N)
+        intermediate_layout_write!(Bs, shmem_2, Val(D), Val(nthreads), N, Val(mode))
 
         return nothing
     end
@@ -131,7 +131,7 @@ end
         Bs_cpu = permutedims(As_cpu, (2, 1, 3))
 
         CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_transpose!(
-            Bs, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:small), Val(:indep),
+            Bs, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), Val(:indep),
         )
 
         # CPU comparison
@@ -151,7 +151,7 @@ end
     N = 2^12 + 113
 
     function kernel_transpose!(
-        Bs, As, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32, ::Val{:small},
+        Bs, As, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32,
     ) where {D1,D2,nthreads}
         D = max(D1, D2)
         n_mats_per_warp = 32i32 ÷ D
@@ -174,21 +174,21 @@ end
         shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
 
         # Load A
-        intermediate_layout_load!(shmem_3, As, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_load!(shmem_3, As, Val(D1), Val(D2), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N)
 
         # Create dual-access matrices
-        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-        B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
+        B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
 
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             # Perform out-of-place Cholesky
-            batch_op!(transpose, B, A, d, Val(D1), Val(D2), Val(D), Val(:small))
+            batch_op!(transpose, B, A, d, Val(D1), Val(D2), Val(D))
         end
 
         # Store result
-        dual_to_interm_transfer!(shmem_3, B, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
-        intermediate_layout_write!(Bs, shmem_3, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+        dual_to_interm_transfer!(shmem_3, B, Val(D2), Val(D1), Val(D), Val(nthreads), N)
+        intermediate_layout_write!(Bs, shmem_3, Val(D2), Val(D1), Val(D), Val(nthreads), N)
 
         return nothing
     end
@@ -206,7 +206,7 @@ end
             Bs_cpu = permutedims(As_cpu, (2, 1, 3))
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_transpose!(
-                Bs, As, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N), Val(:small),
+                Bs, As, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
             )
 
             # CPU comparison
@@ -227,7 +227,7 @@ end
     N = 2^12 + 113
 
     function kernel_transpose!(
-        Bs, As, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32, ::Val{:small},
+        Bs, As, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32,
     ) where {D1,D2,nthreads}
         D = max(D1, D2)
         n_mats_per_warp = 32i32 ÷ D
@@ -249,20 +249,20 @@ end
         shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
 
         # Load A
-        intermediate_layout_load!(shmem_2, As, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_load!(shmem_2, As, Val(D1), Val(D2), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D2), Val(D), Val(nthreads), N)
 
         # Create dual-access matrices
-        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
 
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             # Perform out-of-place Cholesky
-            batch_op!(transpose, A, A, d, Val(D1), Val(D2), Val(D), Val(:small))
+            batch_op!(transpose, A, A, d, Val(D1), Val(D2), Val(D))
         end
 
         # Store result
-        dual_to_interm_transfer!(shmem_2, A, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
-        intermediate_layout_write!(Bs, shmem_2, Val(D2), Val(D1), Val(D), Val(nthreads), N, Val(:small))
+        dual_to_interm_transfer!(shmem_2, A, Val(D2), Val(D1), Val(D), Val(nthreads), N)
+        intermediate_layout_write!(Bs, shmem_2, Val(D2), Val(D1), Val(D), Val(nthreads), N)
 
         return nothing
     end
@@ -280,7 +280,7 @@ end
             Bs_cpu = permutedims(As_cpu, (2, 1, 3))
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_transpose!(
-                Bs, As, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N), Val(:small),
+                Bs, As, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
             )
 
             # CPU comparison

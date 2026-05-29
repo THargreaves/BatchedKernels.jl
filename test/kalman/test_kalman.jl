@@ -81,7 +81,6 @@
                 Val(Int32(D)),
                 Val(Int32(nthreads)),
                 Int32(N),
-                Val(:small),
                 mode,
             )
 
@@ -186,7 +185,6 @@ end
             Val(Int32(nthreads)),
             Int32(1),
             Int32(N),
-            Val(:small),
         )
         CUDA.cuFuncSetAttribute(kernel.fun, CUDA.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, shmem_bytes)
 
@@ -200,8 +198,7 @@ end
             Val(Int32(D)),
             Val(Int32(nthreads)),
             Int32(1),
-            Int32(N),
-            Val(:small);
+            Int32(N);
             threads = nthreads, blocks = nblocks, shmem = shmem_bytes,
         )
 
@@ -477,7 +474,6 @@ end
                 Val(Int32(D)),
                 Val(Int32(nthreads)),
                 Int32(N),
-                Val(:small),
                 mode,
             )
 
@@ -576,7 +572,6 @@ end
                 Val(Int32(D)),
                 Val(Int32(nthreads)),
                 Int32(N),
-                Val(:small),
                 mode,
             )
 
@@ -647,9 +642,9 @@ end
         shmem_v1 = CuStaticSharedArray(Float32, (shmem_vec_elems,))
         shmem_v2 = CuStaticSharedArray(Float32, (shmem_vec_elems,))
 
-        M1 = DualAccessMatrix(shmem_M1, Val(D), warp_matrix_id, Val(:small))
-        M2 = DualAccessMatrix(shmem_M2, Val(D), warp_matrix_id, Val(:small))
-        M3 = DualAccessMatrix(shmem_M3, Val(D), warp_matrix_id, Val(:small))
+        M1 = DualAccessMatrix(shmem_M1, Val(D), warp_matrix_id)
+        M2 = DualAccessMatrix(shmem_M2, Val(D), warp_matrix_id)
+        M3 = DualAccessMatrix(shmem_M3, Val(D), warp_matrix_id)
         v1 = BatchedVector(shmem_v1, Val(D), warp_matrix_id)
         v2 = BatchedVector(shmem_v2, Val(D), warp_matrix_id)
 
@@ -661,15 +656,15 @@ end
         vector_load!(shmem_v1, μ_glob.data, Val(D_state), Val(D), Val(nthreads), N)
 
         # Load M1 <- A
-        intermediate_layout_load!(shmem_M2, A_glob.data, Val(D_state), Val(D_state), Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_M1, shmem_M2, Val(D_state), Val(D_state), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_load!(shmem_M2, A_glob.data, Val(D_state), Val(D_state), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(shmem_M1, shmem_M2, Val(D_state), Val(D_state), Val(D), Val(nthreads), N)
 
         # v2 <- A * µ
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             A = M1
             µ = v1
 
-            batch_op!(*, v2, A, µ, d, Val(D_state), Val(D_state), Val(D), Val(:small))
+            batch_op!(*, v2, A, µ, d, Val(D_state), Val(D_state), Val(D))
         end
 
         # Load v1 <- b
@@ -678,12 +673,12 @@ end
         # v1 <- (A * µ) + b = v2 + v1
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             b = v1
-            batch_op!(+, v1, v2, b, d, Val(D_state), Val(:small))
+            batch_op!(+, v1, v2, b, d, Val(D_state))
         end
 
         # Load M2 <- L = chol(Σ).L
-        intermediate_layout_load!(shmem_M3, Σ_glob.components.chol.factors.data.data, Val(D_state), Val(D_state), Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_M2, shmem_M3, Val(D_state), Val(D_state), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_load!(shmem_M3, Σ_glob.components.chol.factors.data.data, Val(D_state), Val(D_state), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(shmem_M2, shmem_M3, Val(D_state), Val(D_state), Val(D), Val(nthreads), N)
 
         # M1 = A Σ A' = (A L) * (A L)'
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
@@ -691,34 +686,34 @@ end
             L = M2
 
             # M3 <- A * L
-            batch_op!(*, M3, A, LowerTriangular(L), d, Val(D_state), Val(D_state), Val(D), Val(:small))
+            batch_op!(*, M3, A, LowerTriangular(L), d, Val(D_state), Val(D_state), Val(D))
 
             # M1 <- (AL) * (AL)'
-            batch_op!(BatchedKernels.gram, M1, M3', d, Val(D_state), Val(D_state), Val(D), Val(:small))
+            batch_op!(BatchedKernels.gram, M1, M3', d, Val(D_state), Val(D_state), Val(D))
         end
 
         # Load M2 <- Q
-        intermediate_layout_load!(shmem_M3, Q_glob.components.mat.data, Val(D_state), Val(D_state), Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_M2, shmem_M3, Val(D_state), Val(D_state), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_load!(shmem_M3, Q_glob.components.mat.data, Val(D_state), Val(D_state), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(shmem_M2, shmem_M3, Val(D_state), Val(D_state), Val(D), Val(nthreads), N)
 
         # M2 <- (A Σ A') + Q = M1 + Q
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             Q = M2
-            batch_op!(+, M2, M1, Q, d, Val(D_state), Val(D_state), Val(D), Val(:small))
+            batch_op!(+, M2, M1, Q, d, Val(D_state), Val(D_state), Val(D))
         end
 
         # M3 <- L_out = chol(M2) = chol((A Σ A') + Q))
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-            batch_op!(cholesky, M3', M2, d, Val(D_state), Val(D), warp_matrix_id, Val(:small))
+            batch_op!(cholesky, M3', M2, d, Val(D_state), Val(D), warp_matrix_id)
         end
         
         # Storing Σs mats
-        dual_to_interm_transfer!(shmem_M1, M2, Val(D_state), Val(D_state), Val(D), Val(nthreads), N, Val(:small))
-        intermediate_layout_write!(out_state.components.Σ.components.mat.data, shmem_M1, Val(D_state), Val(D_state), Val(D), Val(nthreads), N, Val(:small))
+        dual_to_interm_transfer!(shmem_M1, M2, Val(D_state), Val(D_state), Val(D), Val(nthreads), N)
+        intermediate_layout_write!(out_state.components.Σ.components.mat.data, shmem_M1, Val(D_state), Val(D_state), Val(D), Val(nthreads), N)
 
         # Storing Σs choleskys
-        dual_to_interm_transfer!(shmem_M1, LowerTriangular(M3), Val(D_state), Val(D_state), Val(D), Val(nthreads), N, Val(:small))
-        intermediate_layout_write!(out_state.components.Σ.components.chol.factors.data.data, shmem_M1, Val(D_state), Val(D_state), Val(D), Val(nthreads), N, Val(:small))
+        dual_to_interm_transfer!(shmem_M1, LowerTriangular(M3), Val(D_state), Val(D_state), Val(D), Val(nthreads), N)
+        intermediate_layout_write!(out_state.components.Σ.components.chol.factors.data.data, shmem_M1, Val(D_state), Val(D_state), Val(D), Val(nthreads), N)
 
         # Storing µs
         vector_write!(out_state.µ.data, shmem_v1, Val(D_state), Val(D), Val(nthreads), N)
@@ -879,7 +874,6 @@ end
             Val(Int32(nthreads)),
             Int32(n_steps),
             Int32(N),
-            Val(:small),
         )
 
         S_out_cpu = Array(S_out)
@@ -979,7 +973,6 @@ end
             Val(Int32(nthreads)),
             Int32(n_steps),
             Int32(N),
-            Val(:small),
         )
 
         S_out_cpu = Array(S_out)

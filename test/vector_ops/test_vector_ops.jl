@@ -35,7 +35,7 @@
 
         if warp_vector_id <= n_vecs_per_warp
             # Perform operation
-            batch_op!(+, z, x, y, d, Val(D), Val(:small))
+            batch_op!(+, z, x, y, d, Val(D))
         end
 
         # Store z
@@ -103,7 +103,7 @@ end
 
         if warp_vector_id <= n_vecs_per_warp
             # Perform operation
-            batch_op!(-, z, x, y, d, Val(D), Val(:small))
+            batch_op!(-, z, x, y, d, Val(D))
         end
         
         # Store z
@@ -166,23 +166,23 @@ end
         shmem_4 = CuStaticSharedArray(Float32, (shmem_vec_elems,))
 
         # Load A
-        intermediate_layout_load!(shmem_2, As, Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_load!(shmem_2, As, Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D), Val(nthreads), N)
 
         # Load x
         vector_load!(shmem_3, xs, Val(D), Val(nthreads), N)
 
         # Create dual-access matrix and batched vectors
         if warp_matrix_id <= n_mats_per_warp
-            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
             x = BatchedVector(shmem_3, Val(D), warp_matrix_id)
             y = BatchedVector(shmem_4, Val(D), warp_matrix_id)
 
             # Perform operation: y = A * x or y = A' * x
             if A_adj
-                batch_op!(*, y, A', x, d, Val(D), Val(:small))
+                batch_op!(*, y, A', x, d, Val(D))
             else
-                batch_op!(*, y, A, x, d, Val(D), Val(:small))
+                batch_op!(*, y, A, x, d, Val(D))
             end
         end
 
@@ -265,7 +265,7 @@ end
 
         if warp_vector_id <= n_vecs_per_warp
             # Perform operation
-            batch_op!(+, z, x, y, d, Val(D1), Val(D), Val(D), Val(:small))
+            batch_op!(+, z, x, y, d, Val(D1), Val(D), Val(D))
         end
 
         # Store z
@@ -330,19 +330,19 @@ end
         shmem_4 = CuStaticSharedArray(Float32, (shmem_vec_elems,))
 
         # Load A
-        intermediate_layout_load!(shmem_2, As, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
-        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D2), Val(D), Val(nthreads), N, Val(:small))
+        intermediate_layout_load!(shmem_2, As, Val(D1), Val(D2), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D2), Val(D), Val(nthreads), N)
 
         # Load x
         vector_load!(shmem_3, xs, Val(D2), Val(D), Val(nthreads), N)
 
         # Create dual-access matrix and batched vectors
         if warp_matrix_id <= n_mats_per_warp
-            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+            A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
             x = BatchedVector(shmem_3, Val(D), warp_matrix_id)
             y = BatchedVector(shmem_4, Val(D), warp_matrix_id)
 
-            batch_op!(*, y, A, x, d, Val(D1), Val(D2), Val(D), Val(:small))
+            batch_op!(*, y, A, x, d, Val(D1), Val(D2), Val(D))
         end
 
         # Store y

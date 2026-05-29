@@ -1,5 +1,5 @@
 @inline function kernel_cholesky_inplace!(
-    Us, As, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{mode},
+    Us, As, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
 ) where {D,nthreads,mode}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -20,27 +20,27 @@
     shmem_2 = CuStaticSharedArray(Float32, (shmem_elems,))
 
     # Load A
-    intermediate_layout_load!(shmem_2, As, Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_1, shmem_2, Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_2, As, Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_1, shmem_2, Val(D), Val(nthreads), N)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         # Create dual-access matrices
-        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
+        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
 
         # Perform out-of-place Cholesky
-        # batch_op!(cholesky, A, d, Val(D), n_mats_per_warp, warp_matrix_id, Val(:small))
-        batch_op!(cholesky, A, A, d, Val(D), Val(D), warp_matrix_id, Val(:small))
+        # batch_op!(cholesky, A, d, Val(D), n_mats_per_warp, warp_matrix_id)
+        batch_op!(cholesky, A, A, d, Val(D), Val(D), warp_matrix_id)
     end
 
     # Store result
-    dual_to_interm_transfer!(shmem_2, shmem_1, Val(D), Val(nthreads), N, Val(:small))
-    intermediate_layout_write!(Us, shmem_2, Val(D), Val(nthreads), N, Val(:small), Val(mode))
+    dual_to_interm_transfer!(shmem_2, shmem_1, Val(D), Val(nthreads), N)
+    intermediate_layout_write!(Us, shmem_2, Val(D), Val(nthreads), N, Val(mode))
 
     return nothing
 end
 
 @inline function kernel_cholesky_out_of_place!(
-    Us, As, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{mode},
+    Us, As, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
 ) where {D,nthreads,mode}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -62,21 +62,21 @@ end
     shmem_3 = CuStaticSharedArray(Float32, (shmem_elems,))
 
     # Load A
-    intermediate_layout_load!(shmem_3, As, Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_3, As, Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         # Create dual-access matrices
-        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-        U = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+        A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
+        U = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
 
         # Perform out-of-place Cholesky
-        batch_op!(cholesky, U, A, d, Val(D), Val(D), warp_matrix_id, Val(:small))
+        batch_op!(cholesky, U, A, d, Val(D), Val(D), warp_matrix_id)
     end
 
     # Store result
-    dual_to_interm_transfer!(shmem_3, shmem_2, Val(D), Val(nthreads), N, Val(:small))
-    intermediate_layout_write!(Us, shmem_3, Val(D), Val(nthreads), N, Val(:small), Val(mode))
+    dual_to_interm_transfer!(shmem_3, shmem_2, Val(D), Val(nthreads), N)
+    intermediate_layout_write!(Us, shmem_3, Val(D), Val(nthreads), N, Val(mode))
 
     return nothing
 end

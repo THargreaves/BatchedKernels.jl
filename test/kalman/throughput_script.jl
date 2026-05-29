@@ -79,7 +79,7 @@ for D in 2:13
             Val(Int32($D)),
             Val(Int32($nthreads)),
             Int32($N_bench),
-            $Val(:small),
+            $
             $mode,
         )
     end

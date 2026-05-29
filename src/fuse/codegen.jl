@@ -204,7 +204,7 @@ function codegen(
             stmts,
             :(
                 $view_sym = DualAccessMatrix(
-                    $(matrix_slot_syms[s]), Val($D32), warp_matrix_id, Val(:small)
+                    $(matrix_slot_syms[s]), Val($D32), warp_matrix_id
                 )
             ),
         )
@@ -303,7 +303,6 @@ function codegen(
                     Val($D32),
                     Val($nthreads32),
                     N,
-                    Val(:small),
                 )),
             )
             continue
@@ -323,7 +322,6 @@ function codegen(
                     Val($D32),
                     Val($nthreads32),
                     N,
-                    Val(:small),
                 )),
             )
             node_view_sym[i] = slot_view_sym(dest_slot)
@@ -344,7 +342,6 @@ function codegen(
                     Val($D32),
                     Val($nthreads32),
                     N,
-                    Val(:small),
                 )),
             )
             continue
@@ -397,7 +394,6 @@ function codegen(
                     Val($D32),
                     Val($nthreads32),
                     N,
-                    Val(:small),
                 )),
             )
         else

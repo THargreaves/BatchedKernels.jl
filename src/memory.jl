@@ -13,7 +13,7 @@ export scalar_stage!, scalar_write!
 """
 Abstraction of shared memory layout for a matrix accessible both column and row-wise.
 """
-struct DualAccessMatrix{T,D,V} <: AbstractMatrix{T}
+struct DualAccessMatrix{T,D} <: AbstractMatrix{T}
     shmem::CuDeviceVector{T,CUDA.AS.Shared}
     offset::Int32
 end
@@ -23,7 +23,7 @@ Constructor for DualAccessMatrix, for memory layout where one warp handles multi
 Meant for smaller matrices.
 """
 function DualAccessMatrix(
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, warp_matrix_id::Int32, ::Val{:small},
+    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, warp_matrix_id::Int32,
 ) where {T,D}
     tid = threadIdx().x
     wid = div(tid - 1i32, 32i32) + 1i32
@@ -33,28 +33,17 @@ function DualAccessMatrix(
     warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
     offset = (wid - 1i32) * warp_shmem_size + warp_matrix_id - 1i32
 
-    return DualAccessMatrix{T,D,Val{:small}}(shmem, offset)
+    return DualAccessMatrix{T,D}(shmem, offset)
 end
 function DualAccessMatrix(
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, wid::Int32, warp_matrix_id::Int32, ::Val{:small},
+    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, wid::Int32, warp_matrix_id::Int32,
 ) where {T,D}
     n_mats_per_warp = 32i32 ÷ D
     dual_padding = mod(32i32 ÷ D - mod(n_mats_per_warp * D, 32i32), 32i32)
     warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
     offset = (wid - 1i32) * warp_shmem_size + warp_matrix_id - 1i32
 
-    return DualAccessMatrix{T,D,Val{:small}}(shmem, offset)
-end
-
-"""
-Constructor for DualAccessMatrix, for memory layout where one matrix is handled by D^2
-threads. Meant for larger matrices, up to D=32.
-"""
-function DualAccessMatrix(
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, block_mtrx_id::Int32, ::Val{:large}
-) where {T,D}
-    offset = (block_mtrx_id - 1i32) * D * D
-    return DualAccessMatrix{T,D,Val{:large}}(shmem, offset)
+    return DualAccessMatrix{T,D}(shmem, offset)
 end
 
 """
@@ -79,7 +68,7 @@ end
 Get index method for memory layout where one warp handles multiple matrices
 """
 Base.@propagate_inbounds @inline function Base.getindex(
-    A::DualAccessMatrix{T,D,Val{:small}}, i::Int32, j::Int32
+    A::DualAccessMatrix{T,D}, i::Int32, j::Int32
 ) where {T,D}
     stride = _compute_stride(Val(D))
     n_mats_per_warp = _compute_n_mats_per_warp(Val(D))
@@ -90,14 +79,14 @@ end
 Set index method for memory layout where one warp handles multiple matrices
 """
 Base.@propagate_inbounds @inline function Base.setindex!(
-    A::DualAccessMatrix{T,D,Val{:small}}, v::T, i::Int32, j::Int32
+    A::DualAccessMatrix{T,D}, v::T, i::Int32, j::Int32
 ) where {T,D}
     stride = _compute_stride(Val(D))
     n_mats_per_warp = _compute_n_mats_per_warp(Val(D))
     return A.shmem[A.offset + (j - 1i32) * stride + (i - 1i32) * n_mats_per_warp + 1i32] = v
 end
 
-struct BlockMatrix_2_1{T,D,V,Mtop<:AbstractMatrix{T},Mbot<:AbstractMatrix{T}} <: AbstractMatrix{T}
+struct BlockMatrix_2_1{T,D,Mtop<:AbstractMatrix{T},Mbot<:AbstractMatrix{T}} <: AbstractMatrix{T}
     top::Mtop
     bot::Mbot
 end
@@ -107,13 +96,12 @@ function BlockMatrix_2_1(
     bot::Mbot,
     ::Val{D},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D,Mtop<:AbstractMatrix{T},Mbot<:AbstractMatrix{T}}
-    return BlockMatrix_2_1{T,D,Val{:small},Mtop,Mbot}(top, bot)
+    return BlockMatrix_2_1{T,D,Mtop,Mbot}(top, bot)
 end
 
 Base.@propagate_inbounds @inline function Base.getindex(
-    A::BlockMatrix_2_1{T,D,Val{:small}}, i::Int32, j::Int32,
+    A::BlockMatrix_2_1{T,D}, i::Int32, j::Int32,
 ) where {T,D}
     if i <= D
         return A.top[i, j]
@@ -123,7 +111,7 @@ Base.@propagate_inbounds @inline function Base.getindex(
 end
 
 Base.@propagate_inbounds @inline function Base.setindex!(
-    A::BlockMatrix_2_1{T,D,Val{:small}}, v::T, i::Int32, j::Int32,
+    A::BlockMatrix_2_1{T,D}, v::T, i::Int32, j::Int32,
 ) where {T,D}
     if i <= D
         return A.top[i, j] = v
@@ -132,9 +120,9 @@ Base.@propagate_inbounds @inline function Base.setindex!(
     end
 end
 
-Base.size(::BlockMatrix_2_1{T,D,Val{:small}}) where {T,D} = (2i32 * D, D)
+Base.size(::BlockMatrix_2_1{T,D}) where {T,D} = (2i32 * D, D)
 
-struct BlockMatrixLowerTrig_2_2{T,D,V,Mtop<:AbstractMatrix{T},Mbotleft<:AbstractMatrix{T},Mbotright<:AbstractMatrix{T}} <: AbstractMatrix{T}
+struct BlockMatrixLowerTrig_2_2{T,D,Mtop<:AbstractMatrix{T},Mbotleft<:AbstractMatrix{T},Mbotright<:AbstractMatrix{T}} <: AbstractMatrix{T}
     top::Mtop
     bot_left::Mbotleft
     bot_right::Mbotright
@@ -146,13 +134,12 @@ function BlockMatrixLowerTrig_2_2(
     bot_right::Mbotright,
     ::Val{D},
     warp_matrix_id::Int32,
-    ::Val{:small},
 ) where {T,D,Mtop<:AbstractMatrix{T},Mbotleft<:AbstractMatrix{T},Mbotright<:AbstractMatrix{T}}
-    return BlockMatrixLowerTrig_2_2{T,D,Val{:small},Mtop,Mbotleft,Mbotright}(top, bot_left, bot_right)
+    return BlockMatrixLowerTrig_2_2{T,D,Mtop,Mbotleft,Mbotright}(top, bot_left, bot_right)
 end
 
 Base.@propagate_inbounds @inline function Base.getindex(
-    A::BlockMatrixLowerTrig_2_2{T,D,Val{:small}}, i::Int32, j::Int32,
+    A::BlockMatrixLowerTrig_2_2{T,D}, i::Int32, j::Int32,
 ) where {T,D}
     if i <= D
         if j > D
@@ -172,7 +159,7 @@ Base.@propagate_inbounds @inline function Base.getindex(
 end
 
 Base.@propagate_inbounds @inline function Base.setindex!(
-    A::BlockMatrixLowerTrig_2_2{T,D,Val{:small}}, v::T, i::Int32, j::Int32,
+    A::BlockMatrixLowerTrig_2_2{T,D}, v::T, i::Int32, j::Int32,
 ) where {T,D}
     if i <= D
         if j > D
@@ -190,56 +177,30 @@ Base.@propagate_inbounds @inline function Base.setindex!(
         end
     end
 end
-Base.size(::BlockMatrixLowerTrig_2_2{T,D,Val{:small}}) where {T,D} = (2i32 * D, 2i32 * D)
+Base.size(::BlockMatrixLowerTrig_2_2{T,D}) where {T,D} = (2i32 * D, 2i32 * D)
 
 @propagate_inbounds @inline function Base.getindex(
-    A::BlockMatrix_2_1{T,D,Val{:small}}, i::Int, j::Int
+    A::BlockMatrix_2_1{T,D}, i::Int, j::Int
 ) where {T,D}
     return getindex(A, Int32(i), Int32(j))
 end
 
 @propagate_inbounds @inline function Base.setindex!(
-    A::BlockMatrix_2_1{T,D,Val{:small}}, v::T, i::Int, j::Int
+    A::BlockMatrix_2_1{T,D}, v::T, i::Int, j::Int
 ) where {T,D}
     return setindex!(A, v, Int32(i), Int32(j))
 end
 
 @propagate_inbounds @inline function Base.getindex(
-    A::BlockMatrixLowerTrig_2_2{T,D,Val{:small}}, i::Int, j::Int
+    A::BlockMatrixLowerTrig_2_2{T,D}, i::Int, j::Int
 ) where {T,D}
     return getindex(A, Int32(i), Int32(j))
 end
 
 @propagate_inbounds @inline function Base.setindex!(
-    A::BlockMatrixLowerTrig_2_2{T,D,Val{:small}}, v::T, i::Int, j::Int
+    A::BlockMatrixLowerTrig_2_2{T,D}, v::T, i::Int, j::Int
 ) where {T,D}
     return setindex!(A, v, Int32(i), Int32(j))
-end
-
-"""
-Get index method for memory layout where one matrix is handled by D^2 threads.
-"""
-Base.@propagate_inbounds @inline function Base.getindex(
-    A::DualAccessMatrix{T,D,Val{:large}}, i::Int32, j::Int32
-) where {T,D}
-    interm_pad_freq = div(32i32, D & -D) * D
-    raw_idx = A.offset + (j - 1) * D + i
-    padded_amount = (raw_idx - 1i32) ÷ interm_pad_freq
-
-    return A.shmem[raw_idx + padded_amount]
-end
-
-"""
-Set index method for memory layout where one matrix is handled by D^2 threads.
-"""
-Base.@propagate_inbounds @inline function Base.setindex!(
-    A::DualAccessMatrix{T,D,Val{:large}}, v::T, i::Int32, j::Int32
-) where {T,D}
-    interm_pad_freq = div(32i32, D & -D) * D
-    raw_idx = A.offset + (j - 1) * D + i
-    padded_amount = (raw_idx - 1i32) ÷ interm_pad_freq
-
-    return A.shmem[raw_idx + padded_amount] = v
 end
 
 # Wrappers to handle Int32 case
@@ -251,19 +212,19 @@ end
 
 # Support regular Int indexing (needed for Adjoint and other wrappers)
 @propagate_inbounds @inline function Base.getindex(
-    A::DualAccessMatrix{T,D,V}, i::Int, j::Int
-) where {T,D,V}
+    A::DualAccessMatrix{T,D}, i::Int, j::Int
+) where {T,D}
     return getindex(A, Int32(i), Int32(j))
 end
 
 @propagate_inbounds @inline function Base.setindex!(
-    A::DualAccessMatrix{T,D,V}, v::T, i::Int, j::Int
-) where {T,D,V}
+    A::DualAccessMatrix{T,D}, v::T, i::Int, j::Int
+) where {T,D}
     return setindex!(A, v, Int32(i), Int32(j))
 end
 
-@inline Base.size(::DualAccessMatrix{T,D,V}) where {T,D,V} = (D, D)
-@inline Base.length(::DualAccessMatrix{T,D,V}) where {T,D,V} = D * D
+@inline Base.size(::DualAccessMatrix{T,D}) where {T,D} = (D, D)
+@inline Base.length(::DualAccessMatrix{T,D}) where {T,D} = D * D
 @inline Base.IndexStyle(::Type{<:DualAccessMatrix}) = IndexCartesian()
 
 ########################
@@ -528,62 +489,62 @@ end
 """
 Abstract DualAccessMatrix wrapper type
 """
-abstract type DualAccessMatrixWrapper{T,D,V} <: AbstractMatrix{T} end
+abstract type DualAccessMatrixWrapper{T,D} <: AbstractMatrix{T} end
 
-Base.parent(A::DualAccessMatrixWrapper{T,D,V}) where {T,D,V} = A.parent
-Base.size(A::DualAccessMatrixWrapper{T,D,V}) where {T,D,V} = size(parent(A))
+Base.parent(A::DualAccessMatrixWrapper{T,D}) where {T,D} = A.parent
+Base.size(A::DualAccessMatrixWrapper{T,D}) where {T,D} = size(parent(A))
 
 """
 Default getters and setters, no-ops
 """
 @inline function wrapper_get(
-    A::DualAccessMatrixWrapper{T,D,V}, v::T, i::Int32, j::Int32,
-) where {T,D,V}
+    A::DualAccessMatrixWrapper{T,D}, v::T, i::Int32, j::Int32,
+) where {T,D}
     return v
 end
 
 @inline function wrapper_set(
-    A::DualAccessMatrixWrapper{T,D,V}, v::T, i::Int32, j::Int32,
-) where {T,D,V}
+    A::DualAccessMatrixWrapper{T,D}, v::T, i::Int32, j::Int32,
+) where {T,D}
     return v
 end
 
 Base.@propagate_inbounds @inline function Base.getindex(
-    A::DualAccessMatrixWrapper{T,D,V}, i::Int32, j::Int32,
-) where {T,D,V}
+    A::DualAccessMatrixWrapper{T,D}, i::Int32, j::Int32,
+) where {T,D}
     return wrapper_get(A, parent(A)[i, j], i, j)
 end
 
 Base.@propagate_inbounds @inline function Base.setindex!(
-    A::DualAccessMatrixWrapper{T,D,V}, v::T, i::Int32, j::Int32,
-) where {T,D,V}
+    A::DualAccessMatrixWrapper{T,D}, v::T, i::Int32, j::Int32,
+) where {T,D}
     return parent(A)[i, j] = wrapper_set(A, v, i, j)
 end
 
 """
 Wrapper op for I - A
 """
-struct IAddSubGetterMatrix{T,D,V} <: DualAccessMatrixWrapper{T,D,V}
-    parent::DualAccessMatrix{T,D,V}
+struct IAddSubGetterMatrix{T,D} <: DualAccessMatrixWrapper{T,D}
+    parent::DualAccessMatrix{T,D}
     a::T
     b::T
 end
 
 Base.@propagate_inbounds @inline function wrapper_get(
-    A::IAddSubGetterMatrix{T,D,V}, v::T, i::Int32, j::Int32,
-) where {T,D,V}
+    A::IAddSubGetterMatrix{T,D}, v::T, i::Int32, j::Int32,
+) where {T,D}
     return (i == j) * one(T) * A.a + A.b * v
 end
 
-struct IAddSubSetterMatrix{T,D,V} <: DualAccessMatrixWrapper{T,D,V}
-    parent::DualAccessMatrix{T,D,V}
+struct IAddSubSetterMatrix{T,D} <: DualAccessMatrixWrapper{T,D}
+    parent::DualAccessMatrix{T,D}
     a::T
     b::T
 end
 
 Base.@propagate_inbounds @inline function wrapper_set(
-    A::IAddSubSetterMatrix{T,D,V}, v::T, i::Int32, j::Int32,
-) where {T,D,V}
+    A::IAddSubSetterMatrix{T,D}, v::T, i::Int32, j::Int32,
+) where {T,D}
     return (i == j) * one(T) * A.a + A.b * v
 end
 
@@ -699,7 +660,7 @@ Function for loading matrices from global memory to shared memory, for the case
 where one warp handles multiple matrices. Meant for small matrices.
 """
 @inline function intermediate_layout_load!(
-    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}
+    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32  # Works if nthreads is divisible by 32, otherwise needs to be cld(nthreads, 32)
@@ -749,7 +710,7 @@ end
 Only load lower triangular part, for Kalman filter
 """
 @inline function intermediate_layout_load!(
-    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{:lower},
+    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:lower},
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32  # Works if nthreads is divisible by 32, otherwise needs to be cld(nthreads, 32)
@@ -813,7 +774,7 @@ This is the warp independent version, where one warp only writes matrices that
 the warp was responsible for in previous calculations.
 """
 @inline function intermediate_layout_write!(
-    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{:indep},
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:indep},
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -861,7 +822,7 @@ end
 Triangular write, for Kalman filter
 """
 @inline function intermediate_layout_write!(
-    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{:indep}, ::Val{:lower}
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:indep}, ::Val{:lower}
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -918,7 +879,7 @@ and write to global memory, therefore also touching matrices that the specific
 warp wasn't responsible in earlier calculations.
 """
 @inline function intermediate_layout_write!(
-    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}, ::Val{:conseq}
+    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:conseq}
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -969,7 +930,7 @@ Function that transfers matrices from intermediate layout to dual memory layout.
 This is for the case where one warp handles multiple matrices, meant for small matrices.
 """
 @inline function interm_to_dual_transfer!(
-    shmem_dual, shmem_interm, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}
+    shmem_dual, shmem_interm, ::Val{D}, ::Val{nthreads}, N::Int32
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -1021,7 +982,7 @@ Function that transfers matrices from dual layout to intermediate memory layout.
 This is for the case where one warp handles multiple matrices, meant for small matrices.
 """
 @inline function dual_to_interm_transfer!(
-    shmem_interm, shmem_dual, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small}
+    shmem_interm, shmem_dual, ::Val{D}, ::Val{nthreads}, N::Int32
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -1068,102 +1029,8 @@ This is for the case where one warp handles multiple matrices, meant for small m
     return nothing
 end
 
-@inline function _get_large_n_mats_per_block(
-    ::Val{D}, ::Val{nthreads}, ::Val{:conseq}
-) where {D,nthreads}
-    return nthreads ÷ (D * D)
-end
-
-@inline function _get_large_n_mats_per_block(
-    ::Val{D}, ::Val{nthreads}, ::Val{:indep}
-) where {D,nthreads}
-    return 1i32
-end
-
-"""
-Function for loading matrices from global memory to shared memory, for the case
-where one matrix is handled by D^2 threads. Meant for large matrices up to D=32.
-"""
 @inline function intermediate_layout_load!(
-    shmem, global_arr, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:large}, ::Val{mode}
-) where {D,nthreads,mode}
-    tid = threadIdx().x
-    bid = blockIdx().x
-
-    n_mats_per_block = _get_large_n_mats_per_block(Val(D), Val(nthreads), Val(mode))
-
-    interm_pad_freq = div(32i32, D & -D) * D
-    padded_amount_per_block = (n_mats_per_block * D * D - 1i32) ÷ interm_pad_freq
-    n_elements_per_block = D * D * n_mats_per_block + padded_amount_per_block
-
-    base_addr = (bid - 1i32) * n_mats_per_block * D * D + 1i32
-    align_offset = (base_addr - 1i32) % 32i32
-
-    offset = 0i32
-
-    while offset < n_elements_per_block + align_offset
-        raw_idx = offset + tid - align_offset
-        raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32
-        grid_mtrx_load = (bid - 1i32) * n_mats_per_block + raw_mtrx
-
-        if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N && raw_idx > 0i32
-            padded_amount = (raw_idx - 1i32) ÷ interm_pad_freq
-
-            src_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
-            dest_idx = raw_idx + padded_amount
-
-            @inbounds shmem[dest_idx] = global_arr[src_idx]
-        end
-
-        offset += nthreads
-    end
-
-    return nothing
-end
-
-"""
-Function for writing matrices from shared memory to global memory, for the case
-where one matrix is handled by D^2 threads. Meant for large matrices up to D=32.
-"""
-@inline function intermediate_layout_write!(
-    global_arr, shmem, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:large}, ::Val{mode}
-) where {D,nthreads,mode}
-    tid = threadIdx().x
-    bid = blockIdx().x
-
-    n_mats_per_block = _get_large_n_mats_per_block(Val(D), Val(nthreads), Val(mode))
-
-    interm_pad_freq = div(32i32, D & -D) * D
-    padded_amount_per_block = (n_mats_per_block * D * D - 1i32) ÷ interm_pad_freq
-    n_elements_per_block = D * D * n_mats_per_block + padded_amount_per_block
-
-    base_addr = (bid - 1i32) * n_mats_per_block * D * D + 1i32
-    align_offset = (base_addr - 1i32) % 32i32
-
-    offset = 0i32
-
-    while offset < n_elements_per_block + align_offset
-        raw_idx = offset + tid - align_offset
-        raw_mtrx = div(raw_idx - 1i32, D * D) + 1i32
-        grid_mtrx_load = (bid - 1i32) * n_mats_per_block + raw_mtrx
-
-        if raw_mtrx <= n_mats_per_block && grid_mtrx_load <= N && raw_idx > 0i32
-            padded_amount = (raw_idx - 1i32) ÷ interm_pad_freq
-
-            dest_idx = (bid - 1i32) * n_mats_per_block * D * D + raw_idx
-            src_idx = raw_idx + padded_amount
-
-            @inbounds global_arr[dest_idx] = shmem[src_idx]
-        end
-
-        offset += nthreads
-    end
-
-    return nothing
-end
-
-@inline function intermediate_layout_load!(
-    shmem, global_arr, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small},
+    shmem, global_arr, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32,
 ) where {D,D1,D2,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -1209,7 +1076,7 @@ end
 end
 
 @inline function intermediate_layout_load!(
-    shmem, global_arr, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, ::Val{n_mats_per_block}, N::Int32, ::Val{:small},
+    shmem, global_arr, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, ::Val{n_mats_per_block}, N::Int32,
 ) where {D,D1,D2,n_mats_per_block,nthreads}
     n_mats_per_warp = 32i32 ÷ D
 
@@ -1253,7 +1120,7 @@ end
 end
 
 @inline function interm_to_dual_transfer!(
-    shmem_dual, shmem_interm, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small},
+    shmem_dual, shmem_interm, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32,
 ) where {D,D1,D2,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -1295,7 +1162,7 @@ end
 end
 
 @inline function interm_to_dual_transfer!(
-    shmem_dual, shmem_interm, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, ::Val{n_mats_per_block}, N::Int32, ::Val{:small},
+    shmem_dual, shmem_interm, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, ::Val{n_mats_per_block}, N::Int32,
 ) where {D,D1,D2,n_mats_per_block,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     active_lanes = n_mats_per_warp * D
@@ -1346,7 +1213,7 @@ views appear in QR, triangular Kalman writes, etc., whereas the load path
 always pulls plain dense blocks from global memory.
 """
 @inline function dual_to_interm_transfer!(
-    shmem_interm, M_dual, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small},
+    shmem_interm, M_dual, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32,
 ) where {D,D1,D2,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -1385,7 +1252,7 @@ derived from `nthreads ÷ 32 * (32 ÷ D)`. Same wrapper-accepting `M_dual`
 contract as the no-`n_mats_per_block` variant.
 """
 @inline function dual_to_interm_transfer!(
-    shmem_interm, M_dual, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, ::Val{n_mats_per_block}, N::Int32, ::Val{:small},
+    shmem_interm, M_dual, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, ::Val{n_mats_per_block}, N::Int32,
 ) where {D,D1,D2,n_mats_per_block,nthreads}
     n_mats_per_warp = 32i32 ÷ D
 
@@ -1417,7 +1284,7 @@ contract as the no-`n_mats_per_block` variant.
 end
 
 @inline function intermediate_layout_write!(
-    global_arr, shmem, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{:small},
+    global_arr, shmem, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32,
 ) where {D,D1,D2,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -1463,7 +1330,7 @@ end
 end
 
 @inline function intermediate_layout_write!(
-    global_arr, shmem, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, ::Val{n_mats_per_block}, N::Int32, ::Val{:small},
+    global_arr, shmem, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, ::Val{n_mats_per_block}, N::Int32,
 ) where {D,D1,D2,n_mats_per_block,nthreads}
     n_mats_per_warp = 32i32 ÷ D
 

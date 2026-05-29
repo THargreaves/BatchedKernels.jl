@@ -14,7 +14,6 @@ using KernelAbstractions.Extras: @unroll
     ::Val{D},
     ::Val{nthreads},
     N::Int32,
-    ::Val{:small},
     ::Val{mode},
 ) where {D,nthreads,mode}
     n_mats_per_warp = 32i32 ÷ D
@@ -77,17 +76,17 @@ using KernelAbstractions.Extras: @unroll
     b = SharedVector(shmem_vec_b, Val(D))
 
     # Load P
-    intermediate_layout_load!(shmem_1, Ps_in, Val(D), Val(nthreads), N, Val(:small))#, Val(:lower))
-    interm_to_dual_transfer!(shmem_3, shmem_1, Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_1, Ps_in, Val(D), Val(nthreads), N)#, Val(:lower))
+    interm_to_dual_transfer!(shmem_3, shmem_1, Val(D), Val(nthreads), N)
 
     # Load µ, z
     vector_load!(shmem_vec_1, µ_in, Val(D), Val(nthreads), N)
     vector_load!(shmem_vec_2, z_in, Val(D), Val(nthreads), N)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-        B1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-        B2 = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
-        B3 = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
+        B1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
+        B2 = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
+        B3 = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id)
         v1 = BatchedVector(shmem_vec_1, Val(D), warp_matrix_id)
         v2 = BatchedVector(shmem_vec_2, Val(D), warp_matrix_id)
         v3 = BatchedVector(shmem_vec_3, Val(D), warp_matrix_id)
@@ -96,16 +95,16 @@ using KernelAbstractions.Extras: @unroll
         # #### PREDICT STEP ####
         # ######################
 
-        batch_op!(*, B2, A, B3, d, Val(D), Val(:small))
-        batch_op!(*, B1, B2, A', d, Val(D), Val(:small))
-        batch_op!(+, B3, B1, Q, d, Val(D), Val(:small))
+        batch_op!(*, B2, A, B3, d, Val(D))
+        batch_op!(*, B1, B2, A', d, Val(D))
+        batch_op!(+, B3, B1, Q, d, Val(D))
         # B3 now contains P_pred. We keep this until the final update step.
 
         # v3 <- A * µ
-        batch_op!(*, v3, A, v1, d, Val(D), Val(:small))
+        batch_op!(*, v3, A, v1, d, Val(D))
 
         # v1 <- (A * µ) + b
-        batch_op!(+, v1, v3, b, d, Val(D), Val(:small))
+        batch_op!(+, v1, v3, b, d, Val(D))
         # v1 now contains µ_{k|k-1}
 
         #####################
@@ -116,24 +115,24 @@ using KernelAbstractions.Extras: @unroll
         # We compute K' = S^{-1} * H * P_pred, then K = K'
 
         # H * P_pred → B1
-        batch_op!(*, B1, H, B3, d, Val(D), Val(:small))
+        batch_op!(*, B1, H, B3, d, Val(D))
         # B1 now contains H * P_pred = (P_pred * H')' since P_pred is symmetric
 
         # H * P_pred * H' → B2
-        batch_op!(*, B2, B1, H', d, Val(D), Val(:small))
+        batch_op!(*, B2, B1, H', d, Val(D))
 
         # S = H*P_pred*H' + R → B2
-        batch_op!(+, B2, B2, R, d, Val(D), Val(:small))
+        batch_op!(+, B2, B2, R, d, Val(D))
 
         # In-place Cholesky of S (B2 becomes U where S = U'*U)
-        batch_op!(cholesky, B2, d, Val(D), n_mats_per_warp, warp_matrix_id, Val(:small))
+        batch_op!(cholesky, B2, d, Val(D), n_mats_per_warp, warp_matrix_id)
 
         # In-place forward solve U' \ B1 → B1 (X = (U')^{-1} * H*P_pred)
         # We need U' for forward solve
-        batch_op!(\, LowerTriangular(B2'), B1, d, Val(D), Val(:small))
+        batch_op!(\, LowerTriangular(B2'), B1, d, Val(D))
 
         # Backward solve U \ B1 → B1 (K' = U^{-1} * X = S^{-1} * H * P_pred)
-        batch_op!(\, UpperTriangular(B2), B1, d, Val(D), Val(:small))
+        batch_op!(\, UpperTriangular(B2), B1, d, Val(D))
         # B1 now contains K'
 
         #####################
@@ -143,26 +142,26 @@ using KernelAbstractions.Extras: @unroll
         # Use P_new = (I - K*H) * P_pred form of update
 
         # Transpose K' in B2 to get K = P_pred * H' / S
-        batch_op!(*, IAddSubSetterMatrix(B2, 1.0f0, -1.0f0), B1', H, d, Val(D), Val(:small))
+        batch_op!(*, IAddSubSetterMatrix(B2, 1.0f0, -1.0f0), B1', H, d, Val(D))
         # B2 now contains (I - K*H)
 
         # (I - K * H) * x → v3
-        batch_op!(*, v3, B2, v1, d, Val(D), Val(:small))
+        batch_op!(*, v3, B2, v1, d, Val(D))
 
         # K * z → v1
-        batch_op!(*, v1, B1', v2, d, Val(D), Val(:small))
+        batch_op!(*, v1, B1', v2, d, Val(D))
 
         # x_new = (I - K*H) * x + K * z → v1
-        batch_op!(+, v1, v3, v1, d, Val(D), Val(:small))
+        batch_op!(+, v1, v3, v1, d, Val(D))
 
-        batch_op!(*, B1, B2, B3, d, Val(D), Val(:small))
+        batch_op!(*, B1, B2, B3, d, Val(D))
         # B2 now contains P_new = (I - K*H) * P_pred
     end
 
     # Write P_new (final output) - B2/shmem_2 contains P_new
-    dual_to_interm_transfer!(shmem_2, shmem_1, Val(D), Val(nthreads), N, Val(:small))
+    dual_to_interm_transfer!(shmem_2, shmem_1, Val(D), Val(nthreads), N)
     intermediate_layout_write!(
-        Ps_out, shmem_2, Val(D), Val(nthreads), N, Val(:small), Val(mode)#, Val(:lower),
+        Ps_out, shmem_2, Val(D), Val(nthreads), N, Val(mode)#, Val(:lower),
     )
 
     # Writing µ_new
@@ -182,7 +181,6 @@ end
     ::Val{nthreads},
     n_steps::Int32,
     N::Int32,
-    ::Val{:small},
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -231,14 +229,14 @@ end
     R = SharedMatrix(shmem_R, Val(D))
 
     # Load P
-    intermediate_layout_load!(shmem_1, Ps_in, Val(D), Val(D), Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_3, shmem_1, Val(D), Val(D), Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_1, Ps_in, Val(D), Val(D), Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_3, shmem_1, Val(D), Val(D), Val(D), Val(nthreads), N)
 
     sync_warp()
 
-    B1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-    B2 = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
-    B3 = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id, Val(:small))
+    B1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
+    B2 = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
+    B3 = DualAccessMatrix(shmem_3, Val(D), warp_matrix_id)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         for _ in 1i32:n_steps
@@ -246,9 +244,9 @@ end
             #### PREDICT STEP ####
             ######################
 
-            batch_op!(*, B2, A, B3, d, Val(D), Val(D), Val(D), Val(:small))
-            batch_op!(*, B3, B2, A', d, Val(D), Val(D), Val(D), Val(:small))
-            batch_op!(+, B1, B3, Q, d, Val(D), Val(D), Val(D), Val(:small))
+            batch_op!(*, B2, A, B3, d, Val(D), Val(D), Val(D))
+            batch_op!(*, B3, B2, A', d, Val(D), Val(D), Val(D))
+            batch_op!(+, B1, B3, Q, d, Val(D), Val(D), Val(D))
             # B1 now contains P_pred. We keep this until the final update step.
 
             #####################
@@ -259,23 +257,23 @@ end
             # We compute K' = S^{-1} * H * P_pred, then K = K'
 
             # H * P_pred → B1
-            batch_op!(*, B3, H, B1, d, Val(D), Val(D), Val(D), Val(:small))
+            batch_op!(*, B3, H, B1, d, Val(D), Val(D), Val(D))
             # B1 now contains H * P_pred = (P_pred * H')' since P_pred is symmetric
 
             # H * P_pred * H' → B2
-            batch_op!(*, B2, B3, H', d, Val(D), Val(D), Val(D), Val(:small))
+            batch_op!(*, B2, B3, H', d, Val(D), Val(D), Val(D))
 
             # S = H*P_pred*H' + R → B2
-            batch_op!(+, B2, B2, R, d, Val(D), Val(D), Val(D), Val(:small))
+            batch_op!(+, B2, B2, R, d, Val(D), Val(D), Val(D))
 
             # In-place Cholesky of S (B2 becomes U where S = U'*U)
-            batch_op!(cholesky, B2, B2, d, Val(D), Val(D), warp_matrix_id, Val(:small))
+            batch_op!(cholesky, B2, B2, d, Val(D), Val(D), warp_matrix_id)
 
             # In-place forward solve U' \ B1 → B1 (X = (U')^{-1} * H*P_pred)
             # We need U' for forward solve
-            batch_op!(\, B3, LowerTriangular(B2'), B3, d, Val(D), Val(D), Val(D), Val(:small))
+            batch_op!(\, B3, LowerTriangular(B2'), B3, d, Val(D), Val(D), Val(D))
             # Backward solve U \ B1 → B1 (K' = U^{-1} * X = S^{-1} * H * P_pred)
-            batch_op!(\, B3, UpperTriangular(B2), B3, d, Val(D), Val(D), Val(D), Val(:small))
+            batch_op!(\, B3, UpperTriangular(B2), B3, d, Val(D), Val(D), Val(D))
 
             #####################
             #### UPDATE STEP ####
@@ -284,16 +282,16 @@ end
             # Use P_new = (I - K*H) * P_pred form of update
 
             # Transpose K' in B2 to get K = P_pred * H' / S
-            batch_op!(*, IAddSubSetterMatrix(B2, 1.0f0, -1.0f0), B3', H, d, Val(D), Val(D), Val(D), Val(:small))
-            batch_op!(*, B3, B2, B1, d, Val(D), Val(D), Val(D), Val(:small))
+            batch_op!(*, IAddSubSetterMatrix(B2, 1.0f0, -1.0f0), B3', H, d, Val(D), Val(D), Val(D))
+            batch_op!(*, B3, B2, B1, d, Val(D), Val(D), Val(D))
             # B3 now contains P_new = (I - K*H) * P_pred
         end
     end
     
     sync_warp()
     # Write P_new (final output) - B2/shmem_2 contains P_new
-    dual_to_interm_transfer!(shmem_2, B3, Val(D), Val(D), Val(D), Val(nthreads), N, Val(:small))
-    intermediate_layout_write!(Ps_out, shmem_2, Val(D), Val(D), Val(D), Val(nthreads), N, Val(:small))
+    dual_to_interm_transfer!(shmem_2, B3, Val(D), Val(D), Val(D), Val(nthreads), N)
+    intermediate_layout_write!(Ps_out, shmem_2, Val(D), Val(D), Val(D), Val(nthreads), N)
 
     return nothing
 end
@@ -309,7 +307,6 @@ end
     ::Val{D},
     ::Val{nthreads},
     N::Int32,
-    ::Val{:small},
     ::Val{mode},   
 ) where {D,nthreads,mode}
     n_mats_per_warp = 32i32 ÷ D
@@ -359,39 +356,39 @@ end
     b = SharedVector(shmem_vec_b, Val(D))
 
     # Load P
-    intermediate_layout_load!(shmem_mat_1, Ps_in, Val(D), Val(nthreads), N, Val(:small))#, Val(:lower))
-    interm_to_dual_transfer!(shmem_mat_2, shmem_mat_1, Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_mat_1, Ps_in, Val(D), Val(nthreads), N)#, Val(:lower))
+    interm_to_dual_transfer!(shmem_mat_2, shmem_mat_1, Val(D), Val(nthreads), N)
 
     # Load µ
     vector_load!(shmem_vec_1, μ_in, Val(D), Val(nthreads), N)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-        B1 = DualAccessMatrix(shmem_mat_1, Val(D), warp_matrix_id, Val(:small))
-        B2 = DualAccessMatrix(shmem_mat_2, Val(D), warp_matrix_id, Val(:small))
+        B1 = DualAccessMatrix(shmem_mat_1, Val(D), warp_matrix_id)
+        B2 = DualAccessMatrix(shmem_mat_2, Val(D), warp_matrix_id)
         v1 = BatchedVector(shmem_vec_1, Val(D), warp_matrix_id)
         v2 = BatchedVector(shmem_vec_2, Val(D), warp_matrix_id)
 
         # B1 <- A * P
-        batch_op!(*, B1, A, B2, d, Val(D), Val(:small))
+        batch_op!(*, B1, A, B2, d, Val(D))
 
         # B2 <- (A * P) * A'
-        batch_op!(*, B2, B1, A', d, Val(D), Val(:small))
+        batch_op!(*, B2, B1, A', d, Val(D))
 
         # B1 <- (A * P * A') + Q
-        batch_op!(+, B1, B2, Q, d, Val(D), Val(:small))
+        batch_op!(+, B1, B2, Q, d, Val(D))
         # B1 now contains P_pred
         
         # v2 <- A * µ
-        batch_op!(*, v2, A, v1, d, Val(D), Val(:small))
+        batch_op!(*, v2, A, v1, d, Val(D))
 
         # v2 <- (A * µ) + b
-        batch_op!(+, v2, v2, b, d, Val(D), Val(:small))
+        batch_op!(+, v2, v2, b, d, Val(D))
     end
 
     # Writing P_pred
-    dual_to_interm_transfer!(shmem_mat_2, shmem_mat_1, Val(D), Val(nthreads), N, Val(:small))
+    dual_to_interm_transfer!(shmem_mat_2, shmem_mat_1, Val(D), Val(nthreads), N)
     intermediate_layout_write!(
-        Ps_out, shmem_mat_2, Val(D), Val(nthreads), N, Val(:small), Val(mode)#, Val(:lower),
+        Ps_out, shmem_mat_2, Val(D), Val(nthreads), N, Val(mode)#, Val(:lower),
     )
 
     # Writing µ_pred
@@ -411,7 +408,6 @@ end
     ::Val{D},
     ::Val{nthreads},
     N::Int32,
-    ::Val{:small},
     ::Val{mode},   
 ) where {D,nthreads,mode}
     n_mats_per_warp = 32i32 ÷ D
@@ -456,17 +452,17 @@ end
     R = SharedMatrix(shmem_R, Val(D))
 
     # Load P_pred
-    intermediate_layout_load!(shmem_mat_1, Ps_in, Val(D), Val(nthreads), N, Val(:small))#, Val(:lower))
-    interm_to_dual_transfer!(shmem_mat_3, shmem_mat_1, Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_mat_1, Ps_in, Val(D), Val(nthreads), N)#, Val(:lower))
+    interm_to_dual_transfer!(shmem_mat_3, shmem_mat_1, Val(D), Val(nthreads), N)
 
     # Load x and z
     vector_load!(shmem_vec_1, x_in, Val(D), Val(nthreads), N)
     vector_load!(shmem_vec_2, z_in, Val(D), Val(nthreads), N)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-        B1 = DualAccessMatrix(shmem_mat_1, Val(D), warp_matrix_id, Val(:small))
-        B2 = DualAccessMatrix(shmem_mat_2, Val(D), warp_matrix_id, Val(:small))
-        B3 = DualAccessMatrix(shmem_mat_3, Val(D), warp_matrix_id, Val(:small))
+        B1 = DualAccessMatrix(shmem_mat_1, Val(D), warp_matrix_id)
+        B2 = DualAccessMatrix(shmem_mat_2, Val(D), warp_matrix_id)
+        B3 = DualAccessMatrix(shmem_mat_3, Val(D), warp_matrix_id)
         v1 = BatchedVector(shmem_vec_1, Val(D), warp_matrix_id)
         v2 = BatchedVector(shmem_vec_2, Val(D), warp_matrix_id)
         v3 = BatchedVector(shmem_vec_3, Val(D), warp_matrix_id)
@@ -479,26 +475,26 @@ end
         # We compute K' = S^{-1} * H * P_pred, then K = K'
 
         # H * P_pred → B1
-        batch_op!(*, B1, H, B3, d, Val(D), Val(:small))
+        batch_op!(*, B1, H, B3, d, Val(D))
         # B1 now contains H * P_pred = (P_pred * H')' since P_pred is symmetric
 
         # H * P_pred * H' → B2
-        batch_op!(*, B2, B1, H', d, Val(D), Val(:small))
+        batch_op!(*, B2, B1, H', d, Val(D))
 
         # S = H*P_pred*H' + R → B2
-        batch_op!(+, B2, B2, R, d, Val(D), Val(:small))
+        batch_op!(+, B2, B2, R, d, Val(D))
         # B2 now contains S
 
         # In-place Cholesky of S
-        batch_op!(cholesky, B2, d, Val(D), n_mats_per_warp, warp_matrix_id, Val(:small))
+        batch_op!(cholesky, B2, d, Val(D), n_mats_per_warp, warp_matrix_id)
         # B2 now contains U where S = U' * U
 
         # In-place forward solve U' \ B1 → B1 (X = (U')^{-1} * H*P_pred)
         # We need U' for forward solve
-        batch_op!(\, LowerTriangular(B2'), B1, d, Val(D), Val(:small))
+        batch_op!(\, LowerTriangular(B2'), B1, d, Val(D))
 
         # Backward solve U \ B1 → B1 (K' = U^{-1} * X = S^{-1} * H * P_pred)
-        batch_op!(\, UpperTriangular(B2), B1, d, Val(D), Val(:small))
+        batch_op!(\, UpperTriangular(B2), B1, d, Val(D))
         # B1 now contains K'
 
         #####################
@@ -507,26 +503,26 @@ end
 
         # Use P_new = (I - K*H) * P_pred form of update
         # Transpose K' in B2 to get K = P_pred * H' / S
-        batch_op!(*, IAddSubSetterMatrix(B2, 1.0f0, -1.0f0), B1', H, d, Val(D), Val(:small))
+        batch_op!(*, IAddSubSetterMatrix(B2, 1.0f0, -1.0f0), B1', H, d, Val(D))
         # B2 now contains (I - K*H)
 
         # (I - K * H) * x → v3
-        batch_op!(*, v3, B2, v1, d, Val(D), Val(:small))
+        batch_op!(*, v3, B2, v1, d, Val(D))
 
         # K * z → v1
-        batch_op!(*, v1, B1', v2, d, Val(D), Val(:small))
+        batch_op!(*, v1, B1', v2, d, Val(D))
 
         # x_new = (I - K*H) * x + K * z → v1
-        batch_op!(+, v1, v3, v1, d, Val(D), Val(:small))
+        batch_op!(+, v1, v3, v1, d, Val(D))
 
-        batch_op!(*, B1, B2, B3, d, Val(D), Val(:small))
+        batch_op!(*, B1, B2, B3, d, Val(D))
         # B2 now contains P_new = (I - K*H) * P_pred
     end
 
     # Writing P_pred
-    dual_to_interm_transfer!(shmem_mat_2, shmem_mat_1, Val(D), Val(nthreads), N, Val(:small))
+    dual_to_interm_transfer!(shmem_mat_2, shmem_mat_1, Val(D), Val(nthreads), N)
     intermediate_layout_write!(
-        Ps_out, shmem_mat_2, Val(D), Val(nthreads), N, Val(:small), Val(mode)#, Val(:lower),
+        Ps_out, shmem_mat_2, Val(D), Val(nthreads), N, Val(mode)#, Val(:lower),
     )
 
     # Writing µ_new
@@ -547,7 +543,6 @@ end
     ::Val{nthreads},
     n_steps::Int32,
     N::Int32,
-    ::Val{:small},
 ) where {D,THRESH,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -590,8 +585,8 @@ end
     end
     sync_threads()
 
-    B1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-    B2 = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+    B1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
+    B2 = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
 
     A = SharedMatrix(shmem_A, Val(D), Val(D))
     S_Q = SharedMatrix(shmem_S_Q, Val(D), Val(D))
@@ -599,8 +594,8 @@ end
     S_R = SharedMatrix(shmem_S_R, Val(D), Val(D))
 
     # Load S (lower tri)
-    intermediate_layout_load!(shmem_2, Ss_in, Val(D), Val(D), Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_1, shmem_2, Val(D), Val(D), Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_2, Ss_in, Val(D), Val(D), Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_1, shmem_2, Val(D), Val(D), Val(D), Val(nthreads), N)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         for step in 1i32:n_steps
@@ -609,18 +604,18 @@ end
             ######################
 
             # X = A * S = A * B1
-            batch_op!(*, B2, A, LowerTriangular(ifelse(step == 1i32, B1, B1')), d, Val(D), Val(D), Val(D), Val(:small))
+            batch_op!(*, B2, A, LowerTriangular(ifelse(step == 1i32, B1, B1')), d, Val(D), Val(D), Val(D))
 
             # Form predict pre-array:
             # M_pred = [(AS)'; S_Q'] = [B2'; S_Q'] (2D x D)
             # QR of M_pred -> R, stored in B1
-            M_pred = BlockMatrix_2_1(B2', S_Q', Val(D), warp_matrix_id, Val(:small))
+            M_pred = BlockMatrix_2_1(B2', S_Q', Val(D), warp_matrix_id)
 
-            batch_op!(qr, B1, M_pred, d, Val(D), Val(2), Val(1), warp_matrix_id, Val(:small))
+            batch_op!(qr, B1, M_pred, d, Val(D), Val(2), Val(1), warp_matrix_id)
             # B1 = R = U_pred (upper tri)
 
             # Y = H * S_pred = H * B1'
-            batch_op!(*, B2, H, LowerTriangular(B1'), d, Val(D), Val(D), Val(D), Val(:small))
+            batch_op!(*, B2, H, LowerTriangular(B1'), d, Val(D), Val(D), Val(D))
 
             # Form update pre-array:
             # M_upd =   [S_R'   0       ]
@@ -628,9 +623,9 @@ end
             # =
             #           [S_R'   - ]
             #           [Y'     B1]
-            M_upd = BlockMatrixLowerTrig_2_2(S_R', B2', UpperTriangular(B1), Val(D), warp_matrix_id, Val(:small))
+            M_upd = BlockMatrixLowerTrig_2_2(S_R', B2', UpperTriangular(B1), Val(D), warp_matrix_id)
             
-            batch_op!(qr, B1, M_upd, d, Val(D), Val(THRESH), Val(2), Val(2), warp_matrix_id, Val(:small))
+            batch_op!(qr, B1, M_upd, d, Val(D), Val(THRESH), Val(2), Val(2), warp_matrix_id)
             # B1' = R_22' = L_new
         end
     end
@@ -638,8 +633,8 @@ end
     sync_warp()
 
     # Write S_out (final output)
-    dual_to_interm_transfer!(shmem_2, LowerTriangular(B1'), Val(D), Val(D), Val(D), Val(nthreads), N, Val(:small))
-    intermediate_layout_write!(Ss_out, shmem_2, Val(D), Val(D), Val(D), Val(nthreads), N, Val(:small))
+    dual_to_interm_transfer!(shmem_2, LowerTriangular(B1'), Val(D), Val(D), Val(D), Val(nthreads), N)
+    intermediate_layout_write!(Ss_out, shmem_2, Val(D), Val(D), Val(D), Val(nthreads), N)
 
     return nothing
 end
@@ -655,7 +650,6 @@ end
     ::Val{nthreads},
     n_steps::Int32,
     N::Int32,
-    ::Val{:small},
 ) where {D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -700,8 +694,8 @@ end
     end
     sync_threads()
 
-    B1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
-    B2 = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
+    B1 = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
+    B2 = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
 
     A = SharedMatrix(shmem_A, Val(Ddiv2), Val(Ddiv2))
     S_Q = SharedMatrix(shmem_S_Q, Val(Ddiv2), Val(Ddiv2))
@@ -709,8 +703,8 @@ end
     S_R = SharedMatrix(shmem_S_R, Val(Ddiv2), Val(Ddiv2))
 
     # Load S (lower tri) shape = (Ddiv2,Ddiv2)
-    intermediate_layout_load!(shmem_2, Ss_in, Val(Ddiv2), Val(Ddiv2), Val(D), Val(nthreads), N, Val(:small))
-    interm_to_dual_transfer!(shmem_1, shmem_2, Val(Ddiv2), Val(Ddiv2), Val(D), Val(nthreads), N, Val(:small))
+    intermediate_layout_load!(shmem_2, Ss_in, Val(Ddiv2), Val(Ddiv2), Val(D), Val(nthreads), N)
+    interm_to_dual_transfer!(shmem_1, shmem_2, Val(Ddiv2), Val(Ddiv2), Val(D), Val(nthreads), N)
 
     if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
         for step in 1i32:n_steps
@@ -719,7 +713,7 @@ end
             ######################
 
             # X = A * S = A * B1
-            batch_op!(*, B2, A, LowerTriangular(B1), d, Val(Ddiv2), Val(Ddiv2), Val(D), Val(:small))
+            batch_op!(*, B2, A, LowerTriangular(B1), d, Val(Ddiv2), Val(Ddiv2), Val(D))
 
             # Form predict pre-array in B1:
             # M_pred = [(AS)'; S_Q'] = [B2'; S_Q'] (2D x D)
@@ -735,11 +729,11 @@ end
             # B1 contains M_pred
 
             # QR on M_pred
-            batch_op!(qr, B2, B1, d, Val(D), Val(Ddiv2), Val(D), warp_matrix_id, Val(:small))
+            batch_op!(qr, B2, B1, d, Val(D), Val(Ddiv2), Val(D), warp_matrix_id)
             # B2 contains R_pred
 
             # Y = H * S_pred = H * B2'
-            batch_op!(*, B1, H, LowerTriangular(B2'), d, Val(Ddiv2), Val(Ddiv2), Val(D), Val(:small))
+            batch_op!(*, B1, H, LowerTriangular(B2'), d, Val(Ddiv2), Val(Ddiv2), Val(D))
             # B1 contains Y
 
             # Form update pre-array:
@@ -772,7 +766,7 @@ end
             # B2 contains M_upd
 
             # Perform QR in-place on B1
-            batch_op!(qr, B2, B2, d, Val(D), Val(D), Val(D), warp_matrix_id, Val(:small))
+            batch_op!(qr, B2, B2, d, Val(D), Val(D), Val(D), warp_matrix_id)
             # B2_{bottom right} = L_new' = R_22
 
             # Move R_22 to upper right half for standard format
@@ -789,8 +783,8 @@ end
     sync_warp()
 
     # Write S_out (final output)
-    dual_to_interm_transfer!(shmem_2, B1, Val(Ddiv2), Val(Ddiv2), Val(D), Val(nthreads), N, Val(:small))
-    intermediate_layout_write!(Ss_out, shmem_2, Val(Ddiv2), Val(Ddiv2), Val(D), Val(nthreads), N, Val(:small))
+    dual_to_interm_transfer!(shmem_2, B1, Val(Ddiv2), Val(Ddiv2), Val(D), Val(nthreads), N)
+    intermediate_layout_write!(Ss_out, shmem_2, Val(Ddiv2), Val(Ddiv2), Val(D), Val(nthreads), N)
 
     return nothing
 end

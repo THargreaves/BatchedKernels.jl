@@ -40,7 +40,6 @@
                     Val(Int32(D)),
                     Val(Int32(nthreads)),
                     Int32(N),
-                    Val(:small),
                     mode,
                 )
 
@@ -102,7 +101,6 @@ end
                 Val(Int32(D)),
                 Val(Int32(nthreads)),
                 Int32(N),
-                Val(:small),
             )
             Cs_result = Array(Cs)
 
@@ -209,7 +207,6 @@ end
                     Val(Int32(D)),
                     Val(Int32(nthreads)),
                     Int32(N),
-                    Val(:small),
                 )
                 Gs_result = Array(Gs)
 
