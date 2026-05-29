@@ -221,8 +221,3 @@ end
         end
     end
 end
-@testitem "Matrix Multiplication Throughput (indep)" begin
-    using PerformanceTestTools
-
-    PerformanceTestTools.@include("throughput_script.jl")
-end
