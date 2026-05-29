@@ -66,13 +66,23 @@ function pool_kind(meta::NodeMeta)
     return error("pool_kind: unsupported batched/shared trace type $T")
 end
 
-function plan_memory(tape::Tape)
+function plan_memory(tape::Tape; order::AbstractVector{Int}=1:length(tape.nodes))
     N = length(tape.nodes)
+    length(order) == N || error("plan_memory: order length $(length(order)) ≠ tape length $N")
+
+    # Position of each node in the chosen execution order. Last-use is in
+    # *position* coordinates so the free-list semantics carry over unchanged
+    # even when codegen walks the tape out of natural order.
+    pos = Dict{Int,Int}()
+    for (p, id) in enumerate(order)
+        pos[id] = p
+    end
 
     last_use = Dict{Int,Int}()
-    for (i, node) in enumerate(tape.nodes)
+    for (p, id) in enumerate(order)
+        node = tape.nodes[id]
         for ref in node_refs(node)
-            last_use[ref.id] = max(get(last_use, ref.id, 0), i)
+            last_use[ref.id] = max(get(last_use, ref.id, 0), p)
         end
     end
     last_use[tape.output.id] = N + 1
@@ -122,7 +132,9 @@ function plan_memory(tape::Tape)
     next_M = 1
     next_V = 1
 
-    for (i, (node, meta)) in enumerate(zip(tape.nodes, tape.metas))
+    for (p, i) in enumerate(order)
+        node = tape.nodes[i]
+        meta = tape.metas[i]
         sk = slot_kind(node, meta)
         sk in (:batched, :scalar) || continue
         # Batched matrix InputNodes are not slot-backed: their value lives in
@@ -146,7 +158,7 @@ function plan_memory(tape::Tape)
             in_place_idx = _maybe_inplace_idx(tape, node)
             auto_inplace_slot =
                 in_place_idx === nothing ?
-                _maybe_auto_inplace_slot(tape, node, i, k, slots, last_use) : nothing
+                _maybe_auto_inplace_slot(tape, node, p, k, slots, last_use) : nothing
             if in_place_idx !== nothing
                 target_ref = node.args[in_place_idx]
                 owner = resolve_slot_owner(tape, target_ref)
@@ -179,7 +191,7 @@ function plan_memory(tape::Tape)
         for ref in node_refs(node)
             _free_dead_arg!(
                 tape, slots, last_use, free_M, free_V, freed_here,
-                ref, i, sk, dest_slot,
+                ref, p, sk, dest_slot,
             )
         end
     end
@@ -276,7 +288,6 @@ function _free_dead_arg!(
     end
     haskey(slots, ref.id) || return nothing
     get(last_use, ref.id, 0) == pos || return nothing
-    ref.id == pos && return nothing
     owner_slot = slots[ref.id]
     # Don't free the dest's own slot when the current op was in-placed onto
     # this arg — the result lives in it now.

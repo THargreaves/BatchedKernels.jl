@@ -141,7 +141,8 @@ function _ensure_compiled!(f, args::Tuple)
     nthreads = 256
 
     tape = trace(f, input_specs)
-    planner = plan_memory(tape)
+    order = schedule(tape)
+    planner = plan_memory(tape; order=order)
     output_spec = extract_output_spec(tape, planner)
     leaves = flatten_leaves(output_spec)
     fn_expr, sig = codegen(
@@ -152,6 +153,7 @@ function _ensure_compiled!(f, args::Tuple)
         nthreads=nthreads,
         T=T,
         fn_name=gensym(:fused_kernel),
+        order=order,
     )
     compiled_fn = Core.eval(@__MODULE__, fn_expr)
     entry = CompiledKernel(

@@ -29,7 +29,11 @@ function codegen(
     nthreads::Int,
     T::Type,
     fn_name::Symbol=:_fused_kernel,
+    order::AbstractVector{Int}=1:length(tape.nodes),
 )
+    length(order) == length(tape.nodes) || error(
+        "codegen: order length $(length(order)) ≠ tape length $(length(tape.nodes))",
+    )
     D32 = Int32(D_MAX)
     nthreads32 = Int32(nthreads)
     n_mats_per_warp = Int32(32) ÷ D32
@@ -270,7 +274,9 @@ function codegen(
         end
     end
 
-    for (i, (node, meta)) in enumerate(zip(tape.nodes, tape.metas))
+    for i in order
+        node = tape.nodes[i]
+        meta = tape.metas[i]
         if node isa InputNode || node isa ConstNode
             continue
         end
