@@ -835,6 +835,7 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
     end
 end
 
+
 @inline function warp_reduce_sum(mask::UInt32, val::T, i::Int32, width::Int32, ::Val{guard}) where {T,guard}
     acc = val
     nsteps = 32i32 - leading_zeros(width - 1i32)
