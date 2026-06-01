@@ -182,6 +182,26 @@ end
         return nothing
     end
 
+    end
+
+    return nothing
+end
+
+@inline function batch_op!(
+    ::typeof(*),
+    C::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    U::UpperTriangular{T,<:AbstractMatrix{T}},
+    d::Int32,
+    ::Val{D1},
+    ::Val{D2},
+    ::Val{D},
+    ::Val{:small},
+) where {T,D1,D2,D}  # (D1,D2) x trig(D2,D2) = (D1,D2)
+    if d > D2
+        return nothing
+    end
+
     # Extract column d of U into registers
     # Only upper trig part needed, but for compiler efficiency, load whole
     U_col = ntuple(k -> @inbounds(U[Int32(k), d]), Val(Int(D2)))
@@ -834,6 +854,85 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
         end
     end
 end
+
+# @inline function batch_op!(
+#     ::typeof(qr),
+#     R::AbstractMatrix{T},
+#     A::BlockMatrix_2_1{T},
+#     d::Int32,
+#     ::Val{D},
+#     ::Val{2},  # Blocks vertically
+#     ::Val{1},  # Blocks horisontally
+#     warp_matrix_id::Int32,
+#     ::Val{:small},
+# ) where {T,D}
+#     tid = threadIdx().x
+#     lid = mod1(tid, 32i32)
+#     n_mats_per_warp = 32i32 ÷ D
+#     active_lanes = n_mats_per_warp * D
+
+#     if lid > active_lanes || d > D
+#         return nothing
+#     end
+
+#     i = d  # Each thread is responsible for the i-th and i + D-th row
+
+#     R_col_top = MVector{Int(D),T}(undef)
+#     R_col_bot = MVector{Int(D),T}(undef)
+#     @inbounds @unroll for j in 1i32:D
+#         R_col_top[j] = A[i, j]
+#         R_col_bot[j] = A[i + D, j]
+#     end
+
+#     base = (warp_matrix_id - 1i32) * D
+#     width = D
+#     mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
+#     mask = mask << (base % UInt32)
+
+#     @inbounds @unroll for j in 1i32:D
+#         norm_sq = R_col_bot[j] * R_col_bot[j] + ifelse(i >= j, R_col_top[j] * R_col_top[j], zero(T))
+#         norm_sq = warp_reduce_sum(mask, norm_sq, i, Val(D))
+#         # norm_sq = shfl_sync(mask, norm_sq, min(max(lid - i + 1i32, 1i32), 32i32) % UInt32)
+#         norm_sq = shfl_idx_f32(mask, norm_sq, lid - i + 1i32)
+        
+#         sign = ifelse(R_col_top[j] >= zero(T), one(T), -one(T))
+#         v_top = ifelse(i >= j, R_col_top[j], zero(T)) - ifelse(i == j, -sign * sqrt(norm_sq), zero(T))
+#         v_bot = R_col_bot[j]
+
+#         # v1 = shfl_sync(mask, v_top, min(max(lid - i + j, 1i32), 32i32) % UInt32)
+#         v1 = shfl_idx_f32(mask, v_top, lid - i + j)
+#         v_top /= v1
+#         v_bot /= v1
+
+#         tau = v_bot * v_bot + ifelse(i >= j, v_top * v_top, zero(T))
+#         tau = warp_reduce_sum(mask, tau, i, Val(D))
+#         tau = T(2i32) / tau
+#         # tau = shfl_sync(mask, tau, min(max(lid - i + 1i32, 1i32), 32i32) % UInt32)
+#         tau = shfl_idx_f32(mask, tau, lid - i + 1i32)
+#         tau_v_top = tau * v_top
+#         tau_v_bot = tau * v_bot
+
+#         @unroll for t in 1i32:D
+#             if t >= j
+#                 w_t = v_bot * R_col_bot[t] + ifelse(i >= j, v_top * R_col_top[t], zero(T))
+#                 w_t = warp_reduce_sum(mask, w_t, i, Val(D))
+#                 # w_t = shfl_sync(mask, w_t, min(max(lid - i + 1i32, 1i32), 32i32) % UInt32)
+#                 w_t = shfl_idx_f32(mask, w_t, lid - i + 1i32)
+
+#                 R_col_top[t] -= ifelse(i >= j, tau_v_top * w_t, zero(T))
+#                 R_col_bot[t] -= tau_v_bot * w_t
+#             end
+#         end
+#     end
+
+#     @inbounds @unroll for j in 1i32:D
+#         if j >= i
+#             R[i, j] = R_col_top[j]
+#         end
+#     end
+
+#     return nothing
+# end
 
 @inline function warp_reduce_sum(mask::UInt32, val::T, i::Int32, width::Int32, ::Val{guard}) where {T,guard}
     acc = val
