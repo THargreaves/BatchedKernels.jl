@@ -3,7 +3,6 @@ export batch_op!, gram
 using StaticArrays
 using LinearAlgebra
 using KernelAbstractions.Extras: @unroll
-using KernelAbstractions.Extras: @unroll
 
 gram(A) = A' * A
 
@@ -55,7 +54,6 @@ end
         return nothing
     end
     @inbounds @unroll for i in (1i32):D1
-    @inbounds @unroll for i in (1i32):D1
         C[i, d] = A[i, d] + B[i, d]
     end
 
@@ -92,7 +90,6 @@ end
     if d > D2
         return nothing
     end
-    @inbounds @unroll for i in (1i32):D1
     @inbounds @unroll for i in (1i32):D1
         C[i, d] = A[i, d] - B[i, d]
     end
@@ -159,7 +156,6 @@ end
         return nothing
     end
 
-
     # Extract column d of B into registers
     B_col = ntuple(k -> @inbounds(B[Int32(k), d]), Val(Int(D2)))
 
@@ -189,37 +185,8 @@ end
     # Extract column d of U into registers
     # Only upper trig part needed, but for compiler efficiency, load whole
     U_col = ntuple(k -> @inbounds(U[Int32(k), d]), Val(Int(D2)))
-    B_col = ntuple(k -> @inbounds(B[Int32(k), d]), Val(Int(D2)))
 
     # Compute each element of column d of C
-    @inbounds @unroll for i in (1i32):D1
-        C[i, d] = sum(ntuple(k -> @inbounds(A[i, Int32(k)]) * B_col[k], Val(Int(D2))))
-    end
-
-    return nothing
-end
-
-@inline function batch_op!(
-    ::typeof(*),
-    C::AbstractMatrix{T},
-    A::AbstractMatrix{T},
-    U::UpperTriangular{T,<:AbstractMatrix{T}},
-    d::Int32,
-    ::Val{D1},
-    ::Val{D2},
-    ::Val{D},
-    ::Val{:small},
-) where {T,D1,D2,D}  # (D1,D2) x trig(D2,D2) = (D1,D2)
-    if d > D2
-        return nothing
-    end
-
-    # Extract column d of U into registers
-    # Only upper trig part needed, but for compiler efficiency, load whole
-    U_col = ntuple(k -> @inbounds(U[Int32(k), d]), Val(Int(D2)))
-
-    # Compute each element of column d of C
-    @inbounds @unroll for i in (1i32):D1
     @inbounds @unroll for i in (1i32):D1
         tot = zero(T)
         @unroll for k in 1i32:D2
@@ -251,19 +218,10 @@ end
     # Extract column d of L into registers
     # Only lower trig part needed, but for compiler efficiency, load whole
     L_col = ntuple(k -> @inbounds(L[Int32(k), d]), Val(Int(D2)))
-    # Extract column d of L into registers
-    # Only lower trig part needed, but for compiler efficiency, load whole
-    L_col = ntuple(k -> @inbounds(L[Int32(k), d]), Val(Int(D2)))
 
     # Compute each element of column d of C
     @inbounds @unroll for i in (1i32):D1
-    @inbounds @unroll for i in (1i32):D1
         tot = zero(T)
-        # for k in d:D2
-        @unroll for k in 1i32:D2
-            if k >= d
-                tot += A[i, k] * L_col[k]
-            end
         # for k in d:D2
         @unroll for k in 1i32:D2
             if k >= d
@@ -452,12 +410,7 @@ end
     j = d  # column this thread is responsible for
 
     @unroll for i in (1i32):D1
-    @unroll for i in (1i32):D1
         # Create mask for threads j >= i within this matrix
-        base = (warp_matrix_id - 1i32) * D
-        width = D1 - i + 1i32
-        mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
-        mask = mask << ((base + i - 1i32) % UInt32)
         base = (warp_matrix_id - 1i32) * D
         width = D1 - i + 1i32
         mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
@@ -477,15 +430,6 @@ end
                     Uki = shfl_idx_f32(mask, Ukj, lid - j + i)
                     Uij -= Uki * Ukj
                 end
-            # @unroll for k in (1i32):(i - 1i32)
-            @unroll for k in 1i32:D1
-                if k < i
-                    Ukj = U[k, j]  # Load from already-computed Cholesky factors
-                    # Share the diagonal/column value with other threads
-                    # Uki = shfl_idx_f32(mask, Ukj, i + (warp_matrix_id - 1i32) * D)
-                    Uki = shfl_idx_f32(mask, Ukj, lid - j + i)
-                    Uij -= Uki * Ukj
-                end
             end
 
             # RDIV STEP
@@ -493,8 +437,6 @@ end
                 Uij = sqrt(Uij)
             end
             # Share result with other threads
-            # Uii = shfl_idx_f32(mask, Uij, i + (warp_matrix_id - 1i32) * D)
-            Uii = shfl_idx_f32(mask, Uij, lid - j + i)
             # Uii = shfl_idx_f32(mask, Uij, i + (warp_matrix_id - 1i32) * D)
             Uii = shfl_idx_f32(mask, Uij, lid - j + i)
             if j > i
@@ -573,7 +515,6 @@ end
     return acc
 end
 
-
 # TODO: allow for max(D1, D2) < D, requires extra
 @inline function batch_op!(
     ::typeof(qr),
@@ -594,22 +535,8 @@ end
     # Padding (i > D1) rows do participate
     if lid > active_lanes
         return zero(T)
-    # Padding (i > D1) rows do participate
-    if lid > active_lanes
-        return zero(T)
     end
 
-    i = d
-    is_padding_row = (i > D1)
-
-    # Mask for all threads in a matrix, even padded ones
-    base = (warp_matrix_id - 1i32) * D
-    mask = ((UInt32(1) << (D % UInt32)) - UInt32(1)) << (base % UInt32)
-
-    # Load matrix into registers, padding rows hold zeros throughout
-    R_col = MVector{Int(D2),T}(undef)
-    @inbounds @unroll for j in 1i32:D2
-        R_col[j] = is_padding_row ? zero(T) : A[i, j]
     i = d
     is_padding_row = (i > D1)
 
@@ -624,52 +551,10 @@ end
     end
 
     tau_storage = zero(T)
-    tau_storage = zero(T)
 
     @unroll for j in 1i32:min(D1 - 1i32, D2)
         # 1. Compute norm of j-th column
-    @unroll for j in 1i32:min(D1 - 1i32, D2)
-        # 1. Compute norm of j-th column
 
-        # This thread's contribution to the squared norm sum
-        contrib_sq = ifelse(i >= j && !is_padding_row, R_col[j] * R_col[j], zero(T))
-
-        # Compute norm via reduction sum
-        norm_sq = warp_reduce_sum(mask, contrib_sq, i, Val(D))
-        norm_sq = shfl_sync(mask, norm_sq, (base + 1i32) % UInt32)
-
-        # 2. Householder vector and tau
-        # Retrieve alpha = R[j, j] in every lane, from base + j
-        alpha = shfl_sync(mask, R_col[j], (base + j) % UInt32)
-
-        sign = ifelse(alpha >= zero(T), one(T), -one(T))
-        beta = -sign * sqrt(norm_sq)
-        v1 = alpha - beta
-
-        # v_elem:   set to 0 for rows above j and padding rows
-        #           alpha - beta for row j
-        #           R_col[j] for rows below j.
-        v_elem = ifelse(
-            is_padding_row || i < j,
-            zero(T),
-            ifelse(
-                i == j,
-                v1,
-                R_col[j]
-            ),
-        )
-        # Normalise v so that v[1] = 1.0
-        # This is necessary to fit v into lower triangular part of R
-        # for storage and calculation of Q later, despite not necessary when
-        # calculating R
-        v_elem = v_elem / v1
-
-        # tau's algebraic identity
-        tau = (beta - alpha) / beta
-
-        if j == i
-            tau_storage = tau
-        end
         # This thread's contribution to the squared norm sum
         contrib_sq = ifelse(i >= j && !is_padding_row, R_col[j] * R_col[j], zero(T))
 
@@ -742,55 +627,7 @@ end
             if t >= j + 1i32
                 w_t = shfl_sync(mask, w_i, (base + t) % UInt32)
                 R_col[t] -= v_elem * w_t
-        tau_v_elem = tau * v_elem
-
-        # 3. Computing H = I - tau * v * v^T, A <- HA = A - tau * v * (v^T A)
-
-        # MAGMA trick:
-        # 3.1: thread i writes its partial products into row i of scratch
-        # scratch[i, t] = v[i] * R[i, t] * tau for each trailing column t.
-        # Padding rows write zero because v_elem == 0 and R_col == 0.
-        @inbounds @unroll for t in 1i32:D2
-            if t >= j + 1i32
-                R[i, t] = tau_v_elem * R_col[t]
             end
-        end
-
-        # Transpose: now thread i handles column i
-        sync_warp(mask)
-
-        # 3.2: thread i reads column i of scratch: R[r, i] for r in 1..D, and sums
-        # This gives the i-th column's entry of tau * v^T A
-        w_i = zero(T)
-        @inbounds @unroll for r in 1i32:D
-            if r >= j
-                w_i += R[r, i]
-            end
-        end
-        # w_i = i-th entry of tau * v^T A
-
-        # Compute v * (tau * v^T A)
-        @inbounds @unroll for t in 1i32:D2
-            if t >= j + 1i32
-                w_t = shfl_sync(mask, w_i, (base + t) % UInt32)
-                R_col[t] -= v_elem * w_t
-            end
-        end
-
-        # Store v in the strictly lower-triangular part of R_col[j] for rows i > j
-        # For i == j we'll write beta below at the final write-back
-        # For i < j leave R_col[j] alone since it holds previous-iter R values
-        if (i > j) && !is_padding_row
-            R_col[j] = v_elem
-        elseif (i == j) && !is_padding_row
-            R_col[j] = beta
-        end
-    end
-
-    # Write back
-    @inbounds @unroll for j in 1i32:D2
-        if !is_padding_row
-            R[i, j] = R_col[j]
         end
 
         # Store v in the strictly lower-triangular part of R_col[j] for rows i > j
@@ -838,29 +675,19 @@ end
 
     # Initialise Q as identity
     @inbounds @unroll for j in 1i32:min(D1, D2)
-    @inbounds @unroll for j in 1i32:min(D1, D2)
         Q[i, j] = ifelse(i == j, one(T), zero(T))
     end
     
     # Loop through the H_k...
     @unroll for j in min(D1, D2):-1i32:1i32
-    @unroll for j in min(D1, D2):-1i32:1i32
         base = (warp_matrix_id - 1i32) * D
         width = D1 - j + 1i32
-        mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
-        mask = mask << ((base + j - 1i32) % UInt32)
         mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
         mask = mask << ((base + j - 1i32) % UInt32)
 
         @inbounds if i >= j
             tau_j = shfl_sync(mask, tau, max(lid - i + j, 1i32) % UInt32)  # Get tau from 'leader' thread
-            tau_j = shfl_sync(mask, tau, max(lid - i + j, 1i32) % UInt32)  # Get tau from 'leader' thread
             w_i = Q[j, i]  # first element in v = 1, not stored in R
-            # for t in (j + 1i32):D1
-            @unroll for t in 1i32:D1
-                if t > j
-                    w_i += R[t, j] * Q[t, i]
-                end
             # for t in (j + 1i32):D1
             @unroll for t in 1i32:D1
                 if t > j
@@ -869,12 +696,6 @@ end
             end
 
             R_elem = ifelse(i == j, 1.0f0, R[i, j])
-            tau_R_elem = tau_j * R_elem
-            @unroll for t in 1i32:min(D1, D2)
-                if t >= j
-                    w_t = shfl_sync(mask, w_i, max(lid - i + t, 1i32) % UInt32)
-                    Q[i, t] -= tau_R_elem * w_t
-                end
             tau_R_elem = tau_j * R_elem
             @unroll for t in 1i32:min(D1, D2)
                 if t >= j
@@ -911,29 +732,19 @@ end
 
     # Initialise Q as identity
     @inbounds @unroll for j in 1i32:D1
-    @inbounds @unroll for j in 1i32:D1
         Q[i, j] = ifelse(i == j, one(T), zero(T))
     end
     
     # Loop through the H_k...
     @unroll for j in min(D1, D2):-1i32:1i32
-    @unroll for j in min(D1, D2):-1i32:1i32
         base = (warp_matrix_id - 1i32) * D
         width = D1 - j + 1i32
-        mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
-        mask = mask << ((base + j - 1i32) % UInt32)
         mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
         mask = mask << ((base + j - 1i32) % UInt32)
 
         @inbounds if i >= j
             tau_j = shfl_sync(mask, tau, max(lid - i + j, 1i32) % UInt32)  # Get tau from 'leader' thread
-            tau_j = shfl_sync(mask, tau, max(lid - i + j, 1i32) % UInt32)  # Get tau from 'leader' thread
             w_i = Q[j, i]  # first element in v = 1, not stored in R
-            # @unroll for t in (j + 1i32):D1
-            @unroll for t in 1i32:D1
-                if t > j
-                    w_i += R[t, j] * Q[t, i]
-                end
             # @unroll for t in (j + 1i32):D1
             @unroll for t in 1i32:D1
                 if t > j
@@ -942,12 +753,6 @@ end
             end
 
             R_elem = ifelse(i == j, 1.0f0, R[i, j])
-            tau_R_elem = tau_j * R_elem
-            @unroll for t in 1i32:D1
-                if t >= j
-                    w_t = shfl_sync(mask, w_i, max(lid - i + t, 1i32) % UInt32)
-                    Q[i, t] -= tau_R_elem * w_t
-                end
             tau_R_elem = tau_j * R_elem
             @unroll for t in 1i32:D1
                 if t >= j
@@ -993,12 +798,10 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
 
     @inbounds if C !== B && i <= B_D1
         @unroll for j in 1i32:B_D2
-        @unroll for j in 1i32:B_D2
             C[i, j] = B[i, j]
         end
     end
     @inbounds if i > B_D1 && i <= D1
-        @unroll for j in 1i32:B_D2
         @unroll for j in 1i32:B_D2
             C[i, j] = 0.0f0
         end
@@ -1006,26 +809,17 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
 
     # Loop through the H_k...
     @inbounds @unroll for j in js_range(Val(adj), Val(min(D1 - 1i32, D2)))
-    @inbounds @unroll for j in js_range(Val(adj), Val(min(D1 - 1i32, D2)))
         base = (warp_matrix_id - 1i32) * D
         width = D1 - j + 1i32
         mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
         mask = mask << ((base + j - 1i32) % UInt32)
-        mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
-        mask = mask << ((base + j - 1i32) % UInt32)
         
         tau_j = zero(T)
-        tau_j = zero(T)
         if i >= j
-            tau_j = shfl_sync(mask, tau, max(lid - i + j, 1i32) % UInt32)  # Get tau from 'leader' thread
             tau_j = shfl_sync(mask, tau, max(lid - i + j, 1i32) % UInt32)  # Get tau from 'leader' thread
         end
 
         w_i = C[j, i]  # first element in v = 1, not stored in R
-        @unroll for t in 1i32:D1
-            if t > j
-                w_i += R[t, j] * C[t, i]
-            end
         @unroll for t in 1i32:D1
             if t > j
                 w_i += R[t, j] * C[t, i]
@@ -1606,19 +1400,8 @@ end
             end
         end
         x[i] = xi / U[i, i]
-    x = MVector{Int(D1),T}(undef)
-
-    @inbounds @unroll for i in D1:(-1i32):1i32
-        xi = A[i, d]
-        @unroll for j in 1i32:D1
-            if j > i
-                xi -= U[i, j] * x[j]
-            end
-        end
-        x[i] = xi / U[i, i]
     end
 
-    @inbounds @unroll for i in 1i32:D1
     @inbounds @unroll for i in 1i32:D1
         C[i, d] = x[i]
     end
@@ -1691,18 +1474,7 @@ end
 
     @inbounds @unroll for i in 1i32:D1
         yi = A[i, d]
-    y = MVector{Int(D1),T}(undef)
 
-    @inbounds @unroll for i in 1i32:D1
-        yi = A[i, d]
-
-        # @unroll for j in 1i32:(i - 1i32)
-        @unroll for j in 1i32:D1
-            if j < i
-                yi -= L[i, j] * y[j]
-            end
-        end
-        y[i] = yi / L[i, i]
         # @unroll for j in 1i32:(i - 1i32)
         @unroll for j in 1i32:D1
             if j < i
@@ -1712,7 +1484,6 @@ end
         y[i] = yi / L[i, i]
     end
 
-    @inbounds @unroll for i in 1i32:D1
     @inbounds @unroll for i in 1i32:D1
         C[i, d] = y[i]
     end
@@ -1730,48 +1501,6 @@ end
     ::Val{:small},
 ) where {T,D}
     return batch_op!(\, A, L, A, d, Val(D), Val(:small))
-end
-
-# L c = b, solve for c
-@inline function batch_op!(
-    ::typeof(\),
-    c::AbstractVector{T},
-    L::LowerTriangular{T,<:AbstractMatrix{T}},
-    b::AbstractVector{T},
-    d::Int32,
-    ::Val{D1},
-    ::Val,
-    ::Val{D},
-    warp_matrix_id::Int32,
-    ::Val{:small},
-) where {T,D1,D}
-    if d > D1
-        return nothing
-    end
-
-    @inbounds c_d = b[d]
-
-    base = (warp_matrix_id - 1i32) * D
-    width = D1
-    mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
-    mask = mask << (base % UInt32)
-
-    @inbounds @unroll for j in 1i32:D1
-        c_d_div_L = c_d / L[j, j]
-        c_j_div_L = shfl_sync(mask, c_d_div_L, (base + j) % UInt32)
-        
-        if d > j
-            c_d -= L[d, j] * c_j_div_L
-        end
-
-        if d == j
-            c_d = c_d_div_L
-        end
-    end
-
-    c[d] = c_d
-
-    return nothing
 end
 
 # L c = b, solve for c
@@ -2039,53 +1768,6 @@ end
     @inbounds z[d] = x[d] - y[d]
 
     return nothing
-end
-
-@inline function batch_op!(
-    ::Val{:log_det},
-    M::LinearAlgebra.AbstractTriangular{T},
-    d::Int32,
-    ::Val{D1},
-    ::Val{D},
-    warp_matrix_id::Int32,
-    ::Val{:small},
-) where {T,D1,D}
-    if d > D1
-        return zero(T)
-    end
-
-    base = (warp_matrix_id - 1i32) * D
-    width = D1
-    mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
-    mask = mask << (base % UInt32)
-
-    log_det = T(2) * warp_reduce_sum(mask, log(M[d, d]), d, Val(D1))
-    
-    return log_det
-end
-
-
-@inline function batch_op!(
-    ::Val{:mahal_dist},
-    v::AbstractVector{T},
-    d::Int32,
-    ::Val{D1},
-    ::Val{D},
-    warp_matrix_id::Int32,
-    ::Val{:small},
-) where {T,D1,D}
-    if d > D1
-        return zero(T)
-    end
-
-    base = (warp_matrix_id - 1i32) * D
-    width = D1
-    mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
-    mask = mask << (base % UInt32)
-
-    mahal_dist = warp_reduce_sum(mask, v[d] * v[d], d, Val(D1))
-    
-    return mahal_dist
 end
 
 @inline function batch_op!(
