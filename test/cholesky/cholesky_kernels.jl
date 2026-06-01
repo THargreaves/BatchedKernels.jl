@@ -28,7 +28,8 @@
         A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id, Val(:small))
 
         # Perform out-of-place Cholesky
-        batch_op!(cholesky, A, d, Val(D), n_mats_per_warp, warp_matrix_id, Val(:small))
+        # batch_op!(cholesky, A, d, Val(D), n_mats_per_warp, warp_matrix_id, Val(:small))
+        batch_op!(cholesky, A, A, d, Val(D), Val(D), warp_matrix_id, Val(:small))
     end
 
     # Store result
@@ -70,7 +71,7 @@ end
         U = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id, Val(:small))
 
         # Perform out-of-place Cholesky
-        batch_op!(cholesky, U, A, d, Val(D), n_mats_per_warp, warp_matrix_id, Val(:small))
+        batch_op!(cholesky, U, A, d, Val(D), Val(D), warp_matrix_id, Val(:small))
     end
 
     # Store result

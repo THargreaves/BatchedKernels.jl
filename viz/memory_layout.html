@@ -94,6 +94,83 @@
             width: 40px;
         }
 
+        /* Top axis label: spans all 32 bank columns to show that columns = banks */
+        .memory-table .bank-axis-label {
+            background: #1976d2;
+            color: white;
+            font-weight: bold;
+            font-size: 13px;
+            text-align: center;
+            letter-spacing: 1px;
+            padding: 2px 8px;
+            height: 32px;
+            line-height: 1;
+            border: 1px solid #0d47a1;
+        }
+
+        .memory-table .bank-axis-label .bank-axis-title {
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .memory-table .bank-axis-label .bank-axis-note {
+            font-weight: normal;
+            font-style: italic;
+            font-size: 11px;
+            letter-spacing: 0;
+            margin-left: 10px;
+            opacity: 0.92;
+        }
+
+        /* Tinted bank-number header to reinforce that each column is its own bank */
+        .memory-table .bank-number-header {
+            background: #bbdefb;
+            border: 1px solid #64b5f6;
+            color: #0d47a1;
+            font-weight: bold;
+        }
+
+        /* Left axis label: rotated "ROW" text spanning all data rows */
+        .memory-table .row-axis-label {
+            background: #c62828;
+            color: white;
+            font-weight: bold;
+            font-size: 13px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            border: 1px solid #8e0000;
+            width: 26px;
+            padding: 8px 0 0 0;
+            text-align: center;
+            vertical-align: top;
+        }
+
+        .memory-table .row-axis-label > div {
+            writing-mode: vertical-rl;
+            transform: rotate(180deg);
+            white-space: nowrap;
+            display: inline-block;
+        }
+
+        /* Tinted row-number header to match the row-axis styling */
+        .memory-table .row-number-header {
+            background: #ffcdd2;
+            border: 1px solid #ef9a9a;
+            color: #8e0000;
+            font-weight: bold;
+        }
+
+        .memory-table .corner-cell {
+            background: #f5f5f5;
+            border: 1px solid #dee2e6;
+        }
+
+        /* Subtle vertical separators every 4 banks so column-as-bank reads visually */
+        .memory-table td.bank-group-sep,
+        .memory-table th.bank-group-sep {
+            border-left: 2px solid #90a4ae !important;
+        }
+
         .cell-content {
             display: flex;
             flex-direction: column;
@@ -214,7 +291,7 @@
         <div class="controls">
             <div class="control-group">
                 <label for="dimension">Matrix Dimension (D):</label>
-                <input type="number" id="dimension" min="1" max="10" value="5">
+                <input type="number" id="dimension" min="1" max="32" value="5">
             </div>
             <div class="control-group">
                 <label>
@@ -228,10 +305,13 @@
                 <label>
                     <input type="radio" name="accessType" value="column"> Along Columns
                 </label>
+                <label>
+                    <input type="radio" name="accessType" value="global"> Global access (32 consecutive)
+                </label>
                 <label for="accessIndex">Index (k):</label>
-                <input type="number" id="accessIndex" min="0" max="9" value="0">
+                <input type="number" id="accessIndex" min="1" max="10" value="1">
                 <label for="accessWarp">Warp:</label>
-                <input type="number" id="accessWarp" min="0" max="1" value="0">
+                <input type="number" id="accessWarp" min="1" max="2" value="1">
             </div>
         </div>
 
@@ -267,10 +347,23 @@
         <div class="layouts">
             <div class="layout-section">
                 <h2>Dual-Access Layout</h2>
+                <p style="margin: 4px 0 10px 0; font-size: 13px; color: #555;">
+                    <span style="display:inline-block; width:14px; height:14px; background:#1976d2; vertical-align:middle; margin-right:6px; border-radius:2px;"></span>
+                    Columns = the 32 shared-memory banks.&nbsp;
+                    <span style="display:inline-block; width:14px; height:14px; background:#c62828; vertical-align:middle; margin-right:6px; border-radius:2px;"></span>
+                    Rows = 32-element memory lines.&nbsp;
+                    A bank conflict occurs when threads in the same warp access different cells <em>within the same column</em>.
+                </p>
                 <div id="dual-access-table"></div>
             </div>
             <div class="layout-section">
                 <h2>Single-Access Layout</h2>
+                <p style="margin: 4px 0 10px 0; font-size: 13px; color: #555;">
+                    <span style="display:inline-block; width:14px; height:14px; background:#1976d2; vertical-align:middle; margin-right:6px; border-radius:2px;"></span>
+                    Columns = the 32 shared-memory banks.&nbsp;
+                    <span style="display:inline-block; width:14px; height:14px; background:#c62828; vertical-align:middle; margin-right:6px; border-radius:2px;"></span>
+                    Rows = 32-element memory lines.
+                </p>
                 <div id="single-access-table"></div>
             </div>
         </div>
@@ -344,21 +437,37 @@
 
             let html = '<table class="memory-table">';
 
-            // Header row with bank numbers
-            html += '<tr><th>Row</th>';
+            // Top axis label: BANK spans all 32 columns, with explanatory note inline
+            html += '<tr>';
+            html += '<th class="corner-cell" rowspan="2"></th>'; // empty corner over the row labels
+            html += '<th class="corner-cell"></th>';             // empty corner over the row numbers
+            html += `<th class="bank-axis-label" colspan="32"><span class="bank-axis-title">Bank (1 – 32)</span><span class="bank-axis-note">each column below is one memory bank, accesses in the same column results in bank conflicts</span></th>`;
+            html += '</tr>';
+
+            // Bank number header
+            html += '<tr>';
+            html += '<th class="corner-cell">Row</th>';
             for (let bank = 0; bank < 32; bank++) {
-                html += `<th>${bank}</th>`;
+                const sep = (bank > 0 && bank % 4 === 0) ? ' bank-group-sep' : '';
+                html += `<th class="bank-number-header${sep}">${bank + 1}</th>`;
             }
             html += '</tr>';
 
             // Data rows
             for (let row = 0; row < numRows; row++) {
-                html += `<tr><td class="row-header">${row}</td>`;
+                html += '<tr>';
+                // Left axis label "ROW" rendered once, spanning all rows
+                if (row === 0) {
+                    html += `<td class="row-axis-label" rowspan="${numRows}"><div>Row (memory line)</div></td>`;
+                }
+                html += `<td class="row-number-header">${row + 1}</td>`;
                 for (let bank = 0; bank < 32; bank++) {
                     const cell = grid[row] ? grid[row][bank] : null;
                     const currentAddress = row * 32 + bank;
                     let boundaryClasses = '';
                     let highlightClass = '';
+                    const sep = (bank > 0 && bank % 4 === 0) ? ' bank-group-sep' : '';
+                    boundaryClasses += sep;
 
                     // Add boundary classes
                     if (row === warpBoundaryRow) {
@@ -381,7 +490,15 @@
 
                     // Check if this cell matches the access pattern
                     if (accessPattern.enabled && cell) {
-                        if (cell.w === accessPattern.warp) {
+                        if (accessPattern.type === 'global') {
+                            // Global mode: check membership in the precomputed chunk key set.
+                            // Warp constraint is intentionally not applied because a 32-chunk
+                            // can span the warp boundary.
+                            if (accessPattern.globalKeys &&
+                                accessPattern.globalKeys.has(`${cell.w},${cell.m},${cell.i},${cell.j}`)) {
+                                highlightClass = ' access-highlight';
+                            }
+                        } else if (cell.w === accessPattern.warp) {
                             if ((accessPattern.type === 'row' && cell.i === accessPattern.index) ||
                                 (accessPattern.type === 'column' && cell.j === accessPattern.index)) {
                                 highlightClass = ' access-highlight';
@@ -393,7 +510,7 @@
                         const color = getMatrixColor(cell.m, M);
                         html += `<td class="${boundaryClasses}${highlightClass}" style="background-color: ${color}">`;
                         html += '<div class="cell-content">';
-                        html += `<div class="cell-indices">${cell.i},${cell.j}</div>`;
+                        html += `<div class="cell-indices">${cell.i + 1},${cell.j + 1}</div>`;
                         html += '</div>';
                         html += '</td>';
                     } else {
@@ -499,21 +616,36 @@
 
             let html = '<table class="memory-table">';
 
-            // Header row with bank numbers
-            html += '<tr><th>Row</th>';
+            // Top axis label: BANK spans all 32 columns, with explanatory note inline
+            html += '<tr>';
+            html += '<th class="corner-cell" rowspan="2"></th>';
+            html += '<th class="corner-cell"></th>';
+            html += `<th class="bank-axis-label" colspan="32"><span class="bank-axis-title">Bank (1 – 32)</span><span class="bank-axis-note">each column below is one memory bank, accesses in the same column results in bank conflicts</span></th>`;
+            html += '</tr>';
+
+            // Bank number header
+            html += '<tr>';
+            html += '<th class="corner-cell">Row</th>';
             for (let bank = 0; bank < 32; bank++) {
-                html += `<th>${bank}</th>`;
+                const sep = (bank > 0 && bank % 4 === 0) ? ' bank-group-sep' : '';
+                html += `<th class="bank-number-header${sep}">${bank + 1}</th>`;
             }
             html += '</tr>';
 
             // Data rows
             for (let row = 0; row < numRows; row++) {
-                html += `<tr><td class="row-header">${row}</td>`;
+                html += '<tr>';
+                if (row === 0) {
+                    html += `<td class="row-axis-label" rowspan="${numRows}"><div>Row (memory line)</div></td>`;
+                }
+                html += `<td class="row-number-header">${row + 1}</td>`;
                 for (let bank = 0; bank < 32; bank++) {
                     const cell = grid[row] ? grid[row][bank] : null;
                     const currentAddress = row * 32 + bank;
                     let boundaryClasses = '';
                     let highlightClass = '';
+                    const sep = (bank > 0 && bank % 4 === 0) ? ' bank-group-sep' : '';
+                    boundaryClasses += sep;
 
                     // Add boundary classes (same logic as dual-access)
                     if (row === warpBoundaryRow) {
@@ -532,7 +664,15 @@
 
                     // Check if this cell matches the access pattern
                     if (accessPattern.enabled && cell) {
-                        if (cell.w === accessPattern.warp) {
+                        if (accessPattern.type === 'global') {
+                            // Global mode: check membership in the precomputed chunk key set.
+                            // Warp constraint is intentionally not applied because a 32-chunk
+                            // can span the warp boundary.
+                            if (accessPattern.globalKeys &&
+                                accessPattern.globalKeys.has(`${cell.w},${cell.m},${cell.i},${cell.j}`)) {
+                                highlightClass = ' access-highlight';
+                            }
+                        } else if (cell.w === accessPattern.warp) {
                             if ((accessPattern.type === 'row' && cell.i === accessPattern.index) ||
                                 (accessPattern.type === 'column' && cell.j === accessPattern.index)) {
                                 highlightClass = ' access-highlight';
@@ -544,7 +684,7 @@
                         const color = getMatrixColor(cell.m, M);
                         html += `<td class="${boundaryClasses}${highlightClass}" style="background-color: ${color}">`;
                         html += '<div class="cell-content">';
-                        html += `<div class="cell-indices">${cell.i},${cell.j}</div>`;
+                        html += `<div class="cell-indices">${cell.i + 1},${cell.j + 1}</div>`;
                         html += '</div>';
                         html += '</td>';
                     } else {
@@ -566,20 +706,79 @@
         function getAccessPattern() {
             const enabled = document.getElementById('showAccessPattern').checked;
             const type = document.querySelector('input[name="accessType"]:checked').value;
-            const index = parseInt(document.getElementById('accessIndex').value);
-            const warp = parseInt(document.getElementById('accessWarp').value);
+            // Inputs are displayed 1-indexed; convert to 0-indexed for internal logic
+            const index = parseInt(document.getElementById('accessIndex').value) - 1;
+            const warp = parseInt(document.getElementById('accessWarp').value) - 1;
             return { enabled, type, index, warp };
+        }
+
+        // Build the flat global storage order (matches single-access ordering).
+        // Returns an array of {w, m, i, j} in storage order across both warps.
+        function buildGlobalOrder(D) {
+            const M = Math.floor(32 / D);
+            const order = [];
+            for (let w = 0; w < 2; w++) {
+                for (let m = 0; m < M; m++) {
+                    for (let j = 0; j < D; j++) {
+                        for (let i = 0; i < D; i++) {
+                            order.push({ w, m, i, j });
+                        }
+                    }
+                }
+            }
+            return order;
+        }
+
+        // For "global" access mode: returns a Set of "w,m,i,j" keys identifying the
+        // (up to) 32 elements in the k-th chunk starting from `warp`'s storage offset.
+        // Chunks are 32 real (non-padding) elements; the final chunk may have fewer.
+        function buildGlobalChunkKeys(D, kZeroIndexed, warpZeroIndexed) {
+            const order = buildGlobalOrder(D);
+            const M = Math.floor(32 / D);
+            const elementsPerWarp = M * D * D;
+            const startPos = warpZeroIndexed * elementsPerWarp + kZeroIndexed * 32;
+            const keys = new Set();
+            for (let off = 0; off < 32; off++) {
+                const pos = startPos + off;
+                if (pos >= order.length) break;
+                const e = order[pos];
+                keys.add(`${e.w},${e.m},${e.i},${e.j}`);
+            }
+            return keys;
         }
 
         // Initialize
         function updateVisualization() {
             const D = parseInt(document.getElementById('dimension').value);
-            if (D >= 1 && D <= 10) {
-                // Update max value for access index
-                document.getElementById('accessIndex').max = D - 1;
+            if (D >= 1 && D <= 32) {
+                // Get access pattern settings (need type before deciding max-k)
+                const type = document.querySelector('input[name="accessType"]:checked').value;
+                const warp1Indexed = parseInt(document.getElementById('accessWarp').value);
+                const M = Math.floor(32 / D);
+                const elementsPerWarp = M * D * D;
 
-                // Get access pattern settings
+                // Update max value for access index (1-indexed visually)
+                let maxK;
+                if (type === 'global') {
+                    // From the chosen warp's start, count remaining real elements across
+                    // both warps. Warp=1 has access to 2*MDD elements, Warp=2 has MDD.
+                    const remaining = (3 - warp1Indexed) * elementsPerWarp;
+                    maxK = Math.max(1, Math.ceil(remaining / 32));
+                } else {
+                    maxK = D;
+                }
+                const kInput = document.getElementById('accessIndex');
+                kInput.max = maxK;
+                if (parseInt(kInput.value) > maxK) kInput.value = maxK;
+
                 const accessPattern = getAccessPattern();
+
+                // For global mode, precompute the set of (w,m,i,j) keys to highlight.
+                if (accessPattern.type === 'global') {
+                    accessPattern.globalKeys = buildGlobalChunkKeys(
+                        D, accessPattern.index, accessPattern.warp
+                    );
+                }
 
                 // Calculate both layouts to get warp size and row counts
                 const dualLayout = calculateDualAccessLayout(D);

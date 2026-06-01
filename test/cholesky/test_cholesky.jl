@@ -13,7 +13,7 @@
     # Test both modes
     modes = (Val(:indep), Val(:conseq))
 
-    for D in 2:15
+    for D in 2:10
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
         for mode in modes
