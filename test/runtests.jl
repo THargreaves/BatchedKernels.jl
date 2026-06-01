@@ -15,6 +15,7 @@ include("sub_kernels/test_transpose.jl")
 include("sub_kernels/test_gauss_likelihood.jl")
 
 # Fuser unit tests — CPU-only tests over tape / planner / scheduler.
+include("fusion/test_schedule.jl")
 
 # Fused-kernel end-to-end tests — exercise the broadcast API and the full
 # trace → plan → codegen pipeline.
