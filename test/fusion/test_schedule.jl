@@ -5,6 +5,7 @@
     # parallel chains, auto in-place, beats-natural).
 
     using BatchedKernels
+    using LinearAlgebra
     const BK = BatchedKernels
 
     const Tape = BK.Tape
@@ -313,5 +314,56 @@
         p_nat = eval_order(tape, [M1.id, M2.id, M3.id, G1.id, G2.id, Gout.id])
         @test p_nat.M == 3
         @test p_sched.M == 2
+    end
+
+    @testset "all-batched Kalman cov: scheduler trims 6 → 5 matrix slots" begin
+        # Feed the all-batched Kalman cov update through the tracer, and check the scheduler 
+        # interleaves loads with compute to keep at most 5 slots alive instead of 6.
+        function kalman_cov(P, A, Q, H, R)
+            P_pred = A * P * A' + Q
+            HP_pred = H * P_pred
+            S = HP_pred * H' + R
+            chol = cholesky(S)
+            Y = LowerTriangular(chol.U') \ HP_pred
+            K_T = chol.U \ Y
+            KH = K_T' * H
+            return (I - KH) * P_pred
+        end
+
+        D = 3; T = Float32
+        specs = BK.InputSpec[
+            BK.LeafInput(BK.TraceMatrix{T,D,D}, BATCHED) for _ in 1:5
+        ]
+        tape = BK.trace(kalman_cov, specs)
+
+        o = schedule(tape)
+        check_perm(o, length(tape.nodes))
+        check_topological(tape, o)
+
+        sched_nodes = _collect_schedulable(tape)
+        dag = _reduced_dag(tape, sched_nodes)
+        leaves = _output_leaf_mask(tape, dag.bit_of)
+        pool_of = [_sched_pool(tape, id) for id in sched_nodes]
+        pool_M = UInt64(0); pool_V = UInt64(0)
+        for (i, pp) in enumerate(pool_of)
+            bit = UInt64(1) << (i - 1)
+            pp === :M ? (pool_M |= bit) : pp === :V ? (pool_V |= bit) : nothing
+        end
+        inplace = [_inplace_info(tape, sched_nodes[i], dag.bit_of) for i in 1:length(sched_nodes)]
+
+        sched_only = filter(id -> id in Set(sched_nodes), o)
+        p_sched = BK._evaluate_order(
+            sched_only, dag.bit_of, dag.consumers, leaves,
+            pool_of, pool_M, pool_V, inplace,
+        )
+        p_nat = BK._evaluate_order(
+            sched_nodes, dag.bit_of, dag.consumers, leaves,
+            pool_of, pool_M, pool_V, inplace,
+        )
+        lb = _compute_lb1(sched_nodes, pool_M, pool_V, pool_of, dag.preds, inplace, dag.bit_of)
+
+        @test p_nat.M == 6
+        @test p_sched.M == 5
+        @test p_sched.M >= lb.M  # LB1 sound
     end
 end
