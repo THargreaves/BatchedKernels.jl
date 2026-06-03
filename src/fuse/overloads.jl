@@ -263,6 +263,20 @@ end
 # which would iterate scalar entries.
 
 function LinearAlgebra.cholesky(A::Symmetric{T,<:TraceMatrix{T,D_M,D_M}}) where {T,D_M}
+    # TODO: support `uplo='L'`. The current cholesky sub-kernel only reads the
+    # upper triangle of its input and writes the U-factor into the upper
+    # triangle of its output, so naively stripping `Symmetric(M, :L)` would
+    # silently read the wrong triangle. A proper fix requires either a
+    # lower-triangle cholesky sub-kernel in `operations.jl` (full stdlib
+    # parity), or feeding `adjoint(A.data)` through the existing kernel
+    # (numerically correct via `.U`/`.L` but the returned Cholesky's raw
+    # `.factors` layout would diverge from stdlib's convention). Erroring
+    # for now keeps both correctness and external representation honest.
+    A.uplo == 'U' || error(
+        "BatchedKernels: cholesky(Symmetric(..., :L)) is not yet supported — " *
+        "wrap with `Symmetric(.., :U)` (the default) or transpose your input " *
+        "before wrapping.",
+    )
     return cholesky(A.data)
 end
 
