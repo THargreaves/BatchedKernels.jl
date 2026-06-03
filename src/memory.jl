@@ -1399,10 +1399,11 @@ end
     global_arr,
     shmem,
     n_mats_per_block::Int32,
+    N::Int32,
 )
     tid = threadIdx().x
     base = (blockIdx().x - 1i32) * n_mats_per_block
-    if tid <= n_mats_per_block
+    if tid <= n_mats_per_block && (base + tid) <= N
         @inbounds global_arr[base + tid] = shmem[tid]
     end
 end

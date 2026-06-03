@@ -443,7 +443,7 @@ function codegen(
         leaf = leaves[k]
         out_sym = out_syms[k]
         shmem_sym = sout_shmem_syms[leaf.node_id]
-        push!(stmts, :(scalar_write!($out_sym, $shmem_sym, $n_mats_per_block)))
+        push!(stmts, :(scalar_write!($out_sym, $shmem_sym, $n_mats_per_block, N)))
     end
 
     push!(stmts, :(return nothing))
