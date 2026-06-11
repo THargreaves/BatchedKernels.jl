@@ -78,9 +78,7 @@ function combined_lifecycle(tape::Tape, refs::Vector{NodeRef})
 end
 
 # Emit a CallNode that produces an output of the given trace type.
-function emit_call!(
-    tape::Tape, fn::F, arg_refs::Vector{NodeRef}, ::Type{Out}
-) where {F,Out}
+function emit_call!(tape::Tape, fn::F, arg_refs::Vector{NodeRef}, ::Type{Out}) where {F,Out}
     lc = combined_lifecycle(tape, arg_refs)
     return push_node!(tape, CallNode(fn, arg_refs), NodeMeta(Out, lc))
 end

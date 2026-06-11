@@ -253,8 +253,7 @@ function _assemble_output(spec::LeafOutput, leaf_arrays::Vector, idx::Ref{Int}, 
         return BatchedCuScalar(arr)
     end
 end
-_assemble_output(spec::LiteralOutput, _leaf_arrays, _idx, N::Int) =
-    SharedValue(spec.val, N)
+_assemble_output(spec::LiteralOutput, _leaf_arrays, _idx, N::Int) = SharedValue(spec.val, N)
 function _assemble_output(spec::CompositeOutput, leaf_arrays::Vector, idx::Ref{Int}, N::Int)
     field_names = Symbol[p.first for p in spec.fields]
     field_vals = Any[_assemble_output(p.second, leaf_arrays, idx, N) for p in spec.fields]
@@ -342,8 +341,7 @@ end
 end
 
 # Leaf batchify_type rules
-batchify_type(::Type{T}) where {T<:Union{Number,AbstractChar,Bool,Nothing}} =
-    SharedValue{T}
+batchify_type(::Type{T}) where {T<:Union{Number,AbstractChar,Bool,Nothing}} = SharedValue{T}
 function batchify_type(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N}
     return BatchedCuMatrix{
         T,D_M,D_N,CuArray{T,3,CUDA.DeviceMemory},CuArray{T,2,CUDA.DeviceMemory}

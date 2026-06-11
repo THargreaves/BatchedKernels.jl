@@ -68,7 +68,8 @@ end
 
 function plan_memory(tape::Tape; order::AbstractVector{Int}=1:length(tape.nodes))
     N = length(tape.nodes)
-    length(order) == N || error("plan_memory: order length $(length(order)) ≠ tape length $N")
+    length(order) == N ||
+        error("plan_memory: order length $(length(order)) ≠ tape length $N")
 
     # Position of each node in the chosen execution order. Last-use is in
     # *position* coordinates so the free-list semantics carry over unchanged
@@ -156,9 +157,11 @@ function plan_memory(tape::Tape; order::AbstractVector{Int}=1:length(tape.nodes)
             free_list = k === :M ? free_M : free_V
 
             in_place_idx = _maybe_inplace_idx(tape, node)
-            auto_inplace_slot =
-                in_place_idx === nothing ?
-                _maybe_auto_inplace_slot(tape, node, p, k, slots, last_use) : nothing
+            auto_inplace_slot = if in_place_idx === nothing
+                _maybe_auto_inplace_slot(tape, node, p, k, slots, last_use)
+            else
+                nothing
+            end
             if in_place_idx !== nothing
                 target_ref = node.args[in_place_idx]
                 owner = resolve_slot_owner(tape, target_ref)
@@ -190,8 +193,7 @@ function plan_memory(tape::Tape; order::AbstractVector{Int}=1:length(tape.nodes)
         freed_here = Set{Tuple{Symbol,Int}}()
         for ref in node_refs(node)
             _free_dead_arg!(
-                tape, slots, last_use, free_M, free_V, freed_here,
-                ref, p, sk, dest_slot,
+                tape, slots, last_use, free_M, free_V, freed_here, ref, p, sk, dest_slot
             )
         end
     end
@@ -218,10 +220,7 @@ end
 # value reused in two output positions shares one staging slot — two
 # `scalar_write!` calls then read from it for two independent global writes.
 function _collect_scalar_output_slots!(
-    scalar_out::Dict{Int,SlotAssignment},
-    next_idx::Ref{Int},
-    tape::Tape,
-    ref::NodeRef,
+    scalar_out::Dict{Int,SlotAssignment}, next_idx::Ref{Int}, tape::Tape, ref::NodeRef
 )
     node = tape.nodes[ref.id]
     if node isa NewNode
@@ -280,8 +279,7 @@ function _free_dead_arg!(
     if arg_node isa NewNode
         for (_, child) in arg_node.fields
             _free_dead_arg!(
-                tape, slots, last_use, free_M, free_V, freed_here,
-                child, pos, sk, dest_slot,
+                tape, slots, last_use, free_M, free_V, freed_here, child, pos, sk, dest_slot
             )
         end
         return nothing
@@ -292,8 +290,8 @@ function _free_dead_arg!(
     # Don't free the dest's own slot when the current op was in-placed onto
     # this arg — the result lives in it now.
     if dest_slot !== nothing &&
-       owner_slot.idx == dest_slot.idx &&
-       owner_slot.kind === dest_slot.kind
+        owner_slot.idx == dest_slot.idx &&
+        owner_slot.kind === dest_slot.kind
         return nothing
     end
     key = (owner_slot.kind, owner_slot.idx)

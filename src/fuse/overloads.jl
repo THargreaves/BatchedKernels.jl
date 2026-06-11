@@ -17,9 +17,7 @@
 
 # --- Matrix * Matrix --------------------------------------------------------
 
-function Base.:*(
-    A::TraceMatrix{T,D_M,D_N}, B::TraceMatrix{T,D_N,D_P}
-) where {T,D_M,D_N,D_P}
+function Base.:*(A::TraceMatrix{T,D_M,D_N}, B::TraceMatrix{T,D_N,D_P}) where {T,D_M,D_N,D_P}
     out = emit_call!(A.tape, *, NodeRef[A.ref, B.ref], TraceMatrix{T,D_M,D_P})
     return TraceMatrix{T,D_M,D_P}(A.tape, out)
 end
@@ -44,9 +42,7 @@ end
 
 # --- Matrix + Matrix --------------------------------------------------------
 
-function Base.:+(
-    A::TraceMatrix{T,D_M,D_N}, B::TraceMatrix{T,D_M,D_N}
-) where {T,D_M,D_N}
+function Base.:+(A::TraceMatrix{T,D_M,D_N}, B::TraceMatrix{T,D_M,D_N}) where {T,D_M,D_N}
     out = emit_call!(A.tape, +, NodeRef[A.ref, B.ref], TraceMatrix{T,D_M,D_N})
     return TraceMatrix{T,D_M,D_N}(A.tape, out)
 end
@@ -134,9 +130,7 @@ end
 
 # --- Matrix * Vector --------------------------------------------------------
 
-function Base.:*(
-    A::TraceMatrix{T,D_M,D_N}, x::TraceVector{T,D_N}
-) where {T,D_M,D_N}
+function Base.:*(A::TraceMatrix{T,D_M,D_N}, x::TraceVector{T,D_N}) where {T,D_M,D_N}
     out = emit_call!(A.tape, *, NodeRef[A.ref, x.ref], TraceVector{T,D_M})
     return TraceVector{T,D_M}(A.tape, out)
 end
@@ -237,15 +231,14 @@ function Base.getproperty(q::QRResult{T,D}, s::Symbol) where {T,D}
 end
 
 # Q' just flips the Adj flag; nothing to emit until a consumer hits.
-Base.adjoint(q::LazyQTrace{T,D,Adj}) where {T,D,Adj} =
-    LazyQTrace{T,D,!Adj}(q.R_ref, q.tau_ref, q.tape)
+function Base.adjoint(q::LazyQTrace{T,D,Adj}) where {T,D,Adj}
+    return LazyQTrace{T,D,!Adj}(q.R_ref, q.tau_ref, q.tape)
+end
 
 # Q * B and Q' * B share this single overload — the Adj flag is encoded in
 # the LazyQTrace's type parameter and emitted as a `ConstNode(Val(Adj))`
 # arg that `emit_primitive(_qr_Q_multiply)` reads.
-function Base.:*(
-    q::LazyQTrace{T,D,Adj}, B::TraceMatrix{T,D,K}
-) where {T,D,Adj,K}
+function Base.:*(q::LazyQTrace{T,D,Adj}, B::TraceMatrix{T,D,K}) where {T,D,Adj,K}
     adj_ref = emit_const!(q.tape, Val(Adj))
     out = emit_call!(
         q.tape,
@@ -307,9 +300,7 @@ function LinearAlgebra.logdet(C::Cholesky{T,<:TraceMatrix{T,D_M,D_M}}) where {T,
     return TraceScalar{T}(tape, out)
 end
 
-function LinearAlgebra.logdet(
-    M::Symmetric{T,<:TraceMatrix{T,D_M,D_M}}
-) where {T<:Real,D_M}
+function LinearAlgebra.logdet(M::Symmetric{T,<:TraceMatrix{T,D_M,D_M}}) where {T<:Real,D_M}
     return logdet(cholesky(M))
 end
 

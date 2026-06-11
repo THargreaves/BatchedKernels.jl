@@ -148,7 +148,7 @@ end
     # Compute each element of column d of C
     @inbounds @unroll for i in (1i32):D1
         tot = zero(T)
-        @unroll for k in 1i32:D2
+        @unroll for k in (1i32):D2
             if k <= d
                 tot += A[i, k] * U_col[k]
             end
@@ -181,7 +181,7 @@ end
     @inbounds @unroll for i in (1i32):D1
         tot = zero(T)
         # for k in d:D2
-        @unroll for k in 1i32:D2
+        @unroll for k in (1i32):D2
             if k >= d
                 tot += A[i, k] * L_col[k]
             end
@@ -322,7 +322,7 @@ end
 
             # RMOD STEP: subtract contributions from previous columns
             # @unroll for k in (1i32):(i - 1i32)
-            @unroll for k in 1i32:D1
+            @unroll for k in (1i32):D1
                 if k < i
                     Ukj = U[k, j]  # Load from already-computed Cholesky factors
                     # Share the diagonal/column value with other threads
@@ -402,10 +402,12 @@ end
     return nothing
 end
 
-@inline function warp_reduce_sum(mask::UInt32, val::T, i::Int32, ::Val{width}) where {T,width}
+@inline function warp_reduce_sum(
+    mask::UInt32, val::T, i::Int32, ::Val{width}
+) where {T,width}
     acc = val
     nsteps = 32i32 - leading_zeros(width - 1i32)
-    @unroll for s in 1i32:nsteps
+    @unroll for s in (1i32):nsteps
         offset = 1i32 << (nsteps - s)
         add = shfl_down_sync(mask, acc, offset)
         acc += ifelse(i + offset <= width, add, zero(T))
@@ -445,13 +447,13 @@ end
 
     # Load matrix into registers, padding rows hold zeros throughout
     R_col = MVector{Int(D2),T}(undef)
-    @inbounds @unroll for j in 1i32:D2
+    @inbounds @unroll for j in (1i32):D2
         R_col[j] = is_padding_row ? zero(T) : A[i, j]
     end
 
     tau_storage = zero(T)
 
-    @unroll for j in 1i32:min(D1 - 1i32, D2)
+    @unroll for j in (1i32):min(D1 - 1i32, D2)
         # 1. Compute norm of j-th column
 
         # This thread's contribution to the squared norm sum
@@ -472,15 +474,7 @@ end
         # v_elem:   set to 0 for rows above j and padding rows
         #           alpha - beta for row j
         #           R_col[j] for rows below j.
-        v_elem = ifelse(
-            is_padding_row || i < j,
-            zero(T),
-            ifelse(
-                i == j,
-                v1,
-                R_col[j]
-            ),
-        )
+        v_elem = ifelse(is_padding_row || i < j, zero(T), ifelse(i == j, v1, R_col[j]))
         # Normalise v so that v[1] = 1.0
         # This is necessary to fit v into lower triangular part of R
         # for storage and calculation of Q later, despite not necessary when
@@ -504,7 +498,7 @@ end
         # 3.1: thread i writes its partial products into row i of scratch
         # scratch[i, t] = v[i] * R[i, t] * tau for each trailing column t.
         # Padding rows write zero because v_elem == 0 and R_col == 0.
-        @inbounds @unroll for t in 1i32:D2
+        @inbounds @unroll for t in (1i32):D2
             if t >= j + 1i32
                 R[i, t] = tau_v_elem * R_col[t]
             end
@@ -516,7 +510,7 @@ end
         # 3.2: thread i reads column i of scratch: R[r, i] for r in 1..D, and sums
         # This gives the i-th column's entry of tau * v^T A
         w_i = zero(T)
-        @inbounds @unroll for r in 1i32:D
+        @inbounds @unroll for r in (1i32):D
             if r >= j
                 w_i += R[r, i]
             end
@@ -524,7 +518,7 @@ end
         # w_i = i-th entry of tau * v^T A
 
         # Compute v * (tau * v^T A)
-        @inbounds @unroll for t in 1i32:D2
+        @inbounds @unroll for t in (1i32):D2
             if t >= j + 1i32
                 w_t = shfl_sync(mask, w_i, (base + t) % UInt32)
                 R_col[t] -= v_elem * w_t
@@ -542,7 +536,7 @@ end
     end
 
     # Write back
-    @inbounds @unroll for j in 1i32:D2
+    @inbounds @unroll for j in (1i32):D2
         if !is_padding_row
             R[i, j] = R_col[j]
         end
@@ -560,8 +554,8 @@ end
     return nothing
 end
 
-@inline js_range(::Val{true}, ::Val{K}) where {K} = (1i32:K)
-@inline js_range(::Val{false}, ::Val{K}) where {K} = (K:-1i32:1i32)
+@inline js_range(::Val{true}, ::Val{K}) where {K} = ((1i32):K)
+@inline js_range(::Val{false}, ::Val{K}) where {K} = (K:(-1i32):(1i32))
 """
 Computes C = QB or C = Q^T B using Householder transformations without materialising Q
 """
@@ -592,12 +586,12 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
     i = d
 
     @inbounds if C !== B && i <= B_D1
-        @unroll for j in 1i32:B_D2
+        @unroll for j in (1i32):B_D2
             C[i, j] = B[i, j]
         end
     end
     @inbounds if i > B_D1 && i <= D1
-        @unroll for j in 1i32:B_D2
+        @unroll for j in (1i32):B_D2
             C[i, j] = 0.0f0
         end
     end
@@ -615,7 +609,7 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
         @inbounds tau_j = tau[j]
 
         w_i = C[j, i]  # first element in v = 1, not stored in R
-        @unroll for t in 1i32:D1
+        @unroll for t in (1i32):D1
             if t > j
                 w_i += R[t, j] * C[t, i]
             end
@@ -623,17 +617,19 @@ Computes C = QB or C = Q^T B using Householder transformations without materiali
 
         R_elem = ifelse(i == j, one(T), R[i, j])
         tau_R_elem = tau_j * R_elem
-        @unroll for t in 1i32:B_D2
+        @unroll for t in (1i32):B_D2
             w_t = shfl_sync(mask, w_i, max(lid - i + t, 1i32) % UInt32)
             C[i, t] -= ifelse(i >= j, tau_R_elem * w_t, zero(T))
         end
     end
 end
 
-@inline function warp_reduce_sum(mask::UInt32, val::T, i::Int32, width::Int32, ::Val{guard}) where {T,guard}
+@inline function warp_reduce_sum(
+    mask::UInt32, val::T, i::Int32, width::Int32, ::Val{guard}
+) where {T,guard}
     acc = val
     nsteps = 32i32 - leading_zeros(width - 1i32)
-    @unroll for s in 1i32:nsteps
+    @unroll for s in (1i32):nsteps
         offset = 1i32 << (nsteps - s)
         add = shfl_down_sync(mask, acc, offset % UInt32)
         acc += ifelse(i + offset <= guard, add, zero(T))
@@ -643,8 +639,16 @@ end
 
 @inline function shfl_idx_f32(mask::UInt32, val::Float32, src1::Int32)
     src0 = (src1 - 1i32) % UInt32
-    ccall("llvm.nvvm.shfl.sync.idx.f32", llvmcall, Float32,
-          (UInt32, Float32, UInt32, UInt32), mask, val, src0, 0x1f)
+    return ccall(
+        "llvm.nvvm.shfl.sync.idx.f32",
+        llvmcall,
+        Float32,
+        (UInt32, Float32, UInt32, UInt32),
+        mask,
+        val,
+        src0,
+        0x1f,
+    )
 end
 
 @inline function batch_op!(
@@ -675,19 +679,19 @@ end
     # Load both halves into registers
     R_col_top = MVector{Int(D),T}(undef)
     R_col_bot = MVector{Int(D),T}(undef)
-    @inbounds @unroll for j in 1i32:D
+    @inbounds @unroll for j in (1i32):D
         R_col_top[j] = A[i, j]
         R_col_bot[j] = A[i + D, j]
     end
 
-    @inbounds @unroll for j in 1i32:D
+    @inbounds @unroll for j in (1i32):D
         # 1. Compute norm of j-th column
 
         # This thread's contribution to the squared norm sum
         contrib_sq = ifelse(
             i >= j,
             R_col_top[j] * R_col_top[j] + R_col_bot[j] * R_col_bot[j],
-            R_col_bot[j] * R_col_bot[j]
+            R_col_bot[j] * R_col_bot[j],
         )
 
         # Compute norm via reduction sum
@@ -704,11 +708,7 @@ end
         # v_top:   set to 0 for rows above j and padding rows
         #           alpha - beta for row j
         #           R_col[j] for rows below j.
-        v_top = ifelse(
-            i < j,
-            zero(T),
-            ifelse(i == j, v1, R_col_top[j])
-        )
+        v_top = ifelse(i < j, zero(T), ifelse(i == j, v1, R_col_top[j]))
         # Normalise v so that v[1] = 1.0
         # This is necessary to fit v into lower triangular part of R
         # for storage and calculation of Q later, despite not necessary when
@@ -730,7 +730,7 @@ end
         # 3.1: thread i writes its partial products into row i of scratch
         # scratch[i, t] = v[i] * R[i, t] * tau for each trailing column t.
         # Padding rows write zero because v_elem == 0 and R_col == 0.
-        @inbounds @unroll for t in 1i32:D
+        @inbounds @unroll for t in (1i32):D
             if t >= j + 1i32
                 R[i, t] = tau_v_top * R_col_top[t] + tau_v_bot * R_col_bot[t]
             end
@@ -742,13 +742,13 @@ end
         # 3.2: thread i reads column i of scratch: R[r, i] for r in 1..D, and sums
         # This gives the i-th column's entry of tau * v^T A
         w_i = zero(T)
-        @inbounds @unroll for r in 1i32:D
+        @inbounds @unroll for r in (1i32):D
             w_i += R[r, i]
         end
         # w_i = i-th entry of tau * v^T A
 
         # Compute v * (tau * v^T A)
-        @inbounds @unroll for t in 1i32:D
+        @inbounds @unroll for t in (1i32):D
             if t >= j + 1i32
                 w_t = shfl_idx_f32(mask, w_i, base + t)
                 R_col_top[t] -= v_top * w_t
@@ -764,7 +764,7 @@ end
     end
 
     # Write back
-    @inbounds @unroll for j in 1i32:D
+    @inbounds @unroll for j in (1i32):D
         if j >= i
             R[i, j] = R_col_top[j]
         end
@@ -779,17 +779,20 @@ struct RegVector{N,T} <: AbstractVector{T}
 end
 @inline Base.size(::RegVector{N}) where {N} = (N,)
 @inline Base.@propagate_inbounds Base.getindex(rv::RegVector, j::Integer) = rv.v[j]
-@inline Base.@propagate_inbounds Base.setindex!(rv::RegVector, val, j::Integer) = (rv.v[j] = val)
+@inline Base.@propagate_inbounds Base.setindex!(rv::RegVector, val, j::Integer) =
+    (rv.v[j] = val)
 
 # Vector backed by row i of the R matrix
 struct ShmemVector{M,T} <: AbstractVector{T}
     R::M
     i::Int32
 end
-@inline ShmemVector(R::AbstractMatrix{T}, i::Int32) where {T} = ShmemVector{typeof(R),T}(R, i)
+@inline ShmemVector(R::AbstractMatrix{T}, i::Int32) where {T} =
+    ShmemVector{typeof(R),T}(R, i)
 @inline Base.size(sv::ShmemVector) = (size(sv.R, 2),)
 @inline Base.@propagate_inbounds Base.getindex(sv::ShmemVector, j::Integer) = sv.R[sv.i, j]
-@inline Base.@propagate_inbounds Base.setindex!(sv::ShmemVector, val, j::Integer) = (sv.R[sv.i, j] = val)
+@inline Base.@propagate_inbounds Base.setindex!(sv::ShmemVector, val, j::Integer) =
+    (sv.R[sv.i, j] = val)
 
 @inline function batch_op!(
     ::typeof(qr),
@@ -827,21 +830,19 @@ end
     R_TR = MVector{Int(D),T}(undef)
     R_BL = MVector{Int(D),T}(undef)
 
-    @inbounds @unroll for j in 1i32:D
+    @inbounds @unroll for j in (1i32):D
         R_TL[j] = A[i, j]
         R_TR[j] = zero(T)
         R_BL[j] = A[i + D, j]
         R_BR[j] = A[i + D, j + D]
     end
 
-    @inbounds @unroll for j in 1i32:D
+    @inbounds @unroll for j in (1i32):D
         # 1. Compute norm of j-th column
 
         # This thread's contribution to the squared norm sum
         contrib_sq = ifelse(
-            i >= j,
-            R_TL[j] * R_TL[j] + R_BL[j] * R_BL[j],
-            R_BL[j] * R_BL[j],
+            i >= j, R_TL[j] * R_TL[j] + R_BL[j] * R_BL[j], R_BL[j] * R_BL[j]
         )
 
         # Compute norm via reduction sum
@@ -858,11 +859,7 @@ end
         # v_top:   set to 0 for rows above j and padding rows
         #           alpha - beta for row j
         #           R_col[j] for rows below j.
-        v_top = ifelse(
-            i < j,
-            zero(T),
-            ifelse(i == j, v1, R_TL[j])
-        )
+        v_top = ifelse(i < j, zero(T), ifelse(i == j, v1, R_TL[j]))
         # Normalise v so that v[1] = 1.0
         # This is necessary to fit v into lower triangular part of R
         # for storage and calculation of Q later, despite not necessary when
@@ -883,7 +880,7 @@ end
         # 3.1: thread i writes its partial products into row i of scratch
         # scratch[i, t] = v[i] * R[i, t] * tau for each trailing column t.
         # Padding rows write zero because v_elem == 0 and R_col == 0.
-        @inbounds @unroll for t in 1i32:D
+        @inbounds @unroll for t in (1i32):D
             if t >= j + 1i32
                 # Write to bottom left, as in sqrt kalman, that can be corrupted
                 A[i + D, t] = tau_v_top * R_TL[t] + tau_v_bot * R_BL[t]
@@ -896,13 +893,13 @@ end
         # 3.2: thread i reads column i of scratch: R[r, i] for r in 1..D, and sums
         # This gives the i-th column's entry of tau * v^T A
         w_i_left = zero(T)
-        @inbounds @unroll for r in 1i32:D
+        @inbounds @unroll for r in (1i32):D
             w_i_left += A[r + D, i]
         end
         # w_i_left = i-th entry of tau * v^T A
 
         # Left stage: compute v * (tau * v^T A)
-        @inbounds @unroll for t in 1i32:D
+        @inbounds @unroll for t in (1i32):D
             if t >= j + 1i32
                 w_t = shfl_idx_f32(mask, w_i_left, base + t)
                 R_TL[t] -= v_top * w_t
@@ -916,17 +913,17 @@ end
         end
 
         # Left stage: compute v * (tau * v^T A)
-        @inbounds @unroll for t in 1i32:D
+        @inbounds @unroll for t in (1i32):D
             A[i + D, t] = tau_v_top * R_TR[t] + tau_v_bot * R_BR[t]
         end
         sync_warp(mask)
 
         w_i_right = zero(T)
-        @inbounds @unroll for r in 1i32:D
+        @inbounds @unroll for r in (1i32):D
             w_i_right += A[r + D, i]
         end
 
-        @inbounds @unroll for t in 1i32:D
+        @inbounds @unroll for t in (1i32):D
             w_t = shfl_idx_f32(mask, w_i_right, base + t)
             R_TR[t] -= v_top * w_t
             R_BR[t] -= v_bot * w_t
@@ -934,12 +931,8 @@ end
     end
 
     # Phase 2: right half of 2D x 2D
-    @inbounds @unroll for j in 1i32:(D - 1i32)
-        contrib_sq = ifelse(
-            i >= j,
-            R_BR[j] * R_BR[j],
-            zero(T),
-        )
+    @inbounds @unroll for j in (1i32):(D - 1i32)
+        contrib_sq = ifelse(i >= j, R_BR[j] * R_BR[j], zero(T))
         norm_sq = warp_reduce_sum(mask, contrib_sq, i, Val(D))
         norm_sq = shfl_idx_f32(mask, norm_sq, lid - i + 1i32)
 
@@ -948,22 +941,14 @@ end
         beta = -sign * sqrt(norm_sq)
         v1 = alpha - beta
 
-        v_elem = ifelse(
-            i < j,
-            zero(T),
-            ifelse(
-                i == j,
-                v1,
-                R_BR[j],
-            ),
-        )
+        v_elem = ifelse(i < j, zero(T), ifelse(i == j, v1, R_BR[j]))
 
         v_elem = v_elem / v1
 
         tau = (beta - alpha) / beta
         tau_v_elem = tau * v_elem
 
-        @inbounds @unroll for t in 1i32:D
+        @inbounds @unroll for t in (1i32):D
             if t >= j + 1i32
                 # Write to bottom left, as in sqrt kalman, it can be corrupted
                 A[i + D, t] = tau_v_elem * R_BR[t]
@@ -972,12 +957,12 @@ end
         sync_warp(mask)
 
         w_i = zero(T)
-        @inbounds @unroll for r in 1i32:D
+        @inbounds @unroll for r in (1i32):D
             # Write to bottom left, as in sqrt kalman, it can be corrupted
             w_i += A[r + D, i]
         end
 
-        @inbounds @unroll for t in 1i32:D
+        @inbounds @unroll for t in (1i32):D
             if t >= j + 1i32
                 w_t = shfl_idx_f32(mask, w_i, base + t)
                 R_BR[t] -= v_elem * w_t
@@ -990,7 +975,7 @@ end
     end
 
     if D < THRESH
-        @inbounds @unroll for j in 1i32:D
+        @inbounds @unroll for j in (1i32):D
             R[i, j] = R_BR[j]
         end
     end
@@ -1048,9 +1033,9 @@ end
 
     x = MVector{Int(D1),T}(undef)
 
-    @inbounds @unroll for i in D1:(-1i32):1i32
+    @inbounds @unroll for i in D1:(-1i32):(1i32)
         xi = A[i, d]
-        @unroll for j in 1i32:D1
+        @unroll for j in (1i32):D1
             if j > i
                 xi -= U[i, j] * x[j]
             end
@@ -1058,7 +1043,7 @@ end
         x[i] = xi / U[i, i]
     end
 
-    @inbounds @unroll for i in 1i32:D1
+    @inbounds @unroll for i in (1i32):D1
         C[i, d] = x[i]
     end
 
@@ -1125,11 +1110,11 @@ end
 
     y = MVector{Int(D1),T}(undef)
 
-    @inbounds @unroll for i in 1i32:D1
+    @inbounds @unroll for i in (1i32):D1
         yi = A[i, d]
 
         # @unroll for j in 1i32:(i - 1i32)
-        @unroll for j in 1i32:D1
+        @unroll for j in (1i32):D1
             if j < i
                 yi -= L[i, j] * y[j]
             end
@@ -1137,7 +1122,7 @@ end
         y[i] = yi / L[i, i]
     end
 
-    @inbounds @unroll for i in 1i32:D1
+    @inbounds @unroll for i in (1i32):D1
         C[i, d] = y[i]
     end
 
@@ -1178,10 +1163,10 @@ end
     mask = (UInt32(1) << (width % UInt32)) - UInt32(1)
     mask = mask << (base % UInt32)
 
-    @inbounds @unroll for j in 1i32:D1
+    @inbounds @unroll for j in (1i32):D1
         c_d_div_L = c_d / L[j, j]
         c_j_div_L = shfl_sync(mask, c_d_div_L, (base + j) % UInt32)
-        
+
         if d > j
             c_d -= L[d, j] * c_j_div_L
         end
@@ -1197,11 +1182,7 @@ end
 end
 
 @inline function batch_op!(
-    ::typeof(transpose),
-    B::AbstractMatrix{T},
-    A::AbstractMatrix{T},
-    d::Int32, 
-    ::Val{D},
+    ::typeof(transpose), B::AbstractMatrix{T}, A::AbstractMatrix{T}, d::Int32, ::Val{D}
 ) where {T,D}
     if A === B
         # Each thread reads column d of A and writes it as row d of B
@@ -1223,7 +1204,7 @@ end
     ::typeof(transpose),
     B::AbstractMatrix{T},
     A::AbstractMatrix{T},
-    d::Int32, 
+    d::Int32,
     ::Val{D1},
     ::Val{D2},
     ::Val,
@@ -1286,7 +1267,7 @@ end
     @inbounds for k in (1i32):D
         tot += A[d, k] * x[k]
     end
-    
+
     @inbounds y[d] = tot
 
     return nothing
@@ -1315,7 +1296,7 @@ end
     @inbounds for k in (1i32):D2
         tot += A[d, k] * x[k]
     end
-    
+
     @inbounds y[d] = tot
 
     return nothing
@@ -1431,10 +1412,9 @@ end
     mask = mask << (base % UInt32)
 
     log_det = T(2) * warp_reduce_sum(mask, log(M[d, d]), d, Val(D1))
-    
+
     return log_det
 end
-
 
 @inline function batch_op!(
     ::Val{:mahal_dist},

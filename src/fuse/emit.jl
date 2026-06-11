@@ -26,12 +26,9 @@ _is_scalar_op(types) = all(t -> t <: TraceScalar || t <: Number, types)
 # Lower a scalar primitive to `$dest = fn(args...)`. The destination is the
 # scalar's pre-initialised Julia local (allocated in codegen.jl), so the
 # assignment writes through to the function-level binding.
-_emit_scalar_assign(fn, dest::Symbol, args::Vector) =
-    :($dest = $(Expr(:call, fn, args...)))
+_emit_scalar_assign(fn, dest::Symbol, args::Vector) = :($dest = $(Expr(:call, fn, args...)))
 
-function emit_primitive(
-    ::typeof(*), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
-)
+function emit_primitive(::typeof(*), dest::Symbol, args::Vector, types::Vector, D_MAX::Int)
     if _is_scalar_op(types)
         return _emit_scalar_assign(*, dest, args)
     end
@@ -43,37 +40,20 @@ function emit_primitive(
             "emit_primitive(*): matvec contraction dim mismatch ($D_N vs $(shape(types[2])[1]))",
         )
         return :(batch_op!(
-            *,
-            $dest,
-            $A,
-            $B,
-            d,
-            Val(Int32($D_M)),
-            Val(Int32($D_N)),
-            Val(Int32($D_MAX)),
+            *, $dest, $A, $B, d, Val(Int32($D_M)), Val(Int32($D_N)), Val(Int32($D_MAX))
         ))
     else
         # Matmul: A is (D_M, D_N), B is (D_N, D_P) -> C is (D_M, D_P).
         D_M, D_N = shape(types[1])
         D_N2, D_P = shape(types[2])
-        D_N == D_N2 ||
-            error("emit_primitive(*): contraction dim mismatch ($D_N vs $D_N2)")
+        D_N == D_N2 || error("emit_primitive(*): contraction dim mismatch ($D_N vs $D_N2)")
         return :(batch_op!(
-            *,
-            $dest,
-            $A,
-            $B,
-            d,
-            Val(Int32($D_M)),
-            Val(Int32($D_N)),
-            Val(Int32($D_P)),
+            *, $dest, $A, $B, d, Val(Int32($D_M)), Val(Int32($D_N)), Val(Int32($D_P))
         ))
     end
 end
 
-function emit_primitive(
-    ::typeof(+), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
-)
+function emit_primitive(::typeof(+), dest::Symbol, args::Vector, types::Vector, D_MAX::Int)
     if _is_scalar_op(types)
         return _emit_scalar_assign(+, dest, args)
     end
@@ -93,21 +73,12 @@ function emit_primitive(
     else
         D_M, D_N = shape(types[1])
         return :(batch_op!(
-            +,
-            $dest,
-            $A,
-            $B,
-            d,
-            Val(Int32($D_M)),
-            Val(Int32($D_N)),
-            Val(Int32($D_MAX)),
+            +, $dest, $A, $B, d, Val(Int32($D_M)), Val(Int32($D_N)), Val(Int32($D_MAX))
         ))
     end
 end
 
-function emit_primitive(
-    ::typeof(-), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
-)
+function emit_primitive(::typeof(-), dest::Symbol, args::Vector, types::Vector, D_MAX::Int)
     if length(args) == 1
         # Unary scalar negation.
         return :($dest = -($(args[1])))
@@ -121,14 +92,7 @@ function emit_primitive(
     a, b = args
     D_M, = shape(types[1])
     return :(batch_op!(
-        -,
-        $dest,
-        $a,
-        $b,
-        d,
-        Val(Int32($D_M)),
-        Val(Int32(0)),
-        Val(Int32($D_MAX)),
+        -, $dest, $a, $b, d, Val(Int32($D_M)), Val(Int32(0)), Val(Int32($D_MAX))
     ))
 end
 
@@ -138,13 +102,7 @@ function emit_primitive(
     A, = args
     D_M = shape(types[1])[1]
     return :(batch_op!(
-        cholesky,
-        $dest,
-        $A,
-        d,
-        Val(Int32($D_M)),
-        Val(Int32($D_MAX)),
-        warp_matrix_id,
+        cholesky, $dest, $A, d, Val(Int32($D_M)), Val(Int32($D_MAX)), warp_matrix_id
     ))
 end
 
@@ -160,18 +118,11 @@ function emit_primitive(
         "emit_primitive(cholesky!): masked in-place cholesky not yet supported (D_M=$D_M, D_MAX=$D_MAX)",
     )
     return :(batch_op!(
-        cholesky,
-        $A,
-        d,
-        Val(Int32($D_MAX)),
-        Int32($(32 ÷ D_MAX)),
-        warp_matrix_id,
+        cholesky, $A, d, Val(Int32($D_MAX)), Int32($(32 ÷ D_MAX)), warp_matrix_id
     ))
 end
 
-function emit_primitive(
-    ::typeof(\), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
-)
+function emit_primitive(::typeof(\), dest::Symbol, args::Vector, types::Vector, D_MAX::Int)
     LU, R = args
     if types[2] <: AbstractVector
         # Triangular \ vector. Only LowerTriangular has a sub-kernel today;
@@ -196,14 +147,7 @@ function emit_primitive(
     end
     D_M, D_N = shape(types[2])
     return :(batch_op!(
-        \,
-        $dest,
-        $LU,
-        $R,
-        d,
-        Val(Int32($D_M)),
-        Val(Int32($D_N)),
-        Val(Int32($D_MAX)),
+        \, $dest, $LU, $R, d, Val(Int32($D_M)), Val(Int32($D_N)), Val(Int32($D_MAX))
     ))
 end
 
@@ -253,14 +197,11 @@ end
 # A4 scope: square only and `D == D_MAX` (no rectangular, no masked variant).
 # The masked rectangular case would mirror the cholesky / matmul rectangular
 # variants; not in scope.
-function emit_primitive(
-    ::typeof(qr), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
-)
+function emit_primitive(::typeof(qr), dest::Symbol, args::Vector, types::Vector, D_MAX::Int)
     A, tau_view = args
     D_M, D_N = shape(types[1])
-    D_M == D_N || error(
-        "emit_primitive(qr): rectangular QR not yet supported (got $(D_M)×$(D_N))",
-    )
+    D_M == D_N ||
+        error("emit_primitive(qr): rectangular QR not yet supported (got $(D_M)×$(D_N))")
     D_M == D_MAX || error(
         "emit_primitive(qr): QR currently requires D == D_MAX (got D=$D_M, D_MAX=$D_MAX); mix-with-larger-matrix kernels are out of A4 scope",
     )
@@ -330,8 +271,7 @@ function _emit_warp_reduction_broadcast(
         $val_sym = $reduction_call
         $base_sym = (warp_matrix_id - 1i32) * $(Int32(D_MAX))
         $mask_sym =
-            ((UInt32(1) << ($(Int32(D_op)) % UInt32)) - UInt32(1)) <<
-            ($base_sym % UInt32)
+            ((UInt32(1) << ($(Int32(D_op)) % UInt32)) - UInt32(1)) << ($base_sym % UInt32)
         $dest = shfl_sync($mask_sym, $val_sym, ($base_sym + 1i32) % UInt32)
     end
 end
@@ -358,12 +298,7 @@ function emit_primitive(
     v, = args
     D_M, = shape(types[1])
     reduction = :(batch_op!(
-        Val(:mahal_dist),
-        $v,
-        d,
-        Val(Int32($D_M)),
-        Val(Int32($D_MAX)),
-        warp_matrix_id,
+        Val(:mahal_dist), $v, d, Val(Int32($D_M)), Val(Int32($D_MAX)), warp_matrix_id
     ))
     return _emit_warp_reduction_broadcast(reduction, dest, D_M, D_MAX)
 end

@@ -38,18 +38,18 @@ struct TraceMatrix{T,D_M,D_N} <: AbstractMatrix{T}
 end
 
 Base.size(::TraceMatrix{T,D_M,D_N}) where {T,D_M,D_N} = (D_M, D_N)
-Base.size(::TraceMatrix{T,D_M,D_N}, i::Int) where {T,D_M,D_N} =
-    i == 1 ? D_M : (i == 2 ? D_N : 1)
+function Base.size(::TraceMatrix{T,D_M,D_N}, i::Int) where {T,D_M,D_N}
+    return i == 1 ? D_M : (i == 2 ? D_N : 1)
+end
 Base.length(::TraceMatrix{T,D_M,D_N}) where {T,D_M,D_N} = D_M * D_N
 Base.axes(::TraceMatrix{T,D_M,D_N}) where {T,D_M,D_N} = (Base.OneTo(D_M), Base.OneTo(D_N))
 Base.IndexStyle(::Type{<:TraceMatrix}) = IndexCartesian()
 Base.eltype(::Type{<:TraceMatrix{T}}) where {T} = T
 
-Base.getindex(::TraceMatrix, ::Vararg) = error(
-    "Scalar indexing on TraceMatrix is forbidden inside a vmapped function."
-)
-Base.setindex!(::TraceMatrix, _, ::Vararg) =
-    error("setindex! on TraceMatrix is forbidden.")
+function Base.getindex(::TraceMatrix, ::Vararg)
+    return error("Scalar indexing on TraceMatrix is forbidden inside a vmapped function.")
+end
+Base.setindex!(::TraceMatrix, _, ::Vararg) = error("setindex! on TraceMatrix is forbidden.")
 
 # -----------------------------------------------------------------------------
 # TraceVector
@@ -71,11 +71,10 @@ Base.axes(::TraceVector{T,D_M}) where {T,D_M} = (Base.OneTo(D_M),)
 Base.IndexStyle(::Type{<:TraceVector}) = IndexLinear()
 Base.eltype(::Type{<:TraceVector{T}}) where {T} = T
 
-Base.getindex(::TraceVector, ::Vararg) = error(
-    "Scalar indexing on TraceVector is forbidden inside a vmapped function."
-)
-Base.setindex!(::TraceVector, _, ::Vararg) =
-    error("setindex! on TraceVector is forbidden.")
+function Base.getindex(::TraceVector, ::Vararg)
+    return error("Scalar indexing on TraceVector is forbidden inside a vmapped function.")
+end
+Base.setindex!(::TraceVector, _, ::Vararg) = error("setindex! on TraceVector is forbidden.")
 
 # -----------------------------------------------------------------------------
 # TraceScalar
@@ -228,9 +227,7 @@ function _emit_iaddsub_wrap(M::TraceMatrix{T,D_M,D_M}, a::T, b::T) where {T,D_M}
     fields = Pair{Symbol,NodeRef}[:parent => M.ref, :a => aref, :b => bref]
     lc = meta_at(tape, M.ref).lifecycle
     ref = push_node!(
-        tape,
-        NewNode(IAddSubWrapped{T,D_M}, fields),
-        NodeMeta(IAddSubWrapped{T,D_M}, lc),
+        tape, NewNode(IAddSubWrapped{T,D_M}, fields), NodeMeta(IAddSubWrapped{T,D_M}, lc)
     )
     return TraceMatrix{T,D_M,D_M}(tape, ref)
 end
@@ -323,9 +320,7 @@ end
 function input_spec(x::BatchedStruct{T}) where {T}
     comps = getfield(x, :components)
     trace_T = trace_element_type(typeof(x))
-    fields = Pair{Symbol,InputSpec}[
-        name => input_spec(comps[name]) for name in keys(comps)
-    ]
+    fields = Pair{Symbol,InputSpec}[name => input_spec(comps[name]) for name in keys(comps)]
     return CompositeInput(trace_T, fields)
 end
 
@@ -361,9 +356,7 @@ end
 
 function _reconstruct_trace_arg!(tape::Tape, spec::LeafInput)
     ref = push_node!(
-        tape,
-        InputNode(length(tape.inputs) + 1),
-        NodeMeta(spec.trace_type, spec.lifecycle),
+        tape, InputNode(length(tape.inputs) + 1), NodeMeta(spec.trace_type, spec.lifecycle)
     )
     push!(tape.inputs, ref)
     (spec.trace_type <: TraceMatrix || spec.trace_type <: TraceVector) ||

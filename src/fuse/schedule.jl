@@ -45,7 +45,7 @@
 const _PoolPeak = NamedTuple{(:M, :V),Tuple{Int,Int}}
 
 _lex_lt(a::_PoolPeak, b::_PoolPeak) = a.M < b.M || (a.M == b.M && a.V < b.V)
-_lex_max(a::_PoolPeak, b::_PoolPeak) = (M = max(a.M, b.M), V = max(a.V, b.V))
+_lex_max(a::_PoolPeak, b::_PoolPeak) = (M=max(a.M, b.M), V=max(a.V, b.V))
 
 # -----------------------------------------------------------------------------
 # Schedulable-node identification and pool assignment
@@ -220,7 +220,7 @@ end
 
 # Bitcount per pool: bit i set in `mask` contributes 1 to pool[pools[i]].
 @inline function _popcount_by_pool(mask::UInt64, pool_M::UInt64, pool_V::UInt64)
-    return (M = count_ones(mask & pool_M), V = count_ones(mask & pool_V))
+    return (M=count_ones(mask & pool_M), V=count_ones(mask & pool_V))
 end
 
 # -----------------------------------------------------------------------------
@@ -302,7 +302,7 @@ function _during_peak(
 
     add_M = (pool_v === :M && fresh) ? 1 : 0
     add_V = (pool_v === :V && fresh) ? 1 : 0
-    return (M = counts_before.M + add_M, V = counts_before.V + add_V)
+    return (M=counts_before.M + add_M, V=counts_before.V + add_V)
 end
 
 # -----------------------------------------------------------------------------
@@ -361,7 +361,7 @@ function _compute_lb1(
         lb_M = max(lb_M, pM + addM)
         lb_V = max(lb_V, pV + addV)
     end
-    return (M = lb_M, V = lb_V)
+    return (M=lb_M, V=lb_V)
 end
 
 # -----------------------------------------------------------------------------
@@ -379,13 +379,12 @@ function _evaluate_order(
     inplace::Vector{_InplaceInfo},
 )
     S = UInt64(0)
-    peak = (M = 0, V = 0)
+    peak = (M=0, V=0)
     for tape_id in order
         haskey(bit_of, tape_id) || continue
         i = bit_of[tape_id]
         d = _during_peak(
-            i, S, consumers, output_leaves,
-            pool_of[i], pool_M, pool_V, inplace[i], bit_of,
+            i, S, consumers, output_leaves, pool_of[i], pool_M, pool_V, inplace[i], bit_of
         )
         peak = _lex_max(peak, d)
         S |= UInt64(1) << (i - 1)
@@ -439,8 +438,7 @@ function schedule(tape::Tape)::Vector{Int}
 
     # Initial UB from the natural order; that's a valid schedule by construction.
     ub = _evaluate_order(
-        schedulable, bit_of, consumers, output_leaves,
-        pool_of, pool_M, pool_V, inplace,
+        schedulable, bit_of, consumers, output_leaves, pool_of, pool_M, pool_V, inplace
     )
 
     full = k == 64 ? typemax(UInt64) : (UInt64(1) << k) - UInt64(1)
@@ -448,7 +446,7 @@ function schedule(tape::Tape)::Vector{Int}
     # f[S] = best (peak_M, peak_V) lex to reach S; parent[S] = (prev_S, v_bit_idx)
     f = Dict{UInt64,_PoolPeak}()
     parent = Dict{UInt64,Tuple{UInt64,Int}}()
-    f[UInt64(0)] = (M = 0, V = 0)
+    f[UInt64(0)] = (M=0, V=0)
 
     # BFS by |S|: enumerate states in increasing popcount order so each state's
     # value is finalised before we transition out of it.
@@ -493,8 +491,15 @@ function schedule(tape::Tape)::Vector{Int}
                 rm ⊻= v_bit
                 i = trailing_zeros(v_bit) + 1
                 d = _during_peak(
-                    i, S, consumers, output_leaves,
-                    pool_of[i], pool_M, pool_V, inplace[i], bit_of,
+                    i,
+                    S,
+                    consumers,
+                    output_leaves,
+                    pool_of[i],
+                    pool_M,
+                    pool_V,
+                    inplace[i],
+                    bit_of,
                 )
                 cand = _lex_max(f_S, d)
                 # Branch-and-bound: skip only if strictly worse than UB.

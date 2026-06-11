@@ -31,9 +31,8 @@ function codegen(
     fn_name::Symbol=:_fused_kernel,
     order::AbstractVector{Int}=1:length(tape.nodes),
 )
-    length(order) == length(tape.nodes) || error(
-        "codegen: order length $(length(order)) ≠ tape length $(length(tape.nodes))",
-    )
+    length(order) == length(tape.nodes) ||
+        error("codegen: order length $(length(order)) ≠ tape length $(length(tape.nodes))")
     D32 = Int32(D_MAX)
     nthreads32 = Int32(nthreads)
     n_mats_per_warp = Int32(32) ÷ D32
@@ -48,12 +47,10 @@ function codegen(
 
     input_ids = [r.id for r in tape.inputs]
     batched_input_ids = filter(
-        id -> tape.metas[id].lifecycle == BATCHED && tape.nodes[id] isa InputNode,
-        input_ids,
+        id -> tape.metas[id].lifecycle == BATCHED && tape.nodes[id] isa InputNode, input_ids
     )
     shared_input_ids = filter(
-        id -> tape.metas[id].lifecycle == SHARED && tape.nodes[id] isa InputNode,
-        input_ids,
+        id -> tape.metas[id].lifecycle == SHARED && tape.nodes[id] isa InputNode, input_ids
     )
 
     out_syms = [Symbol(:_out, i) for i in 1:length(leaves)]
@@ -183,11 +180,7 @@ function codegen(
             D_M, D_N = shape(meta.type)
             push!(
                 stmts,
-                :(
-                    $view_sym = SharedMatrix(
-                        $shmem_sym, Val(Int32($D_M)), Val(Int32($D_N))
-                    )
-                ),
+                :($view_sym = SharedMatrix($shmem_sym, Val(Int32($D_M)), Val(Int32($D_N)))),
             )
         else
             shmem_sym = Symbol("shmem_SV", slot.idx)
@@ -404,11 +397,7 @@ function codegen(
             push!(
                 stmts,
                 :(vector_write!(
-                    $out_sym,
-                    $(slot_shmem_sym(leaf_slot)),
-                    Val($D32),
-                    Val($nthreads32),
-                    N,
+                    $out_sym, $(slot_shmem_sym(leaf_slot)), Val($D32), Val($nthreads32), N
                 )),
             )
         end
@@ -418,7 +407,9 @@ function codegen(
     # :Sout slot, sync_threads once, then cooperatively write each slot to its
     # global out buffer. `scalar_stage!` is leader-and-active-gated internally,
     # so we call it unconditionally outside the `if active` block.
-    scalar_leaf_indices = Int[k for (k, leaf) in enumerate(leaves) if leaf.trace_type <: TraceScalar]
+    scalar_leaf_indices = Int[
+        k for (k, leaf) in enumerate(leaves) if leaf.trace_type <: TraceScalar
+    ]
     for k in scalar_leaf_indices
         leaf = leaves[k]
         s_local = scalar_node_sym[leaf.node_id]
