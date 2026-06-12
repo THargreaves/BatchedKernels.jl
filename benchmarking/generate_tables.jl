@@ -6,6 +6,7 @@ function write_results_csv(
     D_min::Int,
     D_max::Int,
     filename::String,
+    path::String,
 )
     Ds = collect(D_min:D_max)
     nD = length(Ds)
@@ -24,7 +25,7 @@ function write_results_csv(
         df[!, Symbol(method)] = runtimes
     end
 
-    tables_dir = joinpath(@__DIR__, "tables")
+    tables_dir = joinpath(@__DIR__, path, "tables")
     mkpath(tables_dir)
     path = joinpath(tables_dir, "$filename.csv")
 

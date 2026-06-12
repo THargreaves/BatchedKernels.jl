@@ -1,0 +1,88 @@
+using Magma
+using JLD2
+using Random
+
+include("../../plot_benchmarks.jl")
+include("../../generate_tables.jl")
+include("cpu_mt.jl")
+include("ours.jl")
+include("gpu_mem_bound.jl")
+include("jax_vmap.jl")
+include("magma.jl")
+include("cublas.jl")
+include("../../config/Schedule.jl")
+
+function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, String}, T::Type, path::String, force::Bool)
+    results =  Dict{String, Vector{Float64}}()
+
+    cache_dir = joinpath(@__DIR__, "cache")
+    isdir(cache_dir) || mkdir(cache_dir)
+
+    Magma.LibMagma.magma_init()
+    queue_ptr = Ref{Magma.LibMagma.magma_queue_t}()
+    device = 0
+    Magma.LibMagma.magma_queue_create_internal(
+        device,
+        queue_ptr,
+        C_NULL,  # func
+        C_NULL,  # file
+        0,       # line
+    )
+
+    for (method, label) in methods
+        println("Computing $label")
+
+        curr_res = Float64[]
+
+        for D in D_min:D_max
+            method_sanitised = String(typeof(method).parameters[1])
+            cache_file = joinpath(
+                cache_dir,
+                "matmul_$(string(T))_$(method_sanitised)_D_$(D).jld2",
+            )
+            if !force && isfile(cache_file)
+                @load cache_file time
+            else
+                Random.seed!(1234)
+                N = Int(ceil(1e9 / (4 * 3 * D^2)))
+                nthreads = Schedule.best_nthreads("matmul", D)
+
+                A_in = rand(T, D, D, N)
+                B_in = rand(T, D, D, N)
+                C_out = zeros(T, D, D, N)
+
+                time = matmul_timing(C_out, A_in, B_in, queue_ptr, nthreads, method)
+
+                @save cache_file time
+            end
+            push!(curr_res, time)
+        end
+
+        results[label] = curr_res
+        println("Finished $label")
+    end
+
+    Magma.LibMagma.magma_queue_destroy_internal(queue_ptr[], C_NULL, C_NULL, 0)
+    Magma.LibMagma.magma_finalize()
+
+    plot_benchmarks(results, D_min, D_max, "", "matmul", path)
+    write_results_csv(results, D_min, D_max, "matmul", path)
+end
+
+function main(force::Bool)
+    methods = Dict{Val, String}(
+        Val(:cpu_mt) => "CPU (multithreaded)",
+        Val(:ours) => "This",
+        Val(:gpu_mem_bound) => "Memory bound",
+        Val(:magma) => "MAGMA",
+        Val(:jax_vmap) => "JAX (vmap)",
+        Val(:cublas) => "cuBLAS",
+    )
+
+    path = "studies/benchmarks/bench_matmul"
+
+    generate_plots(2, 32, methods, Float32, path, force)
+end
+
+force = length(ARGS) >= 1 && ARGS[1] == "force"
+main(force)
