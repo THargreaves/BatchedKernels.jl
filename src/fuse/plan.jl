@@ -1,400 +1,353 @@
-using LinearAlgebra
+# =============================================================================
+# Memory planner
+# =============================================================================
+#
+# Assigns shared-memory slots to batched tape values. Strategy:
+#   - Compute the last use of every node (with wrapper NewNodes extending their
+#     parents' lifetimes so wrappers see the wrapped value).
+#   - Shared inputs get their own dedicated slot.
+#   - Batched values are placed via a greedy free-list-by-last-use allocator.
+#   - Explicit mutating primitives (registered in `inplace_arg`) alias the
+#     result's slot to the overwritten argument's slot.
+#   - Auto in-place: for non-mutating primitives, if any operand declared
+#     safe by `inplace_safe_args` is dead at the current node and directly
+#     slot-backed (not wrapped through a NewNode chain — wrappers like
+#     Adjoint/IAddSubWrapped remap reads and aliasing through them would
+#     race against the in-place write), alias the result's slot to that
+#     operand's. This is a pure slot-reuse optimisation.
+#
+# Matrix and vector slots come from separate pools because the shared-memory
+# layouts differ: matrix slots reserve a dual-access D_MAX×D_MAX region per
+# batch element, vector slots reserve a single-access D_MAX region. A slot
+# assignment is tagged with its kind (`:M`, `:V`, or `:Sout`) and an index
+# within its pool.
+#
+# Scalars (`TraceScalar`) do not occupy a shared-memory slot during compute —
+# they live in registers, replicated across the D lanes of a warp-matrix. The
+# only shmem they need is one `n_mats_per_block`-sized staging buffer per
+# distinct scalar terminal in the output tree, used to cross from leader-lane
+# registers to a coalesced cross-warp write. These are the `:Sout` slots.
 
-"Computes the last node that uses each variable so memory can be freed."
-function compute_last_use(prog::IRProgram)
-    M = length(prog.nodes)
-    last_use = Dict{ValueId,Int}()
+struct SlotAssignment
+    kind::Symbol            # :M (matrix), :V (vector), or :Sout (scalar output staging)
+    idx::Int                # 1-based index within the pool
+end
 
-    shared_mat_inputs = 0
-    shared_vec_inputs = 0
+struct PlannerOutput
+    slots::Dict{Int,SlotAssignment}             # batched node -> slot
+    shared_slots::Dict{Int,SlotAssignment}      # shared input -> slot
+    scalar_output_slots::Dict{Int,SlotAssignment}  # scalar tape ref -> :Sout slot
+    num_matrix_slots::Int
+    num_vector_slots::Int
+    num_scalar_out_slots::Int
+    num_shared_matrix_slots::Int
+    num_shared_vector_slots::Int
+    last_use::Dict{Int,Int}
+end
 
-    # Inputs: initialise last_use and count kinds
-    for (_, vid) in prog.inputs
-        K = prog.kinds[vid]
+function slot_kind(node::TapeNode, meta::NodeMeta)
+    node isa ConstNode && return :literal
+    node isa NewNode && return :inline
+    if meta.lifecycle == BATCHED
+        return meta.type <: TraceScalar ? :scalar : :batched
+    elseif meta.lifecycle == SHARED
+        return :shared
+    else
+        return :literal
+    end
+end
 
-        if K <: SharedKind
-            if K <: SharedMatKind
-                shared_mat_inputs += 1
-            elseif K <: SharedVecKind
-                shared_vec_inputs += 1
-            else
-                error("Unknown shared input kind: $K")
+# Which slot pool (:M or :V) a (batched or shared) node belongs to, based on
+# its trace-time type.
+function pool_kind(meta::NodeMeta)
+    T = meta.type
+    T <: TraceMatrix && return :M
+    T <: TraceVector && return :V
+    return error("pool_kind: unsupported batched/shared trace type $T")
+end
+
+function plan_memory(tape::Tape; order::AbstractVector{Int}=1:length(tape.nodes))
+    N = length(tape.nodes)
+    length(order) == N ||
+        error("plan_memory: order length $(length(order)) ≠ tape length $N")
+
+    # Position of each node in the chosen execution order. Last-use is in
+    # *position* coordinates so the free-list semantics carry over unchanged
+    # even when codegen walks the tape out of natural order.
+    pos = Dict{Int,Int}()
+    for (p, id) in enumerate(order)
+        pos[id] = p
+    end
+
+    last_use = Dict{Int,Int}()
+    for (p, id) in enumerate(order)
+        node = tape.nodes[id]
+        for ref in node_refs(node)
+            last_use[ref.id] = max(get(last_use, ref.id, 0), p)
+        end
+    end
+    last_use[tape.output.id] = N + 1
+
+    # Wrapper NewNodes extend the lifetime of their parents.
+    changed = true
+    while changed
+        changed = false
+        for (i, node) in enumerate(tape.nodes)
+            if node isa NewNode
+                wrapper_last = get(last_use, i, 0)
+                for (_, parent_ref) in node.fields
+                    p_last = get(last_use, parent_ref.id, 0)
+                    if wrapper_last > p_last
+                        last_use[parent_ref.id] = wrapper_last
+                        changed = true
+                    end
+                end
             end
-            last_use[vid] = M + 1  # Don't override shared kinds
-        else
-            (K <: MatKind || K <: VecKind) || error("Only matrix and vector inputs permitted, got $K")
-            last_use[vid] = 0
         end
     end
 
-    # Nodes: update last_use for ValueId (matrix & vector) arguments
-    for (i, node) in enumerate(prog.nodes)
-        for arg in node.args
-            arg isa ValueId || continue
-            vid = arg::ValueId
-            last_use[vid] = max(get(last_use, vid, 0), i)
+    shared_slots = Dict{Int,SlotAssignment}()
+    next_shared_M = 1
+    next_shared_V = 1
+    for (i, (node, meta)) in enumerate(zip(tape.nodes, tape.metas))
+        if node isa InputNode && meta.lifecycle == SHARED
+            k = pool_kind(meta)
+            if k === :M
+                shared_slots[i] = SlotAssignment(:M, next_shared_M)
+                next_shared_M += 1
+            else
+                shared_slots[i] = SlotAssignment(:V, next_shared_V)
+                next_shared_V += 1
+            end
+        elseif meta.lifecycle == SHARED &&
+            !(node isa InputNode || node isa NewNode || node isa ConstNode)
+            error(
+                "plan_memory: shared derived value at node %$i; V2 only supports shared *inputs*.",
+            )
         end
     end
 
-    # Outputs: never free their memory
-    for vid in prog.outputs
-        last_use[vid] = M + 1
+    slots = Dict{Int,SlotAssignment}()
+    free_M = Int[]
+    free_V = Int[]
+    next_M = 1
+    next_V = 1
+
+    for (p, i) in enumerate(order)
+        node = tape.nodes[i]
+        meta = tape.metas[i]
+        sk = slot_kind(node, meta)
+        sk in (:batched, :scalar) || continue
+        # Batched matrix InputNodes are not slot-backed: their value lives in
+        # global memory and reaches a shmem slot only via the LoadNode +
+        # TransferNode pair pushed at trace time. The InputNode itself is just
+        # a handle to the global pointer. Vectors keep their direct
+        # InputNode-backed slot (no dual-layout buffer, so no Load/Transfer
+        # split).
+        if node isa InputNode && meta.type <: TraceMatrix
+            continue
+        end
+
+        # Destination slot allocation: only matrix/vector consumers get a slot.
+        # Scalars live in registers, so we skip this for sk == :scalar — but we
+        # still fall through to the free-list pass so any matrix/vector inputs
+        # the scalar consumed can be recycled.
+        if sk == :batched
+            k = pool_kind(meta)
+            free_list = k === :M ? free_M : free_V
+
+            in_place_idx = _maybe_inplace_idx(tape, node)
+            auto_inplace_slot = if in_place_idx === nothing
+                _maybe_auto_inplace_slot(tape, node, p, k, slots, last_use)
+            else
+                nothing
+            end
+            if in_place_idx !== nothing
+                target_ref = node.args[in_place_idx]
+                owner = resolve_slot_owner(tape, target_ref)
+                haskey(slots, owner) || error(
+                    "plan_memory: in-place op at %$i references unassigned slot (owner %$owner).",
+                )
+                slots[i] = slots[owner]
+            elseif auto_inplace_slot !== nothing
+                slots[i] = auto_inplace_slot
+            elseif isempty(free_list)
+                if k === :M
+                    slots[i] = SlotAssignment(:M, next_M)
+                    next_M += 1
+                else
+                    slots[i] = SlotAssignment(:V, next_V)
+                    next_V += 1
+                end
+            else
+                slots[i] = SlotAssignment(k, pop!(free_list))
+            end
+        end
+
+        # Recurse through NewNode wrappers so a value consumed only through a
+        # wrapper chain (`LowerTriangular(chol.U') \ x`, `(I - KH) * P_pred`,
+        # `K_T' * H`, …) still has its slot freed at the wrapper's last use.
+        # Without recursion the underlying value's slot stays live to the end
+        # of the kernel, inflating the slot count by one per such value.
+        dest_slot = sk == :batched ? slots[i] : nothing
+        freed_here = Set{Tuple{Symbol,Int}}()
+        for ref in node_refs(node)
+            _free_dead_arg!(
+                tape, slots, last_use, free_M, free_V, freed_here, ref, p, sk, dest_slot
+            )
+        end
     end
 
-    return last_use, shared_mat_inputs, shared_vec_inputs
+    scalar_output_slots = Dict{Int,SlotAssignment}()
+    next_Sout = Ref(1)
+    _collect_scalar_output_slots!(scalar_output_slots, next_Sout, tape, tape.output)
+
+    return PlannerOutput(
+        slots,
+        shared_slots,
+        scalar_output_slots,
+        next_M - 1,
+        next_V - 1,
+        next_Sout[] - 1,
+        next_shared_M - 1,
+        next_shared_V - 1,
+        last_use,
+    )
 end
 
-"""
-Tracks the allocation and liveliness of each memory slot during an execution of an `IRProgram`.
-
-- `next_shared_mat_slot::Int`: Next available slot index for shared matrices.
-- `next_mat_slot::Int`: Next available slot index for batched matrices.
-- `next_shared_vec_slot::Int`: Next available slot index for shared vectors.
-- `next_vec_slot:::Int`: Next available slot index for batched vectors.
-- `next_pseudo_mat_slot`: Next available pseudo-slot (non-memory owning warpper variables) for matrices.
-- `free_mat_slots::Vector{String}`: Pool of unused matrix slots.
-- `free_vec_slots::Vector{String}`: Pool of unused vector slots.
-- `slots::Dict{ValueId,String}`: Mapping from `ValueId` to its assigned slot.
-- `live_count::Dict{String,Int}`: Number of references pointing to each memory slot.
-- `parent::Dict{String,String}`: Union find data structure mapping a memory slot to the true underlying memory slot.
-- `last_use::Dict{ValueId,Int}`: Dictionary mapping each `ValueId` to the last node's index that it was used in.
-    Memory will be freed after this node
-- `kinds::Dict{ValueId,Type{<:SymKind}}`: Dictionary mapping each `ValueId` to its type.
-- `unalloc_bat_inputs::Set{ValueId}`: Set of input `ValueId`s whose memory haven't been allocated yet.
-- `input_load_schedule::Vector{Vector{Tuple{ValueId,String}}}`: Per-node schedule for input loading
-    (which inputs will be loaded at the start of node i, where i indexes this vector).
-"""
-mutable struct State
-    next_shared_mat_slot::Int
-    next_mat_slot::Int
-    next_shared_vec_slot::Int
-    next_vec_slot::Int
-    next_pseudo_mat_slot::Int
-    free_mat_slots::Vector{String}
-    free_vec_slots::Vector{String}
-    slots::Dict{ValueId,String}  # ValueId -> slot
-    live_count::Dict{String,Int}  # slot -> counts
-    parent::Dict{String,String}  # slot -> true slot that it points to
-    last_use::Dict{ValueId,Int}
-    kinds::Dict{ValueId,Type{<:SymKind}}
-    unalloc_bat_inputs::Set{ValueId}
-    input_load_schedule::Vector{Vector{Tuple{ValueId,String}}}
-end
-
-function State(
-    shared_mat_inputs::Int,
-    shared_vec_inputs::Int,
-    prog::IRProgram,
-    last_use::Dict{ValueId,Int},
+# Walk the output tree; allocate one :Sout staging slot per distinct scalar
+# tape ref reached as a (non-NewNode, non-ConstNode) leaf. The same scalar
+# value reused in two output positions shares one staging slot — two
+# `scalar_write!` calls then read from it for two independent global writes.
+function _collect_scalar_output_slots!(
+    scalar_out::Dict{Int,SlotAssignment}, next_idx::Ref{Int}, tape::Tape, ref::NodeRef
 )
-    unalloc_bat_inputs = Set(vid for (_, vid) in prog.inputs if prog.kinds[vid] <: BatchedKind)
-    input_load_schedule::Vector{Vector{Tuple{ValueId,String}}} = [Tuple{ValueId,String}[] for _ in 1:length(prog.nodes)]
-
-    return State(
-        1,
-        shared_mat_inputs + 1,
-        1,
-        shared_vec_inputs + 1,
-        length(prog.nodes) + length(prog.inputs) + 2,
-        String[],
-        String[],
-        Dict{ValueId,String}(),
-        Dict{String,Int}(),
-        Dict{String,String}(),
-        last_use,
-        prog.kinds,
-        unalloc_bat_inputs,
-        input_load_schedule,
-    )
-end
-
-"Union find"
-function get_true_slot!(state::State, slot::String)
-    if state.parent[slot] != slot
-        state.parent[slot] = get_true_slot!(state, state.parent[slot])
-    end
-    return state.parent[slot]
-end
-get_true_slot!(state::State, vid::ValueId) = get_true_slot!(state, state.slots[vid])
-
-####################
-### SLOT HELPERS ###
-####################
-
-get_mat_slot(slot_no::Int) = "M$slot_no"
-get_vec_slot(slot_no::Int) = "v$slot_no"
-
-alloc_new_mat!(state::State) = (slot = get_mat_slot(state.next_mat_slot); state.next_mat_slot += 1; slot)
-alloc_new_vec!(state::State) = (slot = get_vec_slot(state.next_vec_slot); state.next_vec_slot += 1; slot)
-alloc_new_shared_mat!(state::State) = (slot = get_mat_slot(state.next_shared_mat_slot); state.next_shared_mat_slot += 1; slot)
-alloc_new_shared_vec!(state::State) = (slot = get_vec_slot(state.next_shared_vec_slot); state.next_shared_vec_slot += 1; slot)
-alloc_new_pseudo_mat!(state::State) = (slot = get_mat_slot(state.next_pseudo_mat_slot); state.next_pseudo_mat_slot += 1; slot)
-
-alloc_mat_outofplace!(state::State) = isempty(state.free_mat_slots) ? alloc_new_mat!(state) : pop!(state.free_mat_slots)
-alloc_vec_outofplace!(state::State) = isempty(state.free_vec_slots) ? alloc_new_vec!(state) : pop!(state.free_vec_slots)
-
-function increment_slot!(state::State, slot::String)
-    true_slot = get_true_slot!(state, slot)
-    state.live_count[true_slot] = get(state.live_count, true_slot, 0) + 1
-    return true_slot
-end
-increment_slot!(state::State, vid::ValueId) = increment_slot!(state, state.slots[vid])
-
-function free_true_slot!(state::State, true_slot::String, K::Type{<:SymKind})
-    if K <: MatKind
-        push!(state.free_mat_slots, true_slot)
-    elseif K <: VecKind
-        push!(state.free_vec_slots, true_slot)
-    end
-end
-
-function alloc_shared_input!(state::State, vid::ValueId)
-    K = state.kinds[vid]
-    K <: SharedKind || return
-
-    if K <: SharedMatKind
-        slot = alloc_new_shared_mat!(state)
-    elseif K <: SharedVecKind
-        slot = alloc_new_shared_vec!(state)
-    else
-        error("Unknown shared input kind: $K")
-    end
-
-    state.slots[vid] = slot
-    state.parent[slot] = slot
-    state.live_count[slot] = 1
-end
-
-function maybe_alloc_batched_input!(state::State, node::IRNode, i::Int)
-    for arg in node.args
-        arg isa ValueId || continue
-        vid = arg::ValueId
-
-        vid in state.unalloc_bat_inputs || continue 
-
-        K = state.kinds[vid]
-        if K <: MatKind
-            slot = alloc_mat_outofplace!(state)
-            load_slot = alloc_mat_outofplace!(state)
-            push!(state.input_load_schedule[i], (vid, load_slot))
-            free_true_slot!(state, load_slot, K)
-        elseif K <: VecKind
-            slot = alloc_vec_outofplace!(state)
-            push!(state.input_load_schedule[i], (vid, ""))
-        else
-            error("Only matrix/vector inputs supported, got $K")
+    node = tape.nodes[ref.id]
+    if node isa NewNode
+        for (_, child) in node.fields
+            _collect_scalar_output_slots!(scalar_out, next_idx, tape, child)
         end
-
-        state.slots[vid] = slot
-        state.parent[slot] = slot
-        state.live_count[slot] = 1
-        delete!(state.unalloc_bat_inputs, vid)
-    end
-end
-
-#######################
-### IN-PLACE POLICY ###
-#######################
-
-function can_reuse_arg1(state::State, i::Int, node::IRNode)
-    arg1 = node.args[1]::ValueId
-    get(state.last_use, arg1, 0) == i || return false
-
-    slot1 = get_true_slot!(state, arg1)
-    count1 = state.live_count[slot1]
-
-    # If arg2 is alias of arg1, allow count==2
-    if length(node.args) == 2 && node.args[2] isa ValueId
-        arg2 = node.args[2]::ValueId
-        slot2 = get_true_slot!(state, arg2)
-        
-        slot1 == slot2 && return count1 == 2
-    end
-
-    return count1 == 1
-end
-
-function can_reuse_arg2(state::State, i::Int, node::IRNode)
-    length(node.args) >= 2 || return false
-    node.args[2] isa ValueId || return false
-    
-    arg2 = node.args[2]::ValueId
-
-    get(state.last_use, arg2, 0) == i || return false
-    return state.live_count[get_true_slot!(state, arg2)] == 1
-end
-
-function try_inplace!(state::State, i::Int, node::IRNode, outputs::Vector{ValueId})
-    op = node.op
-    arg1 = node.args[1]
-    arg2 = length(node.args) ≥ 2 ? node.args[2] : nothing
-
-    (
-        op in (:chol, :forwardsolve, :backwardsolve, :qr_Q_thin, :qr_Q_full)
-        || (op in (:add, :sub, :qr) && arg1 isa ValueId && !(state.kinds[arg1] <: TransMatKind))
-        || (op == :qr_Q_multiply) && arg2 isa ValueId && !(state.kinds[arg2] <: TransMatKind)
-        || (op == :trans && node.out in outputs)
-    ) || return false
-
-    if op in (:chol, :add, :sub, :trans, :qr, :qr_Q_thin, :qr_Q_full) && arg1 isa ValueId && can_reuse_arg1(state, i, node)
-        state.slots[node.out] = increment_slot!(state, arg1::ValueId)
-        return true
-    end
-    
-    if op in (:add, :sub, :forwardsolve, :backwardsolve, :qr_Q_multiply) && can_reuse_arg2(state, i, node)
-        arg2 = node.args[2]
-        state.slots[node.out] = increment_slot!(state, arg2::ValueId)
-        return true
-    end
-
-    return false
-end
-
-is_wrapper_op(op::Symbol) = op in (:trans, :lowertrig, :uppertrig, :iminus, :iplus, :sym)
-
-function alloc_wrapper!(state::State, node::IRNode)
-    vid = node.args[1]::ValueId
-    slot = alloc_new_pseudo_mat!(state)
-    state.slots[node.out] = slot
-    state.parent[slot] = get_true_slot!(state, vid)
-    increment_slot!(state, state.parent[slot])
-
-    return true
-end
-
-function alloc_result_outofplace!(state::State, vid::ValueId)
-    K = state.kinds[vid]
-
-    if K <: MatKind
-        slot = alloc_mat_outofplace!(state)
-    elseif K <: VecKind
-        slot = alloc_vec_outofplace!(state)
+    elseif node isa ConstNode
+        return nothing
     else
-        error("Unsupported result kind $K")
+        meta = tape.metas[ref.id]
+        if meta.type <: TraceScalar && !haskey(scalar_out, ref.id)
+            scalar_out[ref.id] = SlotAssignment(:Sout, next_idx[])
+            next_idx[] += 1
+        end
     end
-
-    state.slots[vid] = slot
-    state.parent[slot] = slot
-    state.live_count[slot] = 1
-
-    return true
+    return nothing
 end
 
-function dec_maybe_free!(state::State, i::Int, vid::ValueId)
-    get(state.last_use, vid, 0) == i || return
-    true_slot = get_true_slot!(state, vid)
-    state.live_count[true_slot] -= 1
-    state.live_count[true_slot] == 0 && free_true_slot!(state, true_slot, state.kinds[vid])
-end
+node_refs(::InputNode) = NodeRef[]
+node_refs(::ConstNode) = NodeRef[]
+node_refs(n::CallNode) = n.args
+node_refs(n::NewNode) = NodeRef[p.second for p in n.fields]
 
-function dec_arg_count!(state::State, node::IRNode, i::Int)
-    for arg in node.args
-        arg isa ValueId || continue
-        dec_maybe_free!(state, i, arg::ValueId)
+function resolve_slot_owner(tape::Tape, ref::NodeRef)
+    n = tape.nodes[ref.id]
+    if n isa NewNode
+        for (_, parent_ref) in n.fields
+            pn = tape.nodes[parent_ref.id]
+            pn isa ConstNode && continue
+            return resolve_slot_owner(tape, parent_ref)
+        end
+        error("resolve_slot_owner: NewNode at %$(ref.id) has no non-literal field refs")
+    else
+        return ref.id
     end
 end
 
-function free_if_unused_result!(state::State, node::IRNode)
-    vid = node.out
-    haskey(state.last_use, vid) && return
-    true_slot = get_true_slot!(state, vid)
-    state.live_count[true_slot] = 0
-    free_true_slot!(state, true_slot, state.kinds[vid])
+# Walk an arg ref and free the slot of every dead slot-backed value reachable
+# through any NewNode wrapper chain. `freed_here` dedupes when the same
+# underlying value is reached through multiple paths (e.g. `a + a`, or a tuple
+# with two refs to the same node) so we don't push the same slot index onto
+# the free list twice.
+function _free_dead_arg!(
+    tape::Tape,
+    slots::Dict{Int,SlotAssignment},
+    last_use::Dict{Int,Int},
+    free_M::Vector{Int},
+    free_V::Vector{Int},
+    freed_here::Set{Tuple{Symbol,Int}},
+    ref::NodeRef,
+    pos::Int,
+    sk::Symbol,
+    dest_slot::Union{SlotAssignment,Nothing},
+)
+    arg_node = tape.nodes[ref.id]
+    if arg_node isa NewNode
+        for (_, child) in arg_node.fields
+            _free_dead_arg!(
+                tape, slots, last_use, free_M, free_V, freed_here, child, pos, sk, dest_slot
+            )
+        end
+        return nothing
+    end
+    haskey(slots, ref.id) || return nothing
+    get(last_use, ref.id, 0) == pos || return nothing
+    owner_slot = slots[ref.id]
+    # Don't free the dest's own slot when the current op was in-placed onto
+    # this arg — the result lives in it now.
+    if dest_slot !== nothing &&
+        owner_slot.idx == dest_slot.idx &&
+        owner_slot.kind === dest_slot.kind
+        return nothing
+    end
+    key = (owner_slot.kind, owner_slot.idx)
+    key in freed_here && return nothing
+    push!(freed_here, key)
+    if owner_slot.kind === :M
+        push!(free_M, owner_slot.idx)
+    else
+        push!(free_V, owner_slot.idx)
+    end
+    return nothing
 end
 
-"""
-Plans the memory usage of the function via a lazy input loading and greedy memory allocation.
+function _maybe_inplace_idx(tape::Tape, node::TapeNode)
+    node isa CallNode || return nothing
+    arg_types = Tuple(meta_at(tape, r).type for r in node.args)
+    applicable(inplace_arg, node.fn, arg_types...) || return nothing
+    return inplace_arg(node.fn, arg_types...)
+end
 
-# Algorithm
-1. Initialises `State` that keeps track of the current memory allocations.
-2. Allocates memory for all shared input arguments.
-3. Loops through all nodes in the `IRProgram`. For each node:
-    a) Load the inputs if they are used in the current node and haven't been allocated earlier.
-    b) Attempt to perform operation in-place. An operation can be performed in-place if the
-        operation supports it (e.g. addition/subtraction), and if the inputs to this operation
-        can be overridden (i.e they aren't used later). If successful, go to step 3.
-    c) Checks if the operation is a wrapper operation (e.g. transposition/Symmetric).
-        If so, make a wrapper variable without allocating new memory, and skip to step 3.
-    d) Allocate new memory for the result of this operation. If free slots exist in the
-        pool of free memories, use them. If not, allocate new memory slot.
-    e) Decrement the usage counts of the input variables to this operation. Free the memory
-        if the counts reach zero.
-    f) Check if the result of this operation is used. If not, free the memory.
+# Auto in-place: return a SlotAssignment to alias onto, or `nothing` if no
+# eligible operand. Eligibility requires:
+#   - the operand is declared safe by `inplace_safe_args` for this primitive;
+#   - it is a direct slot-backed CallNode/InputNode (not wrapped through a
+#     NewNode chain — Adjoint/IAddSubWrapped/etc. remap reads and aliasing
+#     through them would race against the in-place write);
+#   - its owner is in the batched-slot table (not shared, not unallocated);
+#   - its pool kind matches the destination's;
+#   - its last use is the current node (so no later consumer is lost).
+function _maybe_auto_inplace_slot(
+    tape::Tape,
+    node::TapeNode,
+    i::Int,
+    dest_kind::Symbol,
+    slots::Dict{Int,SlotAssignment},
+    last_use::Dict{Int,Int},
+)
+    node isa CallNode || return nothing
+    arg_types = Tuple(meta_at(tape, r).type for r in node.args)
+    applicable(inplace_safe_args, node.fn, arg_types...) || return nothing
+    safe_positions = inplace_safe_args(node.fn, arg_types...)
+    isempty(safe_positions) && return nothing
 
-Format of the memory slots are `String`s of format:
-- Matrices: M + (slot index)
-- Vectors: v + (slot index)
-
-Pseudo slots for wrapper operation results:
-Variables that don't own the underlying memory (results of wrapper operations) will be
-given unique 'pseudo' memory slots, which are created for each such variable and are named
-similarly (M + slot index). However, they use a different index to the real memory slots.
-For example, an adjoint operation would be planned as such: M10 = adjoint(M1), where
-M10 points to the same underlying memory as M1.
-
-This is required because during tracing, each operation is handled one by one. E.g.
-batch_op!(..., Symmetric(M1), ...) will be broken down to temp = Symmetric(M1);
-batch_op!(..., temp, ...). When tracing any operation, the future ones are unknown.
-This makes temporary variables necessary. To make this compatible with later codegen stage,
-a naming convention of using pseudo slot indices will allow codegen to treat all variables
-similarly, both temporary and memory-owning.
-
-Indexing rule:
-- Memory slot indices for shared matirces and vectors start from 1
-- Memory slot indices for matrices and vectors start from shared_mat_inputs + 1
-    and shared_vec_inputs + 1 respectively to avoid overlap
-- Pseudo matrix slot indices start from length(nodes) + length(inputs) + 2 to avoid overlap
-
-Returns:
-    - `slots::Dict{ValueId,String}`: Mapping from `ValueId` to its assigned slot.
-    - `mat_slots::Vector{String}`: Vector of all matrix slots required throughout.
-    - `vec_slots::Vector{String}`: Vector of all matrix slots required throughout.
-    - `input_load_schedule::Vector{Vector{Tuple{ValueId,String}}}`: Per-node schedule for input loading
-        (which inputs will be loaded at the start of node i, where i indexes this vector).
-    - `require_extra_slot::bool`: An indicator on whether an extra memory slot is required to
-        store the output matrices, as storage of each matrix requires an extra slot to store
-        the intermediate layout.
-    - `mat_store_slot::String`: The matrix slot index that is used to store outputs, where the
-        matrices are stored in intermediate layout
-"""
-function plan_memory_usage(prog::IRProgram)
-    last_use, shared_mat_inputs, shared_vec_inputs = compute_last_use(prog)
-
-    state = State(
-        shared_mat_inputs,
-        shared_vec_inputs,
-        prog,
-        last_use,
-    )
-
-    # Allocating shared input memory
-    for (_, vid) in prog.inputs
-        alloc_shared_input!(state, vid)
+    for k in safe_positions
+        1 <= k <= length(node.args) || continue
+        ref = node.args[k]
+        arg_node = tape.nodes[ref.id]
+        # Skip wrapped / literal operands: aliasing through a NewNode wrapper
+        # would either race (the wrapper remaps reads against the destination's
+        # writes) or has no slot to alias to (ConstNode).
+        (arg_node isa CallNode || arg_node isa InputNode) || continue
+        haskey(slots, ref.id) || continue
+        slot = slots[ref.id]
+        slot.kind === dest_kind || continue
+        get(last_use, ref.id, 0) == i || continue
+        return slot
     end
-
-    # Main loop
-    for (i, node) in enumerate(prog.nodes)
-        # Check if arguments of the operation are loaded, if not, load them
-        maybe_alloc_batched_input!(state, node, i)
-
-        # Allocate memory, in-place, wrapper, or out-of-place
-        (
-            try_inplace!(state, i, node, prog.outputs)
-            || (is_wrapper_op(node.op) && alloc_wrapper!(state, node))
-            || alloc_result_outofplace!(state, node.out)
-        )
-
-        # Decrement args if this was their last use
-        dec_arg_count!(state, node, i)  # Decrement count of the arguments, if those counts reach zero, free the memory
-        free_if_unused_result!(state, node)  # Free the memory of the results if its unused
-    end
-
-    # Gather results
-    mat_slots = ["M$i" for i in (shared_mat_inputs + 1):(state.next_mat_slot - 1)]
-    vec_slots = ["v$i" for i in (shared_vec_inputs + 1):(state.next_vec_slot - 1)]
-
-    require_extra_slot = isempty(state.free_mat_slots)
-    mat_store_slot = require_extra_slot ? get_mat_slot(state.next_mat_slot) : state.free_mat_slots[1]
-
-    return state.slots, mat_slots, vec_slots, state.input_load_schedule, require_extra_slot, mat_store_slot
+    return nothing
 end
