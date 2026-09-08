@@ -1,9 +1,20 @@
 import Base: @propagate_inbounds
 import LinearAlgebra: AdjOrTransAbsMat, wrapperop
 using KernelAbstractions.Extras: @unroll
+using StaticArrays: MVector
 
 export DualAccessMatrix,
     SingleAccessMatrix,
+    RegisterMatrix,
+    Orientation,
+    RowOriented,
+    ColOriented,
+    BothOriented,
+    AccessConvention,
+    RowAccess,
+    ColAccess,
+    orientation,
+    flip,
     SharedMatrix,
     IAddSubSetterMatrix,
     IAddSubGetterMatrix,
@@ -403,44 +414,197 @@ end
     return nothing
 end
 
-struct SingleAccessMatrix{T,pad_interval} <: AbstractMatrix{T}
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}
+"""Physical ownership of matrix entries, independent of an operation's access convention."""
+abstract type Orientation end
+struct RowOriented <: Orientation end
+struct ColOriented <: Orientation end
+struct BothOriented <: Orientation end
+
+"""Logical indexing convention selected statically by a compute operation."""
+abstract type AccessConvention end
+struct RowAccess <: AccessConvention end
+struct ColAccess <: AccessConvention end
+
+@inline flip(::RowOriented) = ColOriented()
+@inline flip(::ColOriented) = RowOriented()
+@inline flip(::BothOriented) = BothOriented()
+@inline flip(::RowAccess) = ColAccess()
+@inline flip(::ColAccess) = RowAccess()
+
+@inline function _validate_compute_shape(::Val{M}, ::Val{N}, ::Val{D}) where {M,N,D}
+    (M isa Integer && N isa Integer && D isa Integer && 1 <= M <= D <= 32 && 1 <= N <= D) ||
+        throw(ArgumentError("compute layouts require 1 <= M,N <= D_MAX <= 32"))
+    return nothing
+end
+
+@inline function _single_pad_interval(::Val{D}) where {D}
+    d = Int32(D)
+    return (32i32 ÷ (d & -d)) * d
+end
+
+# The last stored element determines the footprint; no trailing pad is necessary.
+@inline function _single_warp_stride(::Val{D}) where {D}
+    _validate_compute_shape(Val(D), Val(D), Val(D))
+    d = Int32(D)
+    q = (32i32 ÷ d) * d * d
+    return q + (q - 1i32) ÷ _single_pad_interval(Val(D))
+end
+
+"""
+    SingleAccessMatrix(storage, Val(M), Val(N), Val(D_MAX), orientation, wid, matrix_id)
+
+A logical M×N matrix in a padded D_MAX×D_MAX compute tile. Row orientation stores
+columns consecutively; col orientation transposes the physical map. `wid` and
+`matrix_id` are one-based warp and within-warp matrix indices. Storage is concrete
+(one-based shared device storage in kernels, or a one-based vector for CPU layout
+validation).
+
+This map is separate from the legacy packed rectangular intermediate transfers.
+"""
+struct SingleAccessMatrix{T,M,N,D,O<:Union{RowOriented,ColOriented},S<:AbstractVector{T}} <:
+       AbstractMatrix{T}
+    shmem::S
     outer_offset::Int32
     inner_offset::Int32
+
+    @inline function SingleAccessMatrix(
+        shmem::S, ::Val{M}, ::Val{N}, ::Val{D}, ::O, wid::Int32, matrix_id::Int32
+    ) where {T,M,N,D,O<:Union{RowOriented,ColOriented},S<:AbstractVector{T}}
+        _validate_compute_shape(Val(M), Val(N), Val(D))
+        d = Int32(D)
+        stride = _single_warp_stride(Val(D))
+        @boundscheck begin
+            Base.require_one_based_indexing(shmem)
+            (wid >= 1i32 && 1i32 <= matrix_id <= 32i32 ÷ d) ||
+                throw(ArgumentError("invalid warp or within-warp matrix index"))
+            wid * stride <= length(shmem) || throw(BoundsError(shmem, wid * stride))
+        end
+        return new{T,M,N,D,O,S}(shmem, (wid - 1i32) * stride, (matrix_id - 1i32) * d * d)
+    end
 end
 
-# TODO: shouldn't be baking in the warp_matrix_id if we want to use it with global memory
-"""
-A single access matrix view into shared memory.
+@inline Base.size(::SingleAccessMatrix{T,M,N}) where {T,M,N} = (Int(M), Int(N))
+@inline Base.IndexStyle(::Type{<:SingleAccessMatrix}) = IndexCartesian()
+@inline orientation(::Type{<:SingleAccessMatrix{T,M,N,D,O}}) where {T,M,N,D,O} = O()
+@inline orientation(::Type{<:DualAccessMatrix}) = BothOriented()
 
-Rows of the matrices can be accessed in parallel without bank conflicts. Padding is included
-between warps to be compatible with the dual access layout without the need for
-synchronisation. 
-"""
-function SingleAccessMatrix(
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, wid::Int32, warp_matrix_id::Int32
-) where {T,D}
-    n_mats_per_warp = 32i32 ÷ D
-
-    dual_access_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
-    dual_access_stride = (n_mats_per_warp * D + dual_access_padding) * D
-
-    outer_offset = dual_access_stride * (wid - 1i32)
-    inner_offset = (warp_matrix_id - 1i32) * D^2
-
-    pad_interval = div(32i32, D & -D) * D
-
-    return SingleAccessMatrix{T,pad_interval}(shmem, outer_offset, inner_offset)
+@inline function _single_index(
+    A::SingleAccessMatrix{T,M,N,D,RowOriented}, i::Int32, j::Int32
+) where {T,M,N,D}
+    r = A.inner_offset + (j - 1i32) * Int32(D) + i - 1i32
+    return A.outer_offset + r + r ÷ _single_pad_interval(Val(D)) + 1i32
+end
+@inline function _single_index(
+    A::SingleAccessMatrix{T,M,N,D,ColOriented}, i::Int32, j::Int32
+) where {T,M,N,D}
+    r = A.inner_offset + (i - 1i32) * Int32(D) + j - 1i32
+    return A.outer_offset + r + r ÷ _single_pad_interval(Val(D)) + 1i32
 end
 
-# TODO: replace div with magic number
 @propagate_inbounds @inline function Base.getindex(
-    A::SingleAccessMatrix{T,pad_interval}, i::Int32
-) where {T,pad_interval}
-    warp_idx = A.inner_offset + i
-    padding = (warp_idx - 1i32) ÷ pad_interval
-    return A.shmem[A.outer_offset + warp_idx + padding] = v
+    A::SingleAccessMatrix, i::Integer, j::Integer
+)
+    @boundscheck checkbounds(A, i, j)
+    return @inbounds A.shmem[_single_index(A, Int32(i), Int32(j))]
 end
+@propagate_inbounds @inline function Base.setindex!(
+    A::SingleAccessMatrix, v, i::Integer, j::Integer
+)
+    @boundscheck checkbounds(A, i, j)
+    @inbounds A.shmem[_single_index(A, Int32(i), Int32(j))] = v
+    return A
+end
+
+@inline _register_line_width(::Val{M}, ::Val{N}, ::RowOriented) where {M,N} = M
+@inline _register_line_width(::Val{M}, ::Val{N}, ::ColOriented) where {M,N} = N
+
+# base is the number of lanes before the group: CUDA.jl shuffles use base+j.
+@inline function _register_group_mask(::Val{D}, base::Int32) where {D}
+    _validate_compute_shape(Val(D), Val(D), Val(D))
+    (0i32 <= base <= 32i32 - Int32(D) && base % Int32(D) == 0i32) ||
+        throw(ArgumentError("register base must start a complete D_MAX-wide lane group"))
+    return (typemax(UInt32) >>> (32i32 - Int32(D))) << base
+end
+
+"""
+    RegisterMatrix(mv, Val(M), Val(N), Val(D_MAX), orientation, base, mask, d)
+    RegisterMatrix{T}(Val(M), Val(N), Val(D_MAX), orientation, base, d)
+
+A lane's owned line of a logical M×N matrix. Row orientation needs M registers and
+col orientation N registers. `base` is zero-based and `d` one-based within the group;
+`mask` must name exactly that complete group. The allocating constructor initializes
+all offered entries to zero, including entries in lanes without a logical line.
+
+There is deliberately no general indexing implementation: cross-lane access requires
+the explicit collective accessors introduced in the next storage milestones.
+"""
+struct RegisterMatrix{T,M,N,D,O<:Union{RowOriented,ColOriented},L} <: AbstractMatrix{T}
+    mv::MVector{L,T}
+    base::Int32
+    mask::UInt32
+    d::Int32
+
+    @inline function RegisterMatrix(
+        mv::MVector{L,T},
+        ::Val{M},
+        ::Val{N},
+        ::Val{D},
+        o::O,
+        base::Int32,
+        mask::UInt32,
+        d::Int32,
+    ) where {T,M,N,D,O<:Union{RowOriented,ColOriented},L}
+        _validate_compute_shape(Val(M), Val(N), Val(D))
+        L == _register_line_width(Val(M), Val(N), o) ||
+            throw(ArgumentError("register line width does not match shape and orientation"))
+        mask == _register_group_mask(Val(D), base) ||
+            throw(ArgumentError("register mask must cover exactly its lane group"))
+        1i32 <= d <= Int32(D) || throw(ArgumentError("invalid within-group lane index"))
+        return new{T,M,N,D,O,L}(mv, base, mask, d)
+    end
+end
+
+@inline function RegisterMatrix{T}(
+    ::Val{M}, ::Val{N}, ::Val{D}, o::Union{RowOriented,ColOriented}, base::Int32, d::Int32
+) where {T,M,N,D}
+    _validate_compute_shape(Val(M), Val(N), Val(D))
+    # StaticArrays/ntuple require Int lengths, even when device dims are Val{Int32}.
+    width = Int(_register_line_width(Val(M), Val(N), o))
+    mv = MVector{width,T}(ntuple(_ -> zero(T), Val(width)))
+    return RegisterMatrix(
+        mv, Val(M), Val(N), Val(D), o, base, _register_group_mask(Val(D), base), d
+    )
+end
+
+@inline Base.size(::RegisterMatrix{T,M,N}) where {T,M,N} = (Int(M), Int(N))
+@inline Base.IndexStyle(::Type{<:RegisterMatrix}) = IndexCartesian()
+@inline orientation(::Type{<:RegisterMatrix{T,M,N,D,O}}) where {T,M,N,D,O} = O()
+@inline orientation(A::Union{SingleAccessMatrix,DualAccessMatrix,RegisterMatrix}) =
+    orientation(typeof(A))
+
+# Traits describe wrapper ownership only; logical wrapper accessors are separate.
+@inline orientation(::Type{<:Adjoint{T,P}}) where {T,P} = flip(orientation(P))
+@inline orientation(::Type{<:Transpose{T,P}}) where {T,P} = flip(orientation(P))
+@inline orientation(
+    ::Type{
+        <:Union{
+            LowerTriangular{T,P},
+            UpperTriangular{T,P},
+            UnitLowerTriangular{T,P},
+            UnitUpperTriangular{T,P},
+        },
+    },
+) where {T,P} = orientation(P)
+@inline orientation(
+    A::Union{
+        Adjoint,
+        Transpose,
+        LowerTriangular,
+        UpperTriangular,
+        UnitLowerTriangular,
+        UnitUpperTriangular,
+    },
+) = orientation(typeof(A))
 
 #######################
 #### SHARED MATRIX ####
@@ -467,6 +631,9 @@ function SharedMatrix(
     pad_interval = div(32i32, D1 & -D1) * D1
     return SharedMatrix{T,D1,D2,pad_interval}(shmem)
 end
+
+@inline orientation(::Type{<:SharedMatrix}) = BothOriented()
+@inline orientation(A::SharedMatrix) = orientation(typeof(A))
 
 Base.@propagate_inbounds @inline function Base.getindex(
     A::SharedMatrix{T,D1,D2,pad_interval}, i::Int32, j::Int32
@@ -497,6 +664,9 @@ end
 Abstract DualAccessMatrix wrapper type
 """
 abstract type DualAccessMatrixWrapper{T,D} <: AbstractMatrix{T} end
+
+@inline orientation(::Type{<:DualAccessMatrixWrapper}) = BothOriented()
+@inline orientation(A::DualAccessMatrixWrapper) = orientation(typeof(A))
 
 Base.parent(A::DualAccessMatrixWrapper{T,D}) where {T,D} = A.parent
 Base.size(A::DualAccessMatrixWrapper{T,D}) where {T,D} = size(parent(A))
