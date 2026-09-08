@@ -110,6 +110,14 @@ function Base.:\(
     return TraceMatrix{T,D_M,D_N}(tape, out)
 end
 
+function Base.:\(
+    A::Union{UnitLowerTriangular{T,S},UnitUpperTriangular{T,S}}, M::TraceMatrix{T,D_M,D_N}
+) where {T,D_M,D_N,S<:AbstractMatrix{T}}
+    ref = register_wrapped!(M.tape, A)
+    out = emit_call!(M.tape, \, NodeRef[ref, M.ref], TraceMatrix{T,D_M,D_N})
+    return TraceMatrix{T,D_M,D_N}(M.tape, out)
+end
+
 function LinearAlgebra.ldiv!(
     L::LowerTriangular{T,S}, M::TraceMatrix{T,D_M,D_N}
 ) where {T,D_M,D_N,S<:AbstractMatrix{T}}

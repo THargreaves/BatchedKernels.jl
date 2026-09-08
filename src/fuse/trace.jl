@@ -32,6 +32,24 @@ function _load_to_single end
 function _single_to_dual end
 function _dual_to_single end
 
+# The forced hybrid pipeline preserves tape IDs while giving staging its own
+# residence-independent meaning. The legacy tape and packed transfers stay intact.
+function _place_input end
+function _stage_output end
+
+function hybrid_tape(tape::Tape)
+    nodes = TapeNode[
+        if node isa CallNode && node.fn === _single_to_dual
+            CallNode(_place_input, copy(node.args))
+        elseif node isa CallNode && node.fn === _dual_to_single
+            CallNode(_stage_output, copy(node.args))
+        else
+            node
+        end for node in tape.nodes
+    ]
+    return Tape(nodes, copy(tape.metas), copy(tape.inputs), tape.output)
+end
+
 struct TraceMatrix{T,D_M,D_N} <: AbstractMatrix{T}
     tape::Tape
     ref::NodeRef
@@ -186,6 +204,16 @@ function register_wrapped!(tape::Tape, A::Adjoint{T,S}) where {T,S}
     return emit_new!(tape, Adjoint{T,S}, :parent, inner)
 end
 
+function register_wrapped!(tape::Tape, A::Transpose{T,S}) where {T,S}
+    inner = register_wrapped!(tape, parent(A))
+    return emit_new!(tape, Transpose{T,S}, :parent, inner)
+end
+
+function register_wrapped!(tape::Tape, A::Union{UnitUpperTriangular,UnitLowerTriangular})
+    inner = register_wrapped!(tape, parent(A))
+    return emit_new!(tape, typeof(A), :data, inner)
+end
+
 function register_wrapped!(tape::Tape, U::UpperTriangular{T,S}) where {T,S}
     inner = register_wrapped!(tape, U.data)
     return emit_new!(tape, UpperTriangular{T,S}, :data, inner)
@@ -198,7 +226,12 @@ end
 
 function register_wrapped!(tape::Tape, S::Symmetric{T,M}) where {T,M}
     inner = register_wrapped!(tape, S.data)
-    return emit_new!(tape, Symmetric{T,M}, :data, inner)
+    uplo = emit_const!(tape, S.uplo)
+    return push_node!(
+        tape,
+        NewNode(Symmetric{T,M}, [:data => inner, :uplo => uplo]),
+        NodeMeta(Symmetric{T,M}, meta_at(tape, inner).lifecycle),
+    )
 end
 
 # -----------------------------------------------------------------------------

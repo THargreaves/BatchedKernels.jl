@@ -21,16 +21,54 @@ struct KernelSignature
     n_shared_inputs::Int
 end
 
+# Both planners share the kernel skeleton; only layouts and operation lowering differ.
+function codegen(tape::Tape, planner::PlannerOutput, leaves::Vector{LeafOutput}; kwargs...)
+    return _codegen(tape, planner, leaves; kwargs...)
+end
 function codegen(
     tape::Tape,
-    planner::PlannerOutput,
+    planner::HybridPlannerOutput,
+    leaves::Vector{LeafOutput};
+    assignment=planner.assignment,
+    order=assignment.order,
+    kwargs...,
+)
+    assignment === planner.assignment ||
+        error("codegen: use the assignment validated by this planner")
+    return _codegen(hybrid_tape(tape), planner, leaves; assignment, order, kwargs...)
+end
+
+# Full-warp fences stay outside active guards. A previous operation's exit fence
+# also protects its final readers before a new producer recycles their region.
+function _push_warp_fence!(stmts::Vector{Expr})
+    fence = :(sync_warp())
+    (isempty(stmts) || stmts[end] != fence) && push!(stmts, fence)
+    return nothing
+end
+
+function _codegen(
+    tape::Tape,
+    planner,
     leaves::Vector{LeafOutput};
     D_MAX::Int,
     nthreads::Int,
     T::Type,
     fn_name::Symbol=:_fused_kernel,
     order::AbstractVector{Int}=1:length(tape.nodes),
+    assignment=nothing,
 )
+    hybrid = assignment !== nothing
+    if hybrid
+        D_MAX == planner.D_MAX ||
+            error("codegen: D_MAX differs from validated planner geometry")
+        T === planner.element_type ||
+            error("codegen: element type differs from validated planner")
+        order == assignment.order ||
+            error("codegen: execution order differs from validated assignment")
+        nthreads == assignment.nthreads ||
+            error("codegen: block size differs from validated assignment")
+    end
+    _validate_layout_threads(Val(nthreads))
     length(order) == length(tape.nodes) ||
         error("codegen: order length $(length(order)) ≠ tape length $(length(tape.nodes))")
     D32 = Int32(D_MAX)
@@ -84,10 +122,30 @@ function codegen(
     # output writes; both are planner-allocated slots that the free-list
     # recycles.
     matrix_slot_syms = Symbol[]
-    for s in 1:(planner.num_matrix_slots)
-        sym = Symbol("shmem_M", s)
-        push!(matrix_slot_syms, sym)
-        push!(stmts, :($sym = CuStaticSharedArray($T, ($mat_shmem_elems,))))
+    matrix_pools = Dict{Symbol,Vector{Symbol}}()
+    matrix_specs = if hybrid
+        (
+        (
+            :Ms,
+            planner.num_single_slots,
+            Int(single_region_elems(Val(D_MAX), Val(nthreads))),
+        ),
+        (:Md, planner.num_dual_slots, Int(dual_region_elems(Val(D_MAX), Val(nthreads)))),
+    )
+    else
+        ((:M, planner.num_matrix_slots, Int(mat_shmem_elems)),)
+    end
+    for (kind, count, elems) in matrix_specs
+        symbols = Symbol[]
+        for index in 1:count
+            sym = Symbol("shmem_", kind, index)
+            push!(symbols, sym)
+            push!(stmts, :($sym = CuStaticSharedArray($T, ($elems,))))
+        end
+        matrix_pools[kind] = symbols
+    end
+    if !hybrid
+        matrix_slot_syms = matrix_pools[:M]
     end
 
     # Vector slot shmem allocations.
@@ -102,7 +160,7 @@ function codegen(
     # distinct scalar terminal in the output tree. Used in the output epilogue
     # to cross from leader-lane registers to a coalesced cross-warp write.
     sout_shmem_syms = Dict{Int,Symbol}()  # scalar node id -> shmem symbol
-    for (node_id, slot) in planner.scalar_output_slots
+    for (node_id, slot) in sort!(collect(planner.scalar_output_slots); by=first)
         shmem_sym = Symbol("shmem_Sout", slot.idx)
         sout_shmem_syms[node_id] = shmem_sym
         push!(stmts, :($shmem_sym = CuStaticSharedArray($T, ($n_mats_per_block,))))
@@ -125,7 +183,7 @@ function codegen(
 
     # Shared-matrix and shared-vector input slot allocations + loads.
     shared_input_view_syms = Dict{Int,Symbol}()
-    shared_load_order = Int[]  # parallel array; one shared input per warp
+    shared_load_order = Int[]  # warps may each load several distinct shared inputs
     for (k, id) in enumerate(shared_input_ids)
         push!(shared_load_order, id)
         meta = tape.metas[id]
@@ -142,7 +200,7 @@ function codegen(
                 stmts,
                 Expr(
                     :if,
-                    :(wid == $(Int32(k))),
+                    :(wid == $(Int32(mod1(k, Int(n_warps))))),
                     :(shared_matrix_load!(
                         $shmem_sym, $(s_in_syms[k]), Val(Int32($D_M)), Val(Int32($D_N))
                     )),
@@ -158,7 +216,7 @@ function codegen(
                 stmts,
                 Expr(
                     :if,
-                    :(wid == $(Int32(k))),
+                    :(wid == $(Int32(mod1(k, Int(n_warps))))),
                     :(shared_vector_load!($shmem_sym, $(s_in_syms[k]), Val(Int32($D_M)))),
                 ),
             )
@@ -191,7 +249,7 @@ function codegen(
     end
 
     # Batched matrix slot view constructors.
-    for s in 1:(planner.num_matrix_slots)
+    for s in 1:(hybrid ? 0 : planner.num_matrix_slots)
         view_sym = Symbol("M", s)
         push!(
             stmts,
@@ -221,13 +279,67 @@ function codegen(
         return Symbol(slot.kind === :M ? "M" : "V", slot.idx)
     end
     function slot_shmem_sym(slot::SlotAssignment)
-        return slot.kind === :M ? matrix_slot_syms[slot.idx] : vector_slot_syms[slot.idx]
+        return if slot.kind === :V
+            vector_slot_syms[slot.idx]
+        else
+            matrix_pools[slot.kind][slot.idx]
+        end
+    end
+    function physical_orientation(id::Int)
+        label = assignment.orientations[id]
+        label === :row && return :(RowOriented())
+        label === :col && return :(ColOriented())
+        return error(
+            "codegen: single layout at %$id requires row or col orientation, got $label"
+        )
+    end
+    if hybrid
+        # Values sharing a region still get individually specialized logical views.
+        # Remainder lanes construct a valid unused view; only complete groups execute
+        # compute, and cooperative transfers apply their own tail guards. Exact
+        # per-block allocations and the validated launch bound wid; these facts
+        # justify eliding constructor bounds checks, including for aliased views.
+        for id in sort!(collect(keys(planner.slots)))
+            tape.nodes[id] isa NewNode && continue
+            slot = planner.slots[id]
+            slot.kind in (:Ms, :Md) || continue
+            view = Symbol("HM", id)
+            raw = slot_shmem_sym(slot)
+            if slot.kind === :Ms
+                M, Nlogical = shape(tape.metas[id].type)
+                o = physical_orientation(id)
+                push!(
+                    stmts,
+                    :(
+                        $view = @inbounds SingleAccessMatrix(
+                            $raw,
+                            Val(Int32($M)),
+                            Val(Int32($Nlogical)),
+                            Val($D32),
+                            $o,
+                            wid,
+                            min(warp_matrix_id, $n_mats_per_warp),
+                        )
+                    ),
+                )
+            else
+                push!(
+                    stmts,
+                    :(
+                        $view = DualAccessMatrix(
+                            $raw, Val($D32), wid, min(warp_matrix_id, $n_mats_per_warp)
+                        )
+                    ),
+                )
+            end
+            node_view_sym[id] = view
+        end
     end
 
     # Matrix inputs are loaded by `_load_to_single` + `_single_to_dual` tape
     # nodes — see the inline branches in the main walk below. Vector inputs
     # don't go through a dual-layout transfer (only single-layout shmem), so
-    # they're still loaded lazily here on first reference.
+    # they load at their scheduled InputNode position (the output walk is defensive).
     loaded = Set{Int}()
     function maybe_load_batched_input!(node_id::Int)
         node_id in loaded && return nothing
@@ -241,6 +353,7 @@ function codegen(
         D_M == D_MAX || error(
             "codegen: batched vector with D_M=$D_M ≠ D_MAX=$D_MAX not yet supported (masked vector view pending).",
         )
+        _push_warp_fence!(stmts)
         push!(
             stmts,
             :(vector_load!(
@@ -252,6 +365,7 @@ function codegen(
                 N,
             )),
         )
+        _push_warp_fence!(stmts)
         node_view_sym[node_id] = slot_view_sym(slot)
         return push!(loaded, node_id)
     end
@@ -270,10 +384,54 @@ function codegen(
     for i in order
         node = tape.nodes[i]
         meta = tape.metas[i]
-        if node isa InputNode || node isa ConstNode
+        if node isa InputNode
+            maybe_load_batched_input!(i)
+            continue
+        elseif node isa ConstNode
             continue
         end
         if node isa NewNode
+            continue
+        end
+        _push_warp_fence!(stmts)
+        if hybrid && node.fn in (_load_to_single, _place_input, _stage_output)
+            dest_slot = planner.slots[i]
+            dest_raw = slot_shmem_sym(dest_slot)
+            M, Nlogical = shape(meta.type)
+            dims = [:(Val(Int32($n))) for n in (M, Nlogical, D_MAX, nthreads)]
+            src_ref = only(node.args)
+            if node.fn === _load_to_single
+                source = input_sym[src_ref.id]
+                o = physical_orientation(i)
+                push!(
+                    stmts,
+                    :(intermediate_layout_load!($dest_raw, $source, $(dims...), N, $o)),
+                )
+            elseif node.fn === _place_input
+                src_slot = planner.slots[src_ref.id]
+                if planner.owners[i] != planner.owners[src_ref.id]
+                    dest_slot.kind === :Md ||
+                        error("codegen: unsupported non-alias single placement")
+                    source = slot_shmem_sym(src_slot)
+                    o = physical_orientation(src_ref.id)
+                    push!(
+                        stmts,
+                        :(interm_to_dual_transfer!($dest_raw, $source, $(dims...), N, $o)),
+                    )
+                end
+            else
+                if planner.owners[i] != planner.owners[src_ref.id]
+                    source = arg_kernel_expr(tape, src_ref, node_view_sym)
+                    o = physical_orientation(i)
+                    # The logical view may be dual, single, or a wrapper. This
+                    # conversion materializes its logical indexing semantics.
+                    push!(
+                        stmts,
+                        :(dual_to_interm_transfer!($dest_raw, $source, $(dims...), N, $o)),
+                    )
+                end
+            end
+            _push_warp_fence!(stmts)
             continue
         end
         # Layout-transition opcodes: emit raw `intermediate_layout_load!` /
@@ -298,6 +456,7 @@ function codegen(
                     N,
                 )),
             )
+            _push_warp_fence!(stmts)
             continue
         elseif node.fn === _single_to_dual
             src_ref = node.args[1]
@@ -318,6 +477,7 @@ function codegen(
                 )),
             )
             node_view_sym[i] = slot_view_sym(dest_slot)
+            _push_warp_fence!(stmts)
             continue
         elseif node.fn === _dual_to_single
             src_ref = node.args[1]
@@ -337,6 +497,7 @@ function codegen(
                     N,
                 )),
             )
+            _push_warp_fence!(stmts)
             continue
         end
 
@@ -353,12 +514,25 @@ function codegen(
             dest = scalar_node_sym[i]
         else
             dest_slot = planner.slots[i]
-            dest = slot_view_sym(dest_slot)
+            dest = if hybrid && dest_slot.kind in (:Ms, :Md)
+                node_view_sym[i]
+            else
+                slot_view_sym(dest_slot)
+            end
         end
         node_view_sym[i] = dest
 
-        emit_expr = emit_primitive(node.fn, dest, arg_exprs, arg_types, D_MAX)
+        variant_id = hybrid ? get(assignment.variants, i, :legacy) : :legacy
+        emit_expr = if variant_id === :legacy
+            emit_primitive(node.fn, dest, arg_exprs, arg_types, D_MAX)
+        else
+            candidates = orientation_variants(node.fn, arg_types...)
+            chosen = only(v for v in candidates if v.id === variant_id)
+            emit_variant(chosen, dest, arg_exprs, arg_types, D_MAX)
+        end
+        _push_warp_fence!(stmts)
         push!(stmts, Expr(:if, :active, Expr(:block, emit_expr)))
+        _push_warp_fence!(stmts)
     end
 
     # Ensure any batched *vector* inputs reachable only via the output tree
@@ -375,7 +549,27 @@ function codegen(
         leaf.trace_type <: TraceScalar && continue
         out_sym = out_syms[k]
         leaf_slot = leaf.slot
-        if leaf_slot.kind === :M
+        _push_warp_fence!(stmts)
+        if hybrid && leaf_slot.kind in (:Ms, :Md)
+            leaf_slot.kind === :Ms ||
+                error("codegen: hybrid matrix output was not staged to single")
+            D_M, D_N = shape(leaf.trace_type)
+            raw = slot_shmem_sym(leaf_slot)
+            o = physical_orientation(leaf.node_id)
+            push!(
+                stmts,
+                :(intermediate_layout_write!(
+                    $out_sym,
+                    $raw,
+                    Val(Int32($D_M)),
+                    Val(Int32($D_N)),
+                    Val($D32),
+                    Val($nthreads32),
+                    N,
+                    $o,
+                )),
+            )
+        elseif leaf_slot.kind === :M
             D_M, D_N = shape(leaf.trace_type)
             push!(
                 stmts,
@@ -402,6 +596,8 @@ function codegen(
             )
         end
     end
+
+    _push_warp_fence!(stmts)
 
     # Scalar output leaves. Pattern: stage each leader's register value into its
     # :Sout slot, sync_threads once, then cooperatively write each slot to its
@@ -455,6 +651,15 @@ function arg_kernel_expr(tape::Tape, ref::NodeRef, node_view_sym::Dict{Int,Symbo
         if T <: Adjoint
             inner = arg_kernel_expr(tape, n.fields[1].second, node_view_sym)
             return :(adjoint($inner))
+        elseif T <: Transpose
+            inner = arg_kernel_expr(tape, n.fields[1].second, node_view_sym)
+            return :(transpose($inner))
+        elseif T <: UnitLowerTriangular
+            inner = arg_kernel_expr(tape, n.fields[1].second, node_view_sym)
+            return :(UnitLowerTriangular($inner))
+        elseif T <: UnitUpperTriangular
+            inner = arg_kernel_expr(tape, n.fields[1].second, node_view_sym)
+            return :(UnitUpperTriangular($inner))
         elseif T <: LowerTriangular
             inner = arg_kernel_expr(tape, n.fields[1].second, node_view_sym)
             return :(LowerTriangular($inner))
@@ -463,7 +668,18 @@ function arg_kernel_expr(tape::Tape, ref::NodeRef, node_view_sym::Dict{Int,Symbo
             return :(UpperTriangular($inner))
         elseif T <: Symmetric
             inner = arg_kernel_expr(tape, n.fields[1].second, node_view_sym)
-            return :(Symmetric($inner))
+            uplo_field = findfirst(field -> field.first === :uplo, n.fields)
+            uplo = if uplo_field === nothing
+                QuoteNode(:U)
+            else
+                arg_kernel_expr(tape, n.fields[uplo_field].second, node_view_sym)
+            end
+            if uplo isa Char
+                uplo in ('U', 'L') || error("arg_kernel_expr: invalid Symmetric uplo $uplo")
+                uplo = uplo == 'U' ? :U : :L
+            end
+            uplo isa Symbol && (uplo = QuoteNode(uplo))
+            return :(Symmetric($inner, $uplo))
         elseif T <: IAddSubWrapped
             # Lower `(a*I + b*M)` to `IAddSubGetterMatrix(parent_view, a, b)`.
             # The 3-field NewNode is `[:parent, :a, :b]` (see register_wrapped!

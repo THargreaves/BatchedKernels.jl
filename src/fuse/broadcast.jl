@@ -118,10 +118,20 @@ function _collect_runtime_inputs!(::Vector, ::Vector, ::Ref, x)
     return error("Unsupported batched broadcast input component of type $(typeof(x))")
 end
 
-function _ensure_compiled!(f, args::Tuple)
+function _ensure_compiled!(f, args::Tuple; assignment=nothing, nthreads::Int=256)
+    32 <= nthreads <= 1024 && nthreads % 32 == 0 ||
+        throw(ArgumentError("nthreads must be a multiple of 32 in 32:1024"))
+    assignment === nothing ||
+        nthreads == assignment.nthreads ||
+        throw(ArgumentError("nthreads must match the forced assignment"))
     input_specs = InputSpec[input_spec(arg) for arg in args]
     input_types = Type[input_trace_type(spec) for spec in input_specs]
-    key = (f, Tuple(input_cache_key(spec) for spec in input_specs))
+    policy = if assignment === nothing
+        (:legacy, nthreads)
+    else
+        (:forced_shared, assignment_key(assignment), CUDA.device())
+    end
+    key = (f, Tuple(input_cache_key(spec) for spec in input_specs), policy)
 
     if haskey(KERNEL_CACHE, key)
         cached = KERNEL_CACHE[key]
@@ -138,11 +148,25 @@ function _ensure_compiled!(f, args::Tuple)
     T = T_ref[]
     D_MAX === nothing && error("Could not infer matrix dimension from inputs")
     T === nothing && error("Could not infer element type from inputs")
-    nthreads = 256
+    1 <= D_MAX <= 32 || throw(ArgumentError("matrix group dimension must be in 1:32"))
 
     tape = trace(f, input_specs)
-    order = schedule(tape)
-    planner = plan_memory(tape; order=order)
+    if assignment === nothing
+        order = schedule(tape)
+        planner = plan_memory(tape; order=order)
+    else
+        tape = hybrid_tape(tape)
+        order = assignment.order
+        planner = plan_memory(tape, assignment; D_MAX, T)
+        limit = CUDA.attribute(
+            CUDA.device(), CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK
+        )
+        planner.shared_bytes <= limit || throw(
+            ArgumentError(
+                "forced assignment needs $(planner.shared_bytes) shared bytes per block; device static limit is $limit",
+            ),
+        )
+    end
     output_spec = extract_output_spec(tape, planner)
     leaves = flatten_leaves(output_spec)
     fn_expr, sig = codegen(
@@ -193,11 +217,42 @@ function Base.copy(::Broadcasted{BatchedStyle,A,F,Args}) where {A,F,Args<:Tuple}
     )
 end
 
-function _broadcast_impl(bc::Broadcasted{BatchedStyle})
+export fuse, Assignment
+
+"""
+    fuse(f, args...; assignment=nothing, nthreads=assignment === nothing ? 256 : assignment.nthreads)
+
+Execute the same scalar function and return the same inferred batched output type
+as `f.(args...)`. With a host `Assignment`, use validated forced shared storage and
+variant choices; without one, use the corrected legacy planner. Build assignments
+against `trace(f, InputSpec[input_spec(x) for x in args])`; staging normalization
+preserves node IDs. Dictionary/layout choices never enter the device kernel.
+
+M5 supports single/dual matrix storage; register assignments enter in M6. A forced
+choice is rejected if unsupported, without silently selecting another variant.
+"""
+function fuse(
+    f::F,
+    args::Vararg{Any,N};
+    assignment::Union{Nothing,Assignment}=nothing,
+    nthreads::Int=assignment === nothing ? 256 : assignment.nthreads,
+) where {F<:Function,N}
+    isdefined(F, :instance) || error("fuse only supports singleton function objects")
+    elem_types = _elem_types(typeof(args))
+    R = Core.Compiler.return_type(F.instance, elem_types)
+    BR = batchify_type(R)
+    bc = Broadcasted{BatchedStyle}(f, args)
+    result = _broadcast_impl(bc; assignment, nthreads)
+    return result::BR
+end
+
+function _broadcast_impl(
+    bc::Broadcasted{BatchedStyle}; assignment=nothing, nthreads::Int=256
+)
     f = bc.f
     args = bc.args
 
-    entry = _ensure_compiled!(f, args)
+    entry = _ensure_compiled!(f, args; assignment, nthreads)
     compiled_fn = entry.fn
     D_MAX, nthreads, T = entry.D_MAX, entry.nthreads, entry.T
 
@@ -228,10 +283,12 @@ function _broadcast_impl(bc::Broadcasted{BatchedStyle})
     ]
 
     nblocks = cld(N, (nthreads ÷ 32) * (32 ÷ D_MAX))
-    Base.invokelatest() do
-        @cuda threads = nthreads blocks = nblocks compiled_fn(
-            leaf_arrays..., batched_args..., shared_args..., Int32(N)
-        )
+    if N > 0
+        Base.invokelatest() do
+            @cuda threads = nthreads blocks = nblocks compiled_fn(
+                leaf_arrays..., batched_args..., shared_args..., Int32(N)
+            )
+        end
     end
 
     leaf_iter = Ref(0)
