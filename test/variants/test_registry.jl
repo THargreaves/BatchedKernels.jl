@@ -23,12 +23,25 @@
         BK.orientation_variants(+, BK.IAddSubWrapped{Float32,3}, M33),
     )
     @test only(BK.orientation_variants(cholesky, M33)).shape_rule == :square_spd
-    @test only(
-        BK.orientation_variants(\, LowerTriangular{Float32,M33}, M32)
-    ).input_access == (:any, :row)
-    @test only(
-        BK.orientation_variants(\, Adjoint{Float32,UnitUpperTriangular{Float32,M33}}, M32)
-    ).id == :solve_row
+    solves = BK.orientation_variants(\, LowerTriangular{Float32,M33}, M32)
+    @test map(v -> v.id, solves) == (:solve_row, :solve_col)
+    @test map(v -> (v.input_access, v.output_access), solves) ==
+        (((:any, :row), :row), ((:col, :col), :col))
+    wrapped_solves = BK.orientation_variants(
+        \, Adjoint{Float32,UnitUpperTriangular{Float32,M33}}, M32
+    )
+    @test map(v -> v.id, wrapped_solves) == (:solve_row, :solve_col)
+    @test all(v -> isempty(v.alias_safe_args), solves)
+    wide_rhs = BK.TraceMatrix{Float32,3,5}
+    @test map(
+        v -> v.id, BK.orientation_variants(\, LowerTriangular{Float32,M33}, wide_rhs)
+    ) == (:solve_row, :solve_col)
+    col_solve = BK.emit_variant(
+        solves[2], :C, [:A, :B], [LowerTriangular{Float32,M33}, M32], 6
+    )
+    @test col_solve == :(variant_op!(
+        Val(:solve_col), C, A, B, d, Val(Int32(3)), Val(Int32(2)), Val(Int32(6))
+    ))
     @test all(
         v ->
             v.synchronization == :caller_entry_and_exit_shared_fences &&

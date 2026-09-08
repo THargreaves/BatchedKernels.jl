@@ -26,6 +26,8 @@
     @inline factor_wrap(A, ::Val{:unit_lower}) = UnitLowerTriangular(A)
     @inline factor_wrap(A, ::Val{:adjoint_upper}) = adjoint(UpperTriangular(A))
     @inline factor_wrap(A, ::Val{:transpose_lower}) = transpose(LowerTriangular(A))
+    @inline factor_wrap(A, ::Val{:adjoint_unit_upper}) = adjoint(UnitUpperTriangular(A))
+    @inline factor_wrap(A, ::Val{:transpose_unit_lower}) = transpose(UnitLowerTriangular(A))
 
     function factor_kernel!(
         output,
@@ -50,26 +52,50 @@
         d = (lid - Int32(1)) % Int32(D) + Int32(1)
         base = lid - d
         if mid <= Int32(32 ÷ D)
-            physical = operation === :solve ? BK.ColOriented() : BK.RowOriented()
-            convention = operation === :solve ? BK.ColAccess() : BK.RowAccess()
+            transposed =
+                wrap isa Union{
+                    Val{:adjoint_upper},
+                    Val{:transpose_lower},
+                    Val{:adjoint_unit_upper},
+                    Val{:transpose_unit_lower},
+                }
+            # The *wrapped* factor must be ColOriented for solve_col. Adjoint and
+            # transpose flip the raw parent's physical ownership.
+            physical = if operation === :solve_col && transposed
+                BK.RowOriented()
+            elseif operation in (:solve, :solve_col)
+                BK.ColOriented()
+            else
+                BK.RowOriented()
+            end
+            convention = physical isa BK.ColOriented ? BK.ColAccess() : BK.RowAccess()
+            rhs_physical = operation === :solve_col ? BK.ColOriented() : BK.RowOriented()
             # Force factory inlining so mutable register backing cannot escape a
             # returned wrapper; the production variant call itself needs no override.
             A = @inline factor_view(
                 rawA, Val(N), Val(N), Val(D), Val(layout), physical, mid, d, base
             )
             B = @inline factor_view(
-                rawB, Val(N), Val(P), Val(D), Val(layout), BK.RowOriented(), mid, d, base
+                rawB, Val(N), Val(P), Val(D), Val(layout), rhs_physical, mid, d, base
             )
             C = @inline factor_view(
-                rawC, Val(N), Val(P), Val(D), Val(layout), BK.RowOriented(), mid, d, base
+                rawC, Val(N), Val(P), Val(D), Val(layout), rhs_physical, mid, d, base
             )
             if d <= Int32(N)
                 @inbounds @unroll for k in Int32(1):Int32(N)
-                    value = operation === :solve ? input[d, k, mid] : input[k, d, mid]
+                    value =
+                        physical isa BK.ColOriented ? input[d, k, mid] : input[k, d, mid]
                     BK.ours_write!(A, k, d, value, convention)
                 end
             end
-            if d <= Int32(P)
+            if operation === :solve_col
+                if d <= Int32(N)
+                    @inbounds @unroll for k in Int32(1):Int32(P)
+                        BK.ours_write!(B, k, d, rhs[d, k, mid], BK.ColAccess())
+                        BK.ours_write!(C, k, d, 0.0f0, BK.ColAccess())
+                    end
+                end
+            elseif d <= Int32(P)
                 @inbounds @unroll for k in Int32(1):Int32(N)
                     BK.ours_write!(B, k, d, rhs[k, d, mid], BK.RowAccess())
                     BK.ours_write!(C, k, d, 0.0f0, BK.RowAccess())
@@ -85,11 +111,21 @@
                 BK.variant_op!(
                     Val(:solve_row), C, factor_wrap(A, wrap), B, d, Val(N), Val(P), Val(D)
                 )
+            elseif operation === :solve_col
+                BK.variant_op!(
+                    Val(:solve_col), C, factor_wrap(A, wrap), B, d, Val(N), Val(P), Val(D)
+                )
             else
                 BK.batch_op!(\, C, factor_wrap(A, wrap), B, d, Val(N), Val(P), Val(D))
             end
             sync_warp(mask)
-            if d <= Int32(P)
+            if operation === :solve_col
+                if d <= Int32(N)
+                    @inbounds @unroll for k in Int32(1):Int32(P)
+                        output[d, k, mid] = BK.ours(C, k, d, BK.ColAccess())
+                    end
+                end
+            elseif d <= Int32(P)
                 @inbounds @unroll for k in Int32(1):Int32(N)
                     output[k, d, mid] = BK.ours(C, k, d, BK.RowAccess())
                 end
@@ -155,7 +191,7 @@
         (3, 2, 6, :unit_lower, :dual),
         (4, 2, 6, :adjoint_upper, :single),
         (3, 2, 6, :transpose_lower, :register),
-        (32, 2, 32, :upper, :single),
+        (32, 2, 32, :upper, :register),
     )
         nm = 32 ÷ D
         inputs = 0.04f0 .* randn(rng, Float32, N, N, nm)
@@ -172,6 +208,33 @@
         if wrap in (:upper, :lower)
             legacy = launch_factor(inputs, rhs, N, P, D, :dual, :legacy_solve, wrap)
             @test legacy ≈ reference rtol = 3.0f-5 atol = 3.0f-5
+        end
+    end
+
+    # Four column-convention cases isolate wide pressure, P>N with padded lanes,
+    # and unit-diagonal semantics through each transposing wrapper.
+    for (N, P, D, wrap, layout) in (
+        (32, 2, 32, :upper, :register),
+        (3, 5, 6, :lower, :register),
+        (4, 2, 6, :adjoint_unit_upper, :single),
+        (3, 2, 6, :transpose_unit_lower, :register),
+    )
+        nm = 32 ÷ D
+        inputs = 0.04f0 .* randn(rng, Float32, N, N, nm)
+        is_unit = wrap in (:adjoint_unit_upper, :transpose_unit_lower)
+        for m in 1:nm, i in 1:N
+            inputs[i, i, m] = is_unit ? NaN32 : 2.0f0 + Float32(i) / N
+        end
+        rhs = randn(rng, Float32, N, P, nm)
+        reference = cat(
+            (factor_wrap(inputs[:, :, m], Val(wrap)) \ rhs[:, :, m] for m in 1:nm)...;
+            dims=3,
+        )
+        output = launch_factor(inputs, rhs, N, P, D, layout, :solve_col, wrap)
+        @test output ≈ reference rtol = 3.0f-5 atol = 3.0f-5
+        if !is_unit
+            legacy = launch_factor(inputs, rhs, N, P, D, :dual, :legacy_solve, wrap)
+            @test output ≈ legacy rtol = 3.0f-5 atol = 3.0f-5
         end
     end
 end

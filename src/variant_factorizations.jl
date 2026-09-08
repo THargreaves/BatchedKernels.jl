@@ -57,6 +57,27 @@ upper triangle of an SPD matrix. This is not a forced-in-place variant.
     return U
 end
 
+# Keep the solved scalar observable to the GPU compiler in every participating
+# lane, including lanes without an output column. Otherwise it can sink all math
+# behind d <= P while materializing every full-group factor broadcast first, giving
+# O(N^2) live coefficients. This empty asm consumes a register value; it is not a
+# GPU synchronization instruction or a memory fence. A memory-only clobber does not
+# constrain these register dependencies. Final resource checks remain necessary.
+# CPU execution needs no GPU scheduling constraint.
+@inline _keep_solved_value_live(::Float32) = nothing
+CUDA.@device_override @inline function _keep_solved_value_live(value::Float32)
+    Base.llvmcall(
+        """
+        call void asm sideeffect "", "f"(float %0)
+        ret void
+        """,
+        Cvoid,
+        Tuple{Float32},
+        value,
+    )
+    return nothing
+end
+
 @inline _solve_forward(::Union{LowerTriangular,UnitLowerTriangular}) = true
 @inline _solve_forward(::Union{UpperTriangular,UnitUpperTriangular}) = false
 @inline _solve_forward(A::Union{Adjoint,Transpose}) = !_solve_forward(parent(A))
@@ -71,7 +92,10 @@ Out-of-place triangular solve C = factor \\ B. B/C use RowAccess for logical N×
 matrices. The N×N factor uses group-uniform broadcasts and may have either physical
 orientation. Supported factor wrappers are lower/upper, unit/nonunit triangular,
 and recursive outer adjoints/transposes of those wrappers. Every D-wide group lane
-executes factor broadcasts even when d > P. Inputs must not alias C.
+executes factor broadcasts even when d > P. Inputs must not alias C. A scalar-use
+compiler constraint retains each solved value's dependencies in those lanes; it
+prevents the observed separation of all broadcasts from output-lane-only arithmetic.
+This does not add a shared-memory fence or replace final compiled-resource checks.
 """
 @inline function variant_op!(
     ::Val{:solve_row},
@@ -97,6 +121,7 @@ executes factor broadcasts even when d > P. Inputs must not alias C.
         if !unit
             value /= theirs(factor, i, i)
         end
+        _keep_solved_value_live(value)
         if d <= Int32(P)
             ours_write!(C, i, d, value, RowAccess())
         end
@@ -105,6 +130,62 @@ executes factor broadcasts even when d > P. Inputs must not alias C.
                 coefficient = theirs(factor, j, i)
                 work[j] -= coefficient * value
             end
+        end
+    end
+    return C
+end
+
+"""
+    variant_op!(Val(:solve_col), C, factor, B, d, Val(N), Val(P), Val(D))
+
+Out-of-place triangular solve with lane d owning row d: factor, B and C all require
+ColAccess. Each lane holds P private RHS entries. The pivot's owner solves its row,
+then every D-wide group lane broadcasts the P solved values to update unsolved rows.
+This uses N*P pivot broadcasts instead of the row body's triangular factor broadcasts.
+
+Supports the same lower/upper, unit/nonunit and outer adjoint/transpose factor
+wrappers as solve_row. P may exceed N provided both fit D. Lanes d > N still execute
+all broadcasts with initialized dummy entries, but never access invalid owned rows.
+Inputs and C must not alias. The recurrence uses private registers and shuffles;
+caller entry/exit shared-memory fences remain required, with no internal shared
+producer/consumer dependency. This is a distinct orientation contract, not a mirror
+of the row body, and its suitability depends on transfer costs and final resources.
+"""
+@inline function variant_op!(
+    ::Val{:solve_col},
+    C::AbstractMatrix{Float32},
+    factor::AbstractMatrix{Float32},
+    B::AbstractMatrix{Float32},
+    d::Int32,
+    ::Val{N},
+    ::Val{P},
+    ::Val{D},
+) where {N,P,D}
+    _validate_compute_shape(Val(N), Val(P), Val(D))
+    forward = _solve_forward(factor)
+    unit = _solve_unit(factor)
+    base = mod1(threadIdx().x, 32i32) - d
+    # The caller's complete-group participation contract proves geometry.
+    work = @inbounds RegisterMatrix{Float32}(Val(N), Val(P), Val(D), ColOriented(), base, d)
+    @inbounds @unroll for p in (1i32):Int32(P)
+        work.mv[p] = d <= Int32(N) ? ours(B, p, d, ColAccess()) : 0.0f0
+    end
+    @inbounds @unroll for step in (1i32):Int32(N)
+        i = forward ? step : Int32(N) - step + 1i32
+        @unroll for p in (1i32):Int32(P)
+            if d == i && !unit
+                work.mv[p] /= ours(factor, i, d, ColAccess())
+            end
+            # All lanes participate; the pivot source has completed its local solve.
+            pivot = theirs(work, i, p)
+            if d <= Int32(N) && (forward ? d > i : d < i)
+                work.mv[p] -= ours(factor, i, d, ColAccess()) * pivot
+            end
+        end
+    end
+    if d <= Int32(N)
+        @inbounds @unroll for p in (1i32):Int32(P)
+            ours_write!(C, p, d, work.mv[p], ColAccess())
         end
     end
     return C

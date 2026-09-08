@@ -102,7 +102,9 @@ reusing A for A + A' is unsafe. M5 must validate this across all wrapper/owner a
 All lanes of each complete D_MAX-wide matrix group call the body, including lanes
 without an output line. Callers fence shared producers before and shared consumers
 or slot reuse after the call. Current factorization bodies use private scratch and
-introduce no internal shared-memory dependency.
+introduce no internal shared-memory dependency. The row solve's scalar-use compiler
+constraint is not a shared-memory fence. The column solve is a separate algorithm:
+factor/RHS/output all require ColAccess, and all lanes broadcast solved RHS pivots.
 
 An empty tuple retains the existing legacy path and its existing domain checks.
 This registry does not expand legacy support for unknown operations, wrappers,
@@ -148,7 +150,10 @@ function orientation_variants(::typeof(\), A::Type, B::Type)
     _variant_input_domain((A, B)) && _variant_triangular(A) || return ()
     a, b = _variant_shape(A), _variant_shape(B)
     a[1] == a[2] == b[1] || return ()
-    return (_orientation_variant(:solve_row, (:any, :row), :row, :triangular_solve),)
+    return (
+        _orientation_variant(:solve_row, (:any, :row), :row, :triangular_solve),
+        _orientation_variant(:solve_col, (:col, :col), :col, :triangular_solve),
+    )
 end
 
 """Emit a validated variant call; assignment/residence and alias validation belongs to M5."""

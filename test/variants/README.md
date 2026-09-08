@@ -28,7 +28,8 @@ Contracts relevant to future code generation:
   current compiler, splitting these across reconverged guards prevented allocation
   elimination. This is an observed code-generation constraint, not an API ban on
   branches. The factorization view factory also required explicit callsite inlining
-to eliminate allocation escape. Ordinary compute-variant calls passed. Final inference and binary resource checks remain necessary.
+  to eliminate allocation escape. Ordinary compute-variant calls passed. Final
+  inference and binary resource checks remain necessary.
 
 Selected shapes exercise rectangular source participation, non-power-of-two groups,
 full-warp masks, triangular masking and different residences without expanding a
@@ -36,10 +37,21 @@ Cartesian product. CPU and legacy-dual numerical references are used where the
 legacy operation supports that case. Microkernel resource acceptance does not
 establish fused throughput; that is the M6 decision gate.
 
-A tested N=32, P=2 register solve reached the hardware register limit and spilled
-during assembly despite fully scalarized PTX (255 registers, 1040–1048 local bytes
-for the two factor orientations on the tested RTX 4090 toolchain). The selected
-single-shared alternative uses 56 registers and zero local memory. Such specializations remain ineligible
-under the zero-local-memory gate; support for their shape does not promise every
-residence/orientation choice is feasible. M6 must select a measured feasible
-assignment. Adding per-step warp barriers made this case worse and was discarded.
+The row solve uses an explicit GPU compiler constraint consuming each solved scalar
+in every participating lane. Without it, the tested N=32, P=2 specialization grouped
+528 factor broadcasts before the arithmetic and spilled despite scalarized PTX.
+The empty assembly adds no GPU synchronization or memory fence; it constrains dead
+lane optimization and must remain accompanied by final binary resource checks.
+The N=32, P=2 register case is a zero-local-memory regression test, without pinning
+an exact register count to one compiler version.
+
+The separate column solve requires logical ColAccess for the factor, RHS and output.
+It broadcasts N×P solved RHS values and holds P private RHS entries per lane. Tests
+cover P>N, padded groups and unit diagonals through transposing wrappers (with NaN
+stored diagonals). Lower/upper and unit/nonunit factors remain supported. An outer
+transpose/adjoint flips the physical convention required of its parent.
+
+Both solve variants remain candidates. In particular, using column solves for both
+U′ and U requires opposite physical orientations of U; storage or conversion costs
+must be included in fused selection. No dimension or residence is globally disabled,
+and the compiler constraint is not a guarantee against spilling in a larger kernel.
