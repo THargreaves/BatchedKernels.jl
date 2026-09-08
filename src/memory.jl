@@ -26,6 +26,7 @@ export interm_to_dual_transfer!, dual_to_interm_transfer!
 export shared_matrix_load!, shared_vector_load!
 export vector_load!, vector_write!
 export scalar_stage!, scalar_write!
+export single_region_elems, dual_region_elems
 
 """
 Abstraction of shared memory layout for a matrix accessible both column and row-wise.
@@ -450,6 +451,60 @@ end
     return q + (q - 1i32) ÷ _single_pad_interval(Val(D))
 end
 
+@inline function _validate_layout_threads(::Val{nthreads}) where {nthreads}
+    (nthreads isa Integer && 32 <= nthreads <= 1024 && nthreads % 32 == 0) ||
+        throw(ArgumentError("layout regions require 32..1024 threads in complete warps"))
+    return nothing
+end
+
+"""Element count of a new padded single-compute region for a complete thread block."""
+@inline function single_region_elems(::Val{D}, ::Val{nthreads}) where {D,nthreads}
+    _validate_layout_threads(Val(nthreads))
+    return _single_warp_stride(Val(D)) * (Int32(nthreads) ÷ 32i32)
+end
+
+@inline function _dual_warp_stride(::Val{D}) where {D}
+    _validate_compute_shape(Val(D), Val(D), Val(D))
+    d = Int32(D)
+    n = 32i32 ÷ d
+    padding = mod(n - mod(n * d, 32i32), 32i32)
+    return n * d * d + padding * (d - 1i32)
+end
+
+"""Element count of an existing dual-layout region for a complete thread block."""
+@inline function dual_region_elems(::Val{D}, ::Val{nthreads}) where {D,nthreads}
+    _validate_layout_threads(Val(nthreads))
+    return _dual_warp_stride(Val(D)) * (Int32(nthreads) ÷ 32i32)
+end
+
+@inline _single_raw_index(
+    ::Val{D}, ::RowOriented, inner::Int32, i::Int32, j::Int32
+) where {D} = inner + (j - 1i32) * Int32(D) + i - 1i32
+@inline _single_raw_index(
+    ::Val{D}, ::ColOriented, inner::Int32, i::Int32, j::Int32
+) where {D} = inner + (i - 1i32) * Int32(D) + j - 1i32
+
+# Offsets are zero-based; the returned backing-storage index is one-based.
+@inline function _single_address(
+    ::Val{D}, o, outer::Int32, inner::Int32, i::Int32, j::Int32
+) where {D}
+    r = _single_raw_index(Val(D), o, inner, i, j)
+    return outer + r + r ÷ _single_pad_interval(Val(D)) + 1i32
+end
+
+@inline function _single_transfer_address(
+    ::Val{D}, o, wid::Int32, mid::Int32, i::Int32, j::Int32
+) where {D}
+    return _single_address(
+        Val(D),
+        o,
+        (wid - 1i32) * _single_warp_stride(Val(D)),
+        (mid - 1i32) * Int32(D) * Int32(D),
+        i,
+        j,
+    )
+end
+
 """
     SingleAccessMatrix(storage, Val(M), Val(N), Val(D_MAX), orientation, wid, matrix_id)
 
@@ -489,16 +544,9 @@ end
 @inline orientation(::Type{<:DualAccessMatrix}) = BothOriented()
 
 @inline function _single_index(
-    A::SingleAccessMatrix{T,M,N,D,RowOriented}, i::Int32, j::Int32
-) where {T,M,N,D}
-    r = A.inner_offset + (j - 1i32) * Int32(D) + i - 1i32
-    return A.outer_offset + r + r ÷ _single_pad_interval(Val(D)) + 1i32
-end
-@inline function _single_index(
-    A::SingleAccessMatrix{T,M,N,D,ColOriented}, i::Int32, j::Int32
-) where {T,M,N,D}
-    r = A.inner_offset + (i - 1i32) * Int32(D) + j - 1i32
-    return A.outer_offset + r + r ÷ _single_pad_interval(Val(D)) + 1i32
+    A::SingleAccessMatrix{T,M,N,D,O}, i::Int32, j::Int32
+) where {T,M,N,D,O}
+    return _single_address(Val(D), O(), A.outer_offset, A.inner_offset, i, j)
 end
 
 @propagate_inbounds @inline function Base.getindex(
@@ -1609,4 +1657,175 @@ end
     if tid <= n_mats_per_block && (base + tid) <= N
         @inbounds global_arr[base + tid] = shmem[tid]
     end
+end
+
+##########################################
+#### PADDED SINGLE COMPUTE TRANSFERS ######
+##########################################
+
+"""
+    intermediate_layout_load!(single, global, Val(M), Val(N), Val(D), Val(nthreads), count, orientation)
+
+Cooperatively load column-major logical M×N matrices into new padded D×D single
+compute tiles. Each warp pass reads consecutive valid global elements, then scatters
+by logical coordinates. Both orientations preserve global coalescing; shared scatter
+bank costs depend on shape and orientation. Only valid logical entries are written.
+
+All new orientation-taking transfers require the launch block size to equal
+`nthreads`, with complete warps. They contain no barriers: callers must synchronize
+the full warp after cooperative production and before readers, and before reusing
+storage still read by another lane. Single/dual conversion buffers must not overlap.
+Call cooperative global transfers outside per-matrix active guards; internal guards
+handle batch tails and unused lanes.
+"""
+@inline function intermediate_layout_load!(
+    shmem,
+    global_arr,
+    ::Val{M},
+    ::Val{N},
+    ::Val{D},
+    ::Val{nthreads},
+    count::Int32,
+    o::Union{RowOriented,ColOriented},
+) where {M,N,D,nthreads}
+    _validate_compute_shape(Val(M), Val(N), Val(D))
+    _validate_layout_threads(Val(nthreads))
+    tid = threadIdx().x
+    wid = (tid - 1i32) ÷ 32i32 + 1i32
+    lid = mod1(tid, 32i32)
+    nmat = 32i32 ÷ Int32(D)
+    block_mats = (Int32(nthreads) ÷ 32i32) * nmat
+    first_mat = (blockIdx().x - 1i32) * block_mats + (wid - 1i32) * nmat
+    matrix_elems = Int32(M) * Int32(N)
+    warp_elems = nmat * matrix_elems
+    @inbounds @unroll for pass in (1i32):cld(warp_elems, 32i32)
+        r = (pass - 1i32) * 32i32 + lid - 1i32
+        mid = r ÷ matrix_elems + 1i32
+        if r < warp_elems && first_mat + mid <= count
+            elem = r % matrix_elems
+            i = elem % Int32(M) + 1i32
+            j = elem ÷ Int32(M) + 1i32
+            dest = _single_transfer_address(Val(D), o, wid, mid, i, j)
+            shmem[dest] = global_arr[first_mat * matrix_elems + r + 1i32]
+        end
+    end
+    return nothing
+end
+
+"""Inverse of the orientation-taking cooperative load; the same synchronization contract applies."""
+@inline function intermediate_layout_write!(
+    global_arr,
+    shmem,
+    ::Val{M},
+    ::Val{N},
+    ::Val{D},
+    ::Val{nthreads},
+    count::Int32,
+    o::Union{RowOriented,ColOriented},
+) where {M,N,D,nthreads}
+    _validate_compute_shape(Val(M), Val(N), Val(D))
+    _validate_layout_threads(Val(nthreads))
+    tid = threadIdx().x
+    wid = (tid - 1i32) ÷ 32i32 + 1i32
+    lid = mod1(tid, 32i32)
+    nmat = 32i32 ÷ Int32(D)
+    block_mats = (Int32(nthreads) ÷ 32i32) * nmat
+    first_mat = (blockIdx().x - 1i32) * block_mats + (wid - 1i32) * nmat
+    matrix_elems = Int32(M) * Int32(N)
+    warp_elems = nmat * matrix_elems
+    @inbounds @unroll for pass in (1i32):cld(warp_elems, 32i32)
+        r = (pass - 1i32) * 32i32 + lid - 1i32
+        mid = r ÷ matrix_elems + 1i32
+        if r < warp_elems && first_mat + mid <= count
+            elem = r % matrix_elems
+            i = elem % Int32(M) + 1i32
+            j = elem ÷ Int32(M) + 1i32
+            src = _single_transfer_address(Val(D), o, wid, mid, i, j)
+            global_arr[first_mat * matrix_elems + r + 1i32] = shmem[src]
+        end
+    end
+    return nothing
+end
+
+@inline _owned_coords(k::Int32, d::Int32, ::RowOriented) = (k, d)
+@inline _owned_coords(k::Int32, d::Int32, ::ColOriented) = (d, k)
+@inline _owned_line_count(::Val{M}, ::Val{N}, ::RowOriented) where {M,N} = Int32(N)
+@inline _owned_line_count(::Val{M}, ::Val{N}, ::ColOriented) where {M,N} = Int32(M)
+
+"""
+Copy new single compute storage into disjoint raw dual storage. Each lane copies its
+owned line according to the single orientation. Only valid logical entries are
+written; caller warp synchronization is required before consumers or storage reuse.
+"""
+@inline function interm_to_dual_transfer!(
+    shmem_dual,
+    shmem_single,
+    ::Val{M},
+    ::Val{N},
+    ::Val{D},
+    ::Val{nthreads},
+    count::Int32,
+    o::Union{RowOriented,ColOriented},
+) where {M,N,D,nthreads}
+    _validate_compute_shape(Val(M), Val(N), Val(D))
+    _validate_layout_threads(Val(nthreads))
+    tid = threadIdx().x
+    wid = (tid - 1i32) ÷ 32i32 + 1i32
+    lid = mod1(tid, 32i32)
+    nmat = 32i32 ÷ Int32(D)
+    mid = (lid - 1i32) ÷ Int32(D) + 1i32
+    d = mod1(lid, Int32(D))
+    block_mats = (Int32(nthreads) ÷ 32i32) * nmat
+    global_mat = (blockIdx().x - 1i32) * block_mats + (wid - 1i32) * nmat + mid
+    if mid <= nmat && global_mat <= count && d <= _owned_line_count(Val(M), Val(N), o)
+        dual_outer = (wid - 1i32) * _dual_warp_stride(Val(D))
+        @inbounds @unroll for k in (1i32):Int32(_register_line_width(Val(M), Val(N), o))
+            i, j = _owned_coords(k, d, o)
+            src = _single_transfer_address(Val(D), o, wid, mid, i, j)
+            dest =
+                dual_outer +
+                mid +
+                (j - 1i32) * Int32(_compute_stride(Val(D))) +
+                (i - 1i32) * nmat
+            shmem_dual[dest] = shmem_single[src]
+        end
+    end
+    return nothing
+end
+
+"""
+Copy a logical dual matrix view into disjoint new single compute storage. `M_dual`
+must denote the calling lane group's matrix and support logical two-index reads;
+wrappers are read through their indexing semantics to materialize structural zeros
+or transposes. Logical M,N refer to the wrapped view's output shape. Caller warp
+synchronization is required before this copy and before cooperative output reads.
+"""
+@inline function dual_to_interm_transfer!(
+    shmem_single,
+    M_dual,
+    ::Val{M},
+    ::Val{N},
+    ::Val{D},
+    ::Val{nthreads},
+    count::Int32,
+    o::Union{RowOriented,ColOriented},
+) where {M,N,D,nthreads}
+    _validate_compute_shape(Val(M), Val(N), Val(D))
+    _validate_layout_threads(Val(nthreads))
+    tid = threadIdx().x
+    wid = (tid - 1i32) ÷ 32i32 + 1i32
+    lid = mod1(tid, 32i32)
+    nmat = 32i32 ÷ Int32(D)
+    mid = (lid - 1i32) ÷ Int32(D) + 1i32
+    d = mod1(lid, Int32(D))
+    block_mats = (Int32(nthreads) ÷ 32i32) * nmat
+    global_mat = (blockIdx().x - 1i32) * block_mats + (wid - 1i32) * nmat + mid
+    if mid <= nmat && global_mat <= count && d <= _owned_line_count(Val(M), Val(N), o)
+        @inbounds @unroll for k in (1i32):Int32(_register_line_width(Val(M), Val(N), o))
+            i, j = _owned_coords(k, d, o)
+            dest = _single_transfer_address(Val(D), o, wid, mid, i, j)
+            shmem_single[dest] = M_dual[i, j]
+        end
+    end
+    return nothing
 end
