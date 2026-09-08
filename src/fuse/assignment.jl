@@ -1,16 +1,16 @@
-# Explicit host-only assignments for the shared-storage integration. Register
-# placements remain deferred until candidate resource admission is integrated.
+# Explicit host-only assignments for the hybrid storage integration.
 """
     Assignment(tape; residences=Dict(), orientations=Dict(), variants=Dict(),
                order=collect(eachindex(tape.nodes)), nthreads=256)
 
-Explicit host metadata for hybrid shared-storage compilation. Matrix placements
-use `:single` (`:row` or `:col`) or `:dual` (`:both`); input handles and shared
-inputs retain their assigned residence. Compute calls default to `:legacy`, which
-requires dual-access batched operands. Named orientation variants permit single
-storage. Wrapper metadata follows its parent, swapping row/column for transpose.
-Registers and opportunistic output aliasing are deferred. `plan_memory` validates
-and snapshots the assignment before allocating independent single/dual pools.
+Explicit host metadata for hybrid storage compilation. Matrix placements
+use `:single` (`:row` or `:col`), `:dual` (`:both`), or `:register` (`:row` or
+`:col`); input handles and shared inputs retain their assigned residence. Compute
+calls default to `:legacy`, which requires dual-access batched operands. Named
+orientation variants permit single or register storage. Wrapper metadata follows its
+parent, swapping row/column for transpose. Register values are fresh SSA values:
+they have no shared slot; logical wrappers retain their parent ownership. `plan_memory` validates and snapshots the
+assignment before allocating independent single/dual pools.
 """
 struct Assignment
     residences::Dict{Int,Symbol}
@@ -35,6 +35,7 @@ struct HybridPlannerOutput
     owner_last_use::Dict{Int,Int}
     assignment::Assignment
     shared_bytes::Int
+    peak_register_elements::Int
     D_MAX::Int
     element_type::DataType
 end
@@ -57,6 +58,17 @@ _flip_assignment(o) =
     else
         :both
     end
+
+# Each participating lane owns one logical line. The physical orientation names
+# follow RegisterMatrix: row-oriented storage owns an M-wide line and col-oriented
+# storage owns an N-wide line. This is an element count, deliberately separate
+# from the compiler's eventual register allocation.
+function _register_line_elements(shape::Tuple{Integer,Integer}, orientation::Symbol)
+    m, n = shape
+    orientation === :row && return m
+    orientation === :col && return n
+    throw(ArgumentError("Register storage needs row or column orientation"))
+end
 
 function Assignment(
     tape::Tape;
@@ -99,7 +111,7 @@ function Assignment(
             i,
             if rs[i] === :dual
                 :both
-            elseif rs[i] === :single && r !== :single
+            elseif rs[i] in (:single, :register) && !(r in (:single, :register))
                 :row
             else
                 o
@@ -185,22 +197,22 @@ function plan_memory(
             all(x -> 1 <= x <= D, shape) ||
                 throw(ArgumentError("Matrix shape at %$i exceeds D_MAX"))
             r, o = a.residences[i], a.orientations[i]
-            r in (:global, :shared_input, :single, :dual) || throw(
-                ArgumentError(
-                    "Unsupported residence $r at %$i; register integration is deferred"
-                ),
+            r in (:global, :shared_input, :single, :dual, :register) || throw(
+                ArgumentError("Unsupported residence $r at %$i"),
             )
             o in (:row, :col, :both) || throw(ArgumentError("Invalid orientation at %$i"))
             r in (:dual, :shared_input) &&
                 o !== :both &&
                 throw(ArgumentError("Dual/shared input must be both-oriented"))
-            r === :single &&
+            r in (:single, :register) &&
                 !(o in (:row, :col)) &&
-                throw(ArgumentError("Single storage needs row or column orientation"))
+                throw(ArgumentError("Single/register storage needs row or column orientation"))
             if node isa InputNode
                 r === expected.residences[i] ||
                     throw(ArgumentError("Input residence cannot be changed at %$i"))
             elseif node isa NewNode
+                r === :register && _variant_shape(tape.metas[i].type) === nothing &&
+                    throw(ArgumentError("Register storage is unsupported for this matrix wrapper at %$i"))
                 ps = [x.id for x in node_refs(node) if haskey(a.residences, x.id)]
                 length(ps) == 1 || throw(ArgumentError("Unsupported matrix wrapper at %$i"))
                 p = only(ps)
@@ -222,9 +234,9 @@ function plan_memory(
                         ArgumentError("Global transfer staging must use single storage")
                     )
                 elseif _isplacement(fn)
-                    r in (:single, :dual) || throw(ArgumentError("Invalid input placement"))
+                    r in (:single, :dual, :register) || throw(ArgumentError("Invalid input placement"))
                 elseif r in (:global, :shared_input)
-                    throw(ArgumentError("Computed values need batched shared storage"))
+                    throw(ArgumentError("Computed values need batched shared or register storage"))
                 end
                 if fn === _load_to_single
                     length(node.args) == 1 ||
@@ -257,8 +269,8 @@ function plan_memory(
                                 ArgumentError("Input placement requires raw single storage")
                             )
                     else
-                        a.residences[p] in (:single, :dual, :shared_input) || throw(
-                            ArgumentError("Output staging requires a logical shared view"),
+                        a.residences[p] in (:single, :dual, :shared_input, :register) || throw(
+                            ArgumentError("Output staging requires a logical shared or register view"),
                         )
                     end
                     # A structured or remapped view requires materialization.
@@ -282,6 +294,8 @@ function plan_memory(
                     p = node.args[target].id
                     shape == _assignment_shape(tape.metas[p].type) ||
                         throw(ArgumentError("Forced mutation cannot change logical shape"))
+                    a.residences[i] !== :register && a.residences[p] !== :register ||
+                        throw(ArgumentError("Forced mutation requires shared storage"))
                     r === a.residences[p] && o === a.orientations[p] ||
                         throw(ArgumentError("Forced mutation cannot change storage map"))
                     for (k, ref) in enumerate(node.args)
@@ -375,6 +389,21 @@ function plan_memory(
         ownerlast[owners[i]] = max(get(ownerlast, owners[i], 0), lastuse[i])
     end
     intervals = Tuple{Int,Symbol,Int,Int}[]
+    # Register values have fresh SSA ownership.  Count the line elements live at
+    # every schedule point; this exposes a placement-level pressure proxy without
+    # pretending it equals the compiler's physical register allocation.
+    register_intervals = Tuple{Int,Int,Int}[]
+    for i in 1:N
+        owners[i] == i || continue
+        haskey(a.residences, i) && a.residences[i] === :register || continue
+        width = _register_line_elements(_assignment_shape(tape.metas[i].type), a.orientations[i])
+        push!(register_intervals, (pos[i], ownerlast[i], width))
+    end
+    peak_register_elements = maximum(
+        (sum((width for (start, stop, width) in register_intervals if start <= at <= stop); init=0)
+         for at in 1:(N + 1));
+        init=0,
+    )
     shared = Dict{Int,SlotAssignment}()
     sharedM = 0
     sharedV = 0
@@ -442,6 +471,7 @@ function plan_memory(
         ownerlast,
         a,
         bytes,
+        peak_register_elements,
         D,
         T,
     )

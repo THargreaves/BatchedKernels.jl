@@ -335,6 +335,30 @@ function _codegen(
             node_view_sym[id] = view
         end
     end
+    if hybrid
+        # A register value owns one physical line per lane. Construct a concrete
+        # view for each SSA value rather than carrying host metadata into device code.
+        # Remainder lanes use a valid unused group identity; no collective is emitted
+        # for those lanes.
+        for id in sort!(collect(keys(assignment.residences)))
+            assignment.residences[id] === :register || continue
+            tape.nodes[id] isa NewNode && continue
+            M, Nlogical = shape(tape.metas[id].type)
+            o = physical_orientation(id)
+            view = Symbol("HR", id)
+            push!(
+                stmts,
+                :(
+                    $view = @inbounds RegisterMatrix{$T}(
+                        Val(Int32($M)), Val(Int32($Nlogical)), Val($D32), $o,
+                        (min(warp_matrix_id, $n_mats_per_warp) - 1i32) * $D32,
+                        d,
+                    )
+                ),
+            )
+            node_view_sym[id] = view
+        end
+    end
 
     # Matrix inputs are loaded by `_load_to_single` + `_single_to_dual` tape
     # nodes — see the inline branches in the main walk below. Vector inputs
@@ -395,12 +419,12 @@ function _codegen(
         end
         _push_warp_fence!(stmts)
         if hybrid && node.fn in (_load_to_single, _place_input, _stage_output)
-            dest_slot = planner.slots[i]
-            dest_raw = slot_shmem_sym(dest_slot)
             M, Nlogical = shape(meta.type)
             dims = [:(Val(Int32($n))) for n in (M, Nlogical, D_MAX, nthreads)]
             src_ref = only(node.args)
             if node.fn === _load_to_single
+                dest_slot = planner.slots[i]
+                dest_raw = slot_shmem_sym(dest_slot)
                 source = input_sym[src_ref.id]
                 o = physical_orientation(i)
                 push!(
@@ -408,27 +432,52 @@ function _codegen(
                     :(intermediate_layout_load!($dest_raw, $source, $(dims...), N, $o)),
                 )
             elseif node.fn === _place_input
-                src_slot = planner.slots[src_ref.id]
                 if planner.owners[i] != planner.owners[src_ref.id]
-                    dest_slot.kind === :Md ||
-                        error("codegen: unsupported non-alias single placement")
-                    source = slot_shmem_sym(src_slot)
-                    o = physical_orientation(src_ref.id)
-                    push!(
-                        stmts,
-                        :(interm_to_dual_transfer!($dest_raw, $source, $(dims...), N, $o)),
-                    )
+                    source = arg_kernel_expr(tape, src_ref, node_view_sym)
+                    if assignment.residences[i] === :register
+                        push!(
+                            stmts,
+                            Expr(
+                                :if,
+                                :(active),
+                                :(single_to_register!($(node_view_sym[i]), $source)),
+                            ),
+                        )
+                    else
+                        dest_slot = planner.slots[i]
+                        dest_slot.kind === :Md ||
+                            error("codegen: unsupported non-alias single placement")
+                        dest_raw = slot_shmem_sym(dest_slot)
+                        src_slot = planner.slots[src_ref.id]
+                        source_raw = slot_shmem_sym(src_slot)
+                        o = physical_orientation(src_ref.id)
+                        push!(
+                            stmts,
+                            :(interm_to_dual_transfer!($dest_raw, $source_raw, $(dims...), N, $o)),
+                        )
+                    end
                 end
             else
                 if planner.owners[i] != planner.owners[src_ref.id]
                     source = arg_kernel_expr(tape, src_ref, node_view_sym)
-                    o = physical_orientation(i)
-                    # The logical view may be dual, single, or a wrapper. This
-                    # conversion materializes its logical indexing semantics.
-                    push!(
-                        stmts,
-                        :(dual_to_interm_transfer!($dest_raw, $source, $(dims...), N, $o)),
-                    )
+                    if assignment.residences[src_ref.id] === :register
+                        push!(
+                            stmts,
+                            Expr(
+                                :if,
+                                :(active),
+                                :(register_to_single!($(node_view_sym[i]), $source, d)),
+                            ),
+                        )
+                    else
+                        dest_slot = planner.slots[i]
+                        dest_raw = slot_shmem_sym(dest_slot)
+                        o = physical_orientation(i)
+                        push!(
+                            stmts,
+                            :(dual_to_interm_transfer!($dest_raw, $source, $(dims...), N, $o)),
+                        )
+                    end
                 end
             end
             _push_warp_fence!(stmts)
@@ -513,11 +562,12 @@ function _codegen(
             # emit_primitive method returns an assignment (`s_i = …`).
             dest = scalar_node_sym[i]
         else
-            dest_slot = planner.slots[i]
-            dest = if hybrid && dest_slot.kind in (:Ms, :Md)
+            dest = if hybrid && get(assignment.residences, i, :none) === :register
                 node_view_sym[i]
             else
-                slot_view_sym(dest_slot)
+                dest_slot = planner.slots[i]
+                hybrid && dest_slot.kind in (:Ms, :Md) ?
+                    node_view_sym[i] : slot_view_sym(dest_slot)
             end
         end
         node_view_sym[i] = dest

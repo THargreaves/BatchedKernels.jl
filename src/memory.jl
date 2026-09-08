@@ -23,6 +23,7 @@ export DualAccessMatrix,
 export BlockMatrix_2_1, BlockMatrixLowerTrig_2_2
 export intermediate_layout_load!, intermediate_layout_write!
 export interm_to_dual_transfer!, dual_to_interm_transfer!
+export single_to_register!, register_to_single!
 export shared_matrix_load!, shared_vector_load!
 export vector_load!, vector_write!
 export scalar_stage!, scalar_write!
@@ -640,6 +641,98 @@ end
 @inline orientation(::Type{<:RegisterMatrix{T,M,N,D,O}}) where {T,M,N,D,O} = O()
 @inline orientation(A::Union{SingleAccessMatrix,DualAccessMatrix,RegisterMatrix}) =
     orientation(typeof(A))
+
+# This shared-memory transfer reads a different logical line in each lane. Use
+# indexed loads: `theirs` promises group-uniform indices, even for shared sources.
+@inline function single_to_register!(
+    dest::RegisterMatrix{T,M,N,D,RowOriented}, source::SingleAccessMatrix{T,M,N,D}
+) where {T,M,N,D}
+    @unroll for k in 1i32:Int32(M)
+        @inbounds dest.mv[k] = dest.d <= Int32(N) ?
+            source[k, dest.d] : zero(T)
+    end
+    return dest
+end
+@inline function single_to_register!(
+    dest::RegisterMatrix{T,M,N,D,ColOriented}, source::SingleAccessMatrix{T,M,N,D}
+) where {T,M,N,D}
+    @unroll for k in 1i32:Int32(N)
+        @inbounds dest.mv[k] = dest.d <= Int32(M) ?
+            source[dest.d, k] : zero(T)
+    end
+    return dest
+end
+
+"""
+    register_to_single!(dest, source, d)
+
+Materialize a logical source view into an oriented single-access tile. A source
+with the matching effective orientation uses direct owned-line accesses, retaining
+audited wrapper semantics; an opposite orientation uses uniform full-group
+broadcasts. The caller invokes this only for complete active matrix groups.
+"""
+@inline function register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,RowOriented}, source, d::Int32
+) where {T,M,N,D}
+    return _register_to_single!(dest, source, d, orientation(source))
+end
+@inline function register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,ColOriented}, source, d::Int32
+) where {T,M,N,D}
+    return _register_to_single!(dest, source, d, orientation(source))
+end
+
+# Oriented logical wrappers retain the direct line copy whenever their effective
+# orientation matches the staging tile. `ours` supplies their triangular and
+# transpose semantics. The opposite-orientation methods below materialize through
+# uniform broadcasts.
+@inline function _register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,RowOriented}, source, d::Int32, ::RowOriented
+) where {T,M,N,D}
+    if d <= Int32(N)
+        @unroll for k in 1i32:Int32(M)
+            ours_write!(dest, k, d, ours(source, k, d, RowAccess()), RowAccess())
+        end
+    end
+    return dest
+end
+@inline function _register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,ColOriented}, source, d::Int32, ::ColOriented
+) where {T,M,N,D}
+    if d <= Int32(M)
+        @unroll for k in 1i32:Int32(N)
+            ours_write!(dest, k, d, ours(source, k, d, ColAccess()), ColAccess())
+        end
+    end
+    return dest
+end
+
+@inline function _register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,RowOriented}, source, d::Int32, ::Orientation
+) where {T,M,N,D}
+    @unroll for j in 1i32:Int32(N)
+        @unroll for i in 1i32:Int32(M)
+            value = theirs(source, i, j)
+            if d == j
+                ours_write!(dest, i, d, value, RowAccess())
+            end
+        end
+    end
+    return dest
+end
+@inline function _register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,ColOriented}, source, d::Int32, ::Orientation
+) where {T,M,N,D}
+    @unroll for i in 1i32:Int32(M)
+        @unroll for j in 1i32:Int32(N)
+            value = theirs(source, i, j)
+            if d == i
+                ours_write!(dest, j, d, value, ColAccess())
+            end
+        end
+    end
+    return dest
+end
 
 # Traits describe wrapper ownership only; logical wrapper accessors are separate.
 @inline orientation(::Type{<:Adjoint{T,P}}) where {T,P} = flip(orientation(P))

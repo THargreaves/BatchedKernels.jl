@@ -129,7 +129,7 @@ function _ensure_compiled!(f, args::Tuple; assignment=nothing, nthreads::Int=256
     policy = if assignment === nothing
         (:legacy, nthreads)
     else
-        (:forced_shared, assignment_key(assignment), CUDA.device())
+        (:forced_hybrid, assignment_key(assignment), CUDA.device())
     end
     key = (f, Tuple(input_cache_key(spec) for spec in input_specs), policy)
 
@@ -223,13 +223,15 @@ export fuse, Assignment
     fuse(f, args...; assignment=nothing, nthreads=assignment === nothing ? 256 : assignment.nthreads)
 
 Execute the same scalar function and return the same inferred batched output type
-as `f.(args...)`. With a host `Assignment`, use validated forced shared storage and
+as `f.(args...)`. With a host `Assignment`, use validated forced hybrid storage and
 variant choices; without one, use the corrected legacy planner. Build assignments
 against `trace(f, InputSpec[input_spec(x) for x in args])`; staging normalization
 preserves node IDs. Dictionary/layout choices never enter the device kernel.
 
-M5 supports single/dual matrix storage; register assignments enter in M6. A forced
-choice is rejected if unsupported, without silently selecting another variant.
+Single, dual and register matrix storage are supported by the audited variants.
+Forced mutation uses shared storage. A forced choice is rejected if unsupported,
+without silently selecting another variant. Register placement does not guarantee
+that the device compiler avoids spills; inspect compiled resources before tuning.
 """
 function fuse(
     f::F,

@@ -1,4 +1,4 @@
-The forced shared-storage path is an explicit integration surface. Ordinary
+The forced hybrid-storage path is an explicit integration surface. Ordinary
 `f.(args...)` continues to use the corrected legacy planner.
 
 ```julia
@@ -27,8 +27,13 @@ are fresh: optional destructive input reuse is deferred. This conservative choic
 can increase shared-memory use. Exact no-op staging can share an owner's allocation;
 logical wrappers and orientation changes require output materialization.
 
-Register assignments remain M6 work. Forced in-place operations retain their legacy
-dual bodies and existing shape restrictions. Host metadata never enters device
+Register placements and fresh register compute outputs are supported by the audited
+variants. Global transfers still stage through single storage. Matching logical
+orientations use direct owned-line transfers; opposite orientations use complete-group
+broadcasts to materialize the result. Forced in-place operations retain their legacy
+dual bodies and existing shape restrictions. Shared inputs and vectors keep their
+existing residences. Explicit register-backed wrappers outside the audited accessor
+domain (such as a `Symmetric` staging source) are rejected during planning. Host metadata never enters device
 execution; each emitted matrix value has a concrete shape/layout binding. The
 forced cache key includes the complete assignment, order, geometry and device.
 
@@ -44,3 +49,17 @@ rectangular column transfers, wrapped/repeated outputs, partial batches, four sh
 inputs at 64 threads, and public return inference. GPU resource checks compare the
 planner's aligned byte budget with compiled static shared memory, allowing unused
 tail padding and dead allocation elimination. Use memcheck, racecheck and synccheck for the focused GPU item.
+
+`HybridPlannerOutput.peak_register_elements` counts live per-lane matrix elements,
+including overlapping inputs and fresh outputs. Row orientation contributes the row
+extent and column orientation the column extent. Wrappers share their parent's count.
+This excludes compiler temporaries, pointers and allocation overhead, and is not a
+prediction of physical registers. `CUDA.registers(kernel)` and `CUDA.memory(kernel)`
+inspect the assembled kernel; a register assignment can still spill. The M6 benchmark
+admits only CPU-correct configurations with zero compiled local memory.
+
+The selected register tests cover rectangular source-lane participation, mixed
+register/shared computation, wrapped/repeated outputs, partial batches, a Cholesky/two
+solve pipeline and public output inference. Run both accessor modes; resource gates
+apply to production builds. See `benchmarking/kalman/hybrid_m6.jl` for the full-fusion
+performance comparison.
