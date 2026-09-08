@@ -567,10 +567,13 @@ end
 @inline _register_line_width(::Val{M}, ::Val{N}, ::ColOriented) where {M,N} = N
 
 # base is the number of lanes before the group: CUDA.jl shuffles use base+j.
-@inline function _register_group_mask(::Val{D}, base::Int32) where {D}
+@propagate_inbounds @inline function _register_group_mask(::Val{D}, base::Int32) where {D}
     _validate_compute_shape(Val(D), Val(D), Val(D))
-    (0i32 <= base <= 32i32 - Int32(D) && base % Int32(D) == 0i32) ||
-        throw(ArgumentError("register base must start a complete D_MAX-wide lane group"))
+    @boundscheck begin
+        (0i32 <= base <= 32i32 - Int32(D) && base % Int32(D) == 0i32) || throw(
+            ArgumentError("register base must start a complete D_MAX-wide lane group")
+        )
+    end
     return (typemax(UInt32) >>> (32i32 - Int32(D))) << base
 end
 
@@ -583,8 +586,14 @@ col orientation N registers. `base` is zero-based and `d` one-based within the g
 `mask` must name exactly that complete group. The allocating constructor initializes
 all offered entries to zero, including entries in lanes without a logical line.
 
+Runtime base/mask/d checks are bounds checks. An `@inbounds` caller must first prove
+that base starts a complete aligned D_MAX-wide group, mask covers exactly that group,
+and 1 <= d <= D_MAX. This permits kernels with proven geometry to omit exception
+paths that can otherwise require local stack memory. Shape and line-width validation
+remain unconditional compile-time checks.
+
 There is deliberately no general indexing implementation: cross-lane access requires
-the explicit collective accessors introduced in the next storage milestones.
+the explicit collective accessors (`ours`, `ours_write!`, and `theirs`).
 """
 struct RegisterMatrix{T,M,N,D,O<:Union{RowOriented,ColOriented},L} <: AbstractMatrix{T}
     mv::MVector{L,T}
@@ -592,7 +601,7 @@ struct RegisterMatrix{T,M,N,D,O<:Union{RowOriented,ColOriented},L} <: AbstractMa
     mask::UInt32
     d::Int32
 
-    @inline function RegisterMatrix(
+    @propagate_inbounds @inline function RegisterMatrix(
         mv::MVector{L,T},
         ::Val{M},
         ::Val{N},
@@ -605,14 +614,16 @@ struct RegisterMatrix{T,M,N,D,O<:Union{RowOriented,ColOriented},L} <: AbstractMa
         _validate_compute_shape(Val(M), Val(N), Val(D))
         L == _register_line_width(Val(M), Val(N), o) ||
             throw(ArgumentError("register line width does not match shape and orientation"))
-        mask == _register_group_mask(Val(D), base) ||
-            throw(ArgumentError("register mask must cover exactly its lane group"))
-        1i32 <= d <= Int32(D) || throw(ArgumentError("invalid within-group lane index"))
+        @boundscheck begin
+            mask == _register_group_mask(Val(D), base) ||
+                throw(ArgumentError("register mask must cover exactly its lane group"))
+            1i32 <= d <= Int32(D) || throw(ArgumentError("invalid within-group lane index"))
+        end
         return new{T,M,N,D,O,L}(mv, base, mask, d)
     end
 end
 
-@inline function RegisterMatrix{T}(
+@propagate_inbounds @inline function RegisterMatrix{T}(
     ::Val{M}, ::Val{N}, ::Val{D}, o::Union{RowOriented,ColOriented}, base::Int32, d::Int32
 ) where {T,M,N,D}
     _validate_compute_shape(Val(M), Val(N), Val(D))
@@ -749,10 +760,36 @@ end
 """
 Wrapper op for I - A
 """
-struct IAddSubGetterMatrix{T,D} <: DualAccessMatrixWrapper{T,D}
-    parent::DualAccessMatrix{T,D}
+struct IAddSubGetterMatrix{T,D,P<:AbstractMatrix{T}} <: AbstractMatrix{T}
+    parent::P
     a::T
     b::T
+end
+
+@inline function IAddSubGetterMatrix(A::DualAccessMatrix{T,D}, a::T, b::T) where {T,D}
+    return IAddSubGetterMatrix{T,D,typeof(A)}(A, a, b)
+end
+@inline function IAddSubGetterMatrix(A::AbstractMatrix{T}, a::T, b::T) where {T}
+    return IAddSubGetterMatrix{T,size(A, 1),typeof(A)}(A, a, b)
+end
+@inline Base.parent(A::IAddSubGetterMatrix) = A.parent
+@inline Base.size(A::IAddSubGetterMatrix) = size(parent(A))
+@inline Base.IndexStyle(::Type{<:IAddSubGetterMatrix}) = IndexCartesian()
+@inline orientation(::Type{<:IAddSubGetterMatrix{T,D,P}}) where {T,D,P} = orientation(P)
+@inline orientation(A::IAddSubGetterMatrix) = orientation(typeof(A))
+
+@propagate_inbounds @inline function Base.getindex(
+    A::IAddSubGetterMatrix, i::Integer, j::Integer
+)
+    return wrapper_get(A, parent(A)[i, j], Int32(i), Int32(j))
+end
+
+# Preserve the old dual-backed getter's raw write behavior only. New generalized
+# getter wrappers are read-only through the explicit compute-accessor interface.
+@propagate_inbounds @inline function Base.setindex!(
+    A::IAddSubGetterMatrix{T,D,P}, v::T, i::Int32, j::Int32
+) where {T,D,P<:DualAccessMatrix}
+    return parent(A)[i, j] = v
 end
 
 Base.@propagate_inbounds @inline function wrapper_get(
@@ -761,10 +798,34 @@ Base.@propagate_inbounds @inline function wrapper_get(
     return (i == j) * one(T) * A.a + A.b * v
 end
 
-struct IAddSubSetterMatrix{T,D} <: DualAccessMatrixWrapper{T,D}
-    parent::DualAccessMatrix{T,D}
+"""Write-transform wrapper: store `(i == j)*a + b*v`, read the parent unchanged."""
+struct IAddSubSetterMatrix{T,D,P<:AbstractMatrix{T}} <: AbstractMatrix{T}
+    parent::P
     a::T
     b::T
+end
+
+@inline function IAddSubSetterMatrix(A::DualAccessMatrix{T,D}, a::T, b::T) where {T,D}
+    return IAddSubSetterMatrix{T,D,typeof(A)}(A, a, b)
+end
+@inline function IAddSubSetterMatrix(A::AbstractMatrix{T}, a::T, b::T) where {T}
+    return IAddSubSetterMatrix{T,size(A, 1),typeof(A)}(A, a, b)
+end
+@inline Base.parent(A::IAddSubSetterMatrix) = A.parent
+@inline Base.size(A::IAddSubSetterMatrix) = size(parent(A))
+@inline Base.IndexStyle(::Type{<:IAddSubSetterMatrix}) = IndexCartesian()
+@inline orientation(::Type{<:IAddSubSetterMatrix{T,D,P}}) where {T,D,P} = orientation(P)
+@inline orientation(A::IAddSubSetterMatrix) = orientation(typeof(A))
+
+@propagate_inbounds @inline function Base.getindex(
+    A::IAddSubSetterMatrix, i::Integer, j::Integer
+)
+    return parent(A)[i, j]
+end
+@propagate_inbounds @inline function Base.setindex!(
+    A::IAddSubSetterMatrix{T}, v::T, i::Integer, j::Integer
+) where {T}
+    return parent(A)[i, j] = wrapper_set(A, v, Int32(i), Int32(j))
 end
 
 Base.@propagate_inbounds @inline function wrapper_set(

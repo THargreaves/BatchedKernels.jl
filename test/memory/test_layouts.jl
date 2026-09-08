@@ -116,10 +116,11 @@
         end
     end
 
-    # Shared and legacy IAddSub wrappers remain Both; wrapper traits must stay inferred.
+    # Shared and dual-backed IAddSub wrappers remain Both; wrapper traits must stay inferred.
     @test (@inferred BK.orientation(BK.SharedMatrix{Float32,2,2,32})) === BK.BothOriented()
-    @test (@inferred BK.orientation(BK.IAddSubGetterMatrix{Float32,2})) ===
-        BK.BothOriented()
+    @test (@inferred BK.orientation(
+        BK.IAddSubGetterMatrix{Float32,2,BK.DualAccessMatrix{Float32,2}}
+    )) === BK.BothOriented()
     for physical in (BK.RowOriented(), BK.ColOriented())
         storage = zeros(Float32, Int(BK._single_warp_stride(Val(4))))
         A = BK.SingleAccessMatrix(

@@ -9,6 +9,7 @@ import Base.Broadcast
 
 include("containers.jl")
 include("memory.jl")
+include("accessors.jl")
 include("operations.jl")
 
 include("fuse/ir.jl")
