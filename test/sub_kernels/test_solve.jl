@@ -29,7 +29,7 @@
             Cs = CUDA.zeros(Float32, D, D, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_backward_solve!(
-                Cs, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
+                Cs, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode
             )
 
             # CPU comparison
@@ -75,7 +75,7 @@ end
             Cs = CUDA.zeros(Float32, D1, D2, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_backward_solve!(
-                Cs, Us, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
+                Cs, Us, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
             )
 
             # CPU comparison
@@ -87,6 +87,11 @@ end
             end
 
             max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
+
+            if max_error >= 1e-3
+                println("D1=$D1, D2=$D2, error=$max_error")
+            end
+
             @test max_error < 1e-3
         end
     end
@@ -122,7 +127,7 @@ end
             Bs_cpu = Array(Bs)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_backward_solve!(
-                Bs, Us, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
+                Bs, Us, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
             )
 
             # CPU comparison
@@ -169,7 +174,7 @@ end
             Bs_cpu = Array(Bs)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_backward_solve!(
-                Us, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
+                Us, Us, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode
             )
 
             # CPU comparison
@@ -215,7 +220,7 @@ end
             Cs = CUDA.zeros(Float32, D, D, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_forward_solve!(
-                Cs, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
+                Cs, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode
             )
 
             # CPU comparison
@@ -261,7 +266,7 @@ end
             Cs = CUDA.zeros(Float32, D1, D2, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_forward_solve!(
-                Cs, Ls, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
+                Cs, Ls, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
             )
 
             # CPU comparison
@@ -308,7 +313,7 @@ end
             Bs_cpu = Array(Bs)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_forward_solve!(
-                Bs, Ls, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
+                Bs, Ls, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
             )
 
             # CPU comparison
@@ -355,7 +360,7 @@ end
             Bs_cpu = Array(Bs)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_forward_solve!(
-                Ls, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
+                Ls, Ls, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode
             )
 
             # CPU comparison
@@ -377,13 +382,7 @@ end
     using LinearAlgebra
 
     function kernel_backsolve_vec!(
-        cs,
-        Ls,
-        bs,
-        ::Val{D1},
-        ::Val{D},
-        ::Val{nthreads},
-        N::Int32,
+        cs, Ls, bs, ::Val{D1}, ::Val{D}, ::Val{nthreads}, N::Int32
     ) where {D1,D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
@@ -396,7 +395,10 @@ end
         lid = mod1(tid, 32i32)
         warp_matrix_id = div(lid - 1i32, D) + 1i32
         d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+        grid_mtrx_id =
+            warp_matrix_id +
+            (wid - 1i32) * n_mats_per_warp +
+            (bid - 1i32) * n_mats_per_block
 
         warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
         shmem_elems = warp_shmem_size * n_warps
@@ -404,10 +406,14 @@ end
         shmem_2 = CuDynamicSharedArray(Float32, shmem_elems, shmem_elems * sizeof(Float32))
 
         shmem_vec_elems = D * n_warps * n_mats_per_warp
-        shmem_vec_1 = CuDynamicSharedArray(Float32, shmem_vec_elems, 2 * shmem_elems * sizeof(Float32))
+        shmem_vec_1 = CuDynamicSharedArray(
+            Float32, shmem_vec_elems, 2 * shmem_elems * sizeof(Float32)
+        )
 
         intermediate_layout_load!(shmem_2, Ls, Val(D1), Val(D1), Val(D), Val(nthreads), N)
-        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D1), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(
+            shmem_1, shmem_2, Val(D1), Val(D1), Val(D), Val(nthreads), N
+        )
 
         vector_load!(shmem_vec_1, bs, Val(D1), Val(D), Val(nthreads), N)
 
@@ -415,7 +421,9 @@ end
         v1 = BatchedVector(shmem_vec_1, Val(D), warp_matrix_id)
 
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
-            batch_op!(\, v1, LowerTriangular(M1), v1, d, Val(D1), Val(D), Val(D), warp_matrix_id)
+            batch_op!(
+                \, v1, LowerTriangular(M1), v1, d, Val(D1), Val(D), Val(D), warp_matrix_id
+            )
         end
 
         sync_warp()
@@ -460,20 +468,25 @@ end
             shmem_bytes = (2 * shmem_elems + shmem_vec_elems) * sizeof(Float32)
 
             kernel = @cuda launch = false kernel_backsolve_vec!(
+                cs, Ls, bs, Val(Int32(D1)), Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
+            )
+            CUDA.cuFuncSetAttribute(
+                kernel.fun,
+                CUDA.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                shmem_bytes,
+            )
+
+            CUDA.@sync kernel(
                 cs,
                 Ls,
                 bs,
                 Val(Int32(D1)),
                 Val(Int32(D)),
                 Val(Int32(nthreads)),
-                Int32(N),
-            )
-            CUDA.cuFuncSetAttribute(kernel.fun, CUDA.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, shmem_bytes)
-
-            CUDA.@sync kernel(
-                cs, Ls, bs,
-                Val(Int32(D1)), Val(Int32(D)), Val(Int32(nthreads)), Int32(N);
-                threads = nthreads, blocks = nblocks, shmem = shmem_bytes,
+                Int32(N);
+                threads=nthreads,
+                blocks=nblocks,
+                shmem=shmem_bytes,
             )
 
             cs_cpu = Array(cs)

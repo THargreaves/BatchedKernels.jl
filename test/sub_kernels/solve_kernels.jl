@@ -1,5 +1,5 @@
 @inline function kernel_backward_solve!(
-    Cs, Us, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
+    Cs, Us, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode}
 ) where {D,nthreads,mode}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -12,7 +12,8 @@
     wid = div(tid - 1i32, 32i32) + 1i32
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     d = mod1(lid, D)
-    grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+    grid_mtrx_id =
+        warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
     warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
     shmem_elems = warp_shmem_size * n_warps
@@ -38,6 +39,7 @@
         U = UpperTriangular(U_mat)
         batch_op!(\, C, U, B, d, Val(D))
     end
+    sync_warp()
 
     # Store C
     dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
@@ -47,7 +49,7 @@
 end
 
 @inline function kernel_backward_solve!(
-    Cs, Us, Bs, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32,
+    Cs, Us, Bs, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32
 ) where {D1,D2,nthreads}
     D = max(D1, D2)
     n_mats_per_warp = 32i32 ÷ D
@@ -61,7 +63,8 @@ end
     wid = div(tid - 1i32, 32i32) + 1i32
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     d = mod1(lid, D)
-    grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+    grid_mtrx_id =
+        warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
     warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
     shmem_elems = warp_shmem_size * n_warps
@@ -87,6 +90,7 @@ end
         U = UpperTriangular(U_mat)
         batch_op!(\, C, U, B, d, Val(D1))
     end
+    sync_warp()
 
     # Store C
     dual_to_interm_transfer!(shmem_1, C, Val(D1), Val(D2), Val(D), Val(nthreads), N)
@@ -96,7 +100,7 @@ end
 end
 
 @inline function kernel_forward_solve!(
-    Cs, Ls, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode},
+    Cs, Ls, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode}
 ) where {D,nthreads,mode}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -109,7 +113,8 @@ end
     wid = div(tid - 1i32, 32i32) + 1i32
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     d = mod1(lid, D)
-    grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+    grid_mtrx_id =
+        warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
     warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
     shmem_elems = warp_shmem_size * n_warps
@@ -135,6 +140,7 @@ end
         L = LowerTriangular(L_mat)
         batch_op!(\, C, L, B, d, Val(D))
     end
+    sync_warp()
 
     # Store C
     dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
@@ -144,7 +150,7 @@ end
 end
 
 @inline function kernel_forward_solve!(
-    Cs, Ls, Bs, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32,
+    Cs, Ls, Bs, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32
 ) where {D1,D2,nthreads}
     D = max(D1, D2)
     n_mats_per_warp = 32i32 ÷ D
@@ -158,7 +164,8 @@ end
     wid = div(tid - 1i32, 32i32) + 1i32
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     d = mod1(lid, D)
-    grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+    grid_mtrx_id =
+        warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
     warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
     shmem_elems = warp_shmem_size * n_warps
@@ -183,6 +190,7 @@ end
         # Perform backward solve: C = U \ B
         batch_op!(\, C, LowerTriangular(L), B, d, Val(D1))
     end
+    sync_warp()
 
     # Store C
     dual_to_interm_transfer!(shmem_1, C, Val(D1), Val(D2), Val(D), Val(nthreads), N)

@@ -6,14 +6,15 @@ include("../../plot_benchmarks.jl")
 include("../../generate_tables.jl")
 include("cpu_mt.jl")
 include("ours.jl")
+include("ours_register.jl")
 include("gpu_mem_bound.jl")
 include("jax_vmap.jl")
 include("magma.jl")
 include("cublas_cusolver.jl")
 include("../../config/Schedule.jl")
 
-function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, String}, T::Type, path::String, force)
-    results =  Dict{String, Vector{Float64}}()
+function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val,String}, T::Type, path::String, force)
+    results = Dict{String,Vector{Float64}}()
 
     cache_dir = joinpath(@__DIR__, "cache")
     isdir(cache_dir) || mkdir(cache_dir)
@@ -36,10 +37,7 @@ function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, Strin
 
         for D in D_min:D_max
             method_sanitised = String(typeof(method).parameters[1])
-            cache_file = joinpath(
-                cache_dir,
-                "kalman_$(string(T))_$(method_sanitised)_D_$(D).jld2",
-            )
+            cache_file = joinpath(cache_dir, "kalman_$(string(T))_$(method_sanitised)_D_$(D).jld2")
             # println(cache_file)
             if !force && isfile(cache_file)
                 @load cache_file time
@@ -82,13 +80,14 @@ function generate_plots(D_min::Integer, D_max::Integer, methods::Dict{Val, Strin
     Magma.LibMagma.magma_finalize()
 
     plot_benchmarks(results, D_min, D_max, "Kalman Filter", "kalman", path, ylims=(:auto, 1e-6))
-    write_results_csv(results, D_min, D_max, "kalman", path)
+    return write_results_csv(results, D_min, D_max, "kalman", path)
 end
 
 function main(force::Bool)
-    methods = Dict{Val, String}(
+    methods = Dict{Val,String}(
         Val(:cpu_mt) => "CPU (multithreaded)",
-        Val(:ours) => "This",
+        Val(:ours) => "This (raw kernel)",
+        Val(:ours_register) => "This (register)",
         Val(:gpu_mem_bound) => "Memory bound",
         Val(:magma) => "MAGMA",
         Val(:jax_vmap) => "JAX (vmap)",
