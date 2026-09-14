@@ -1,0 +1,5 @@
+workload,policy,D,N,threads,registers,shared_bytes,local_bytes,occupancy,peak_register_elements,kernel_us,q25_us,q75_us,end_to_end_us,logical_GBs
+covariance_step,register_row_stage,32,8193,32,255,4220,0,0.1667,192,657.445,656.947,658.739,890.060,306.263
+covariance_step,shared_H_col_stage,32,8193,32,255,8444,0,0.1667,160,506.774,504.464,523.355,750.088,397.319
+covariance_step,register_row_stage,32,8193,128,255,16880,0,0.1667,192,666.368,665.907,666.931,792.842,302.162
+covariance_step,shared_H_col_stage,32,8193,128,255,33776,0,0.1667,160,490.342,489.978,496.042,728.395,410.634
