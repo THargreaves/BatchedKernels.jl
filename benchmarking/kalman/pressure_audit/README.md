@@ -11,6 +11,11 @@ Follow-up: [phase isolation and compiler diagnostics](PHASE_ORIGIN.md) localize
 the allocation jump to adding the correction product and correct the initial
 disassembler-liveness interpretation below. The exact allocator cause remains open.
 
+The [bounded occupancy experiment](OCCUPANCY_TARGET.md) establishes a concrete
+64-thread target: 168 registers with zero local memory would permit a fifth
+resident block. Tested uncapped candidates do not reach it; forcing the cap
+increases occupancy but introduces local memory and slows execution.
+
 No production implementation, supported shapes, or resource admission rules were
 changed for this investigation.
 
