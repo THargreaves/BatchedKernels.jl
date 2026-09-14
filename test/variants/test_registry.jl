@@ -65,15 +65,21 @@
     @test isempty(
         BK.orientation_variants(*, BK.TraceMatrix{Float16,3,4}, BK.TraceMatrix{Float16,4,2})
     )
-    @test isempty(
+    @test !isempty(
         BK.orientation_variants(+, BK.TraceMatrix{Float64,3,3}, BK.TraceMatrix{Float64,3,3})
     )
-    @test isempty(BK.orientation_variants(cholesky, BK.TraceMatrix{Float64,3,3}))
-    @test isempty(
+    @test !isempty(BK.orientation_variants(cholesky, BK.TraceMatrix{Float64,3,3}))
+    @test !isempty(
         BK.orientation_variants(
             \,
             LowerTriangular{Float64,BK.TraceMatrix{Float64,3,3}},
             BK.TraceMatrix{Float64,3,2},
+        ),
+    )
+    @test isempty(BK.orientation_variants(+, BK.TraceMatrix{Float64,3,3}, M33))
+    @test isempty(
+        BK.orientation_variants(
+            \, LowerTriangular{Float64,BK.TraceMatrix{Float64,3,3}}, M32
         ),
     )
     @test isempty(BK.orientation_variants(*, BK.TraceMatrix{Float32,33,4}, M42))

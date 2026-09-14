@@ -11,7 +11,9 @@
         raw, ::Val{N}, ::Val{P}, ::Val{D}, ::Val{layout}, o, mid, d, base
     ) where {N,P,D,layout}
         if layout === :register
-            return @inbounds BK.RegisterMatrix{Float32}(Val(N), Val(P), Val(D), o, base, d)
+            return @inbounds BK.RegisterMatrix{eltype(raw)}(
+                Val(N), Val(P), Val(D), o, base, d
+            )
         elseif layout === :single
             return @inbounds BK.SingleAccessMatrix(
                 raw, Val(N), Val(P), Val(D), o, Int32(1), mid
@@ -44,9 +46,9 @@
             BK.single_region_elems(Val(D), Val(Int32(32))),
             BK.dual_region_elems(Val(D), Val(Int32(32))),
         )
-        rawA = CuStaticSharedArray(Float32, (nwords,))
-        rawB = CuStaticSharedArray(Float32, (nwords,))
-        rawC = CuStaticSharedArray(Float32, (nwords,))
+        rawA = CuStaticSharedArray(eltype(input), (nwords,))
+        rawB = CuStaticSharedArray(eltype(input), (nwords,))
+        rawC = CuStaticSharedArray(eltype(input), (nwords,))
         lid = threadIdx().x
         mid = (lid - Int32(1)) ÷ Int32(D) + Int32(1)
         d = (lid - Int32(1)) % Int32(D) + Int32(1)
@@ -135,7 +137,7 @@
     end
 
     function launch_factor(input, rhs, N, P, D, layout, operation, wrap)
-        output = CUDA.zeros(Float32, size(rhs))
+        output = CUDA.zeros(eltype(rhs), size(rhs))
         args = (
             output,
             CuArray(input),
@@ -236,5 +238,34 @@
             legacy = launch_factor(inputs, rhs, N, P, D, :dual, :legacy_solve, wrap)
             @test output ≈ legacy rtol = 3.0f-5 atol = 3.0f-5
         end
+    end
+    # Focused double-precision cases: Cholesky and both solve orientations,
+    # including inactive subgroup lanes and an adjointed triangular factor.
+    for (operation, layout, wrap) in (
+        (:cholesky, :register, :upper),
+        (:solve, :single, :adjoint_upper),
+        (:solve_col, :register, :upper),
+    )
+        N, P, D = 3, 2, 6
+        nm = 32 ÷ D
+        inputs = Array{Float64}(undef, N, N, nm)
+        for m in 1:nm
+            x = randn(rng, N, N)
+            inputs[:, :, m] = x' * x + N * I
+        end
+        width = operation === :cholesky ? N : P
+        rhs = randn(rng, Float64, N, width, nm)
+        expected = cat(
+            (
+                if operation === :cholesky
+                    Matrix(cholesky(Hermitian(inputs[:, :, m])).U)
+                else
+                    factor_wrap(inputs[:, :, m], Val(wrap)) \ rhs[:, :, m]
+                end for m in 1:nm
+            )...;
+            dims=3,
+        )
+        output = launch_factor(inputs, rhs, N, width, D, layout, operation, wrap)
+        @test isapprox(output, expected; rtol=1e-12, atol=1e-12)
     end
 end

@@ -1,4 +1,4 @@
-# Out-of-place Float32 factorization variants. All D lanes in each active matrix
+# Out-of-place Float32/Float64 factorization variants. All D lanes in each active matrix
 # group must call these bodies, including lanes without a logical output column.
 # Inputs and outputs must have distinct storage owners. Entry/exit shared-memory
 # synchronization belongs to the caller; recurrence state below is private register
@@ -7,25 +7,25 @@
 """
     variant_op!(Val(:cholesky_row), U, A, d, Val(N), Val(D))
 
-Compute the upper Cholesky factor of an SPD Float32 matrix into a fresh raw output.
+Compute the upper Cholesky factor of an SPD Float32/Float64 matrix into a fresh raw output.
 A and U support RowAccess; U's full logical lower triangle is explicitly zeroed.
 Input triangular masking is honored through `ours`, but callers must provide the
 upper triangle of an SPD matrix. This is not a forced-in-place variant.
 """
 @inline function variant_op!(
     ::Val{:cholesky_row},
-    U::AbstractMatrix{Float32},
-    A::AbstractMatrix{Float32},
+    U::AbstractMatrix{T},
+    A::AbstractMatrix{T},
     d::Int32,
     ::Val{N},
     ::Val{D},
-) where {N,D}
+) where {T<:Union{Float32,Float64},N,D}
     _validate_compute_shape(Val(N), Val(N), Val(D))
     base = mod1(threadIdx().x, 32i32) - d
     # The caller's complete-group participation contract proves geometry.
-    work = @inbounds RegisterMatrix{Float32}(Val(N), Val(N), Val(D), RowOriented(), base, d)
+    work = @inbounds RegisterMatrix{T}(Val(N), Val(N), Val(D), RowOriented(), base, d)
     @inbounds @unroll for i in (1i32):Int32(N)
-        work.mv[i] = d <= Int32(N) ? ours(A, i, d, RowAccess()) : 0.0f0
+        work.mv[i] = d <= Int32(N) ? ours(A, i, d, RowAccess()) : zero(T)
     end
     @inbounds @unroll for i in (1i32):Int32(N)
         value = work.mv[i]
@@ -46,7 +46,7 @@ upper triangle of an SPD matrix. This is not a forced-in-place variant.
         elseif i < d <= Int32(N)
             value / diagonal
         else
-            0.0f0
+            zero(T)
         end
     end
     if d <= Int32(N)
@@ -78,6 +78,21 @@ CUDA.@device_override @inline function _keep_solved_value_live(value::Float32)
     return nothing
 end
 
+# Double-precision equivalent of the existing scalar-use constraint.
+@inline _keep_solved_value_live(::Float64) = nothing
+CUDA.@device_override @inline function _keep_solved_value_live(value::Float64)
+    Base.llvmcall(
+        """
+        call void asm sideeffect "", "d"(double %0)
+        ret void
+        """,
+        Cvoid,
+        Tuple{Float64},
+        value,
+    )
+    return nothing
+end
+
 @inline _solve_forward(::Union{LowerTriangular,UnitLowerTriangular}) = true
 @inline _solve_forward(::Union{UpperTriangular,UnitUpperTriangular}) = false
 @inline _solve_forward(A::Union{Adjoint,Transpose}) = !_solve_forward(parent(A))
@@ -99,20 +114,20 @@ This does not add a shared-memory fence or replace final compiled-resource check
 """
 @inline function variant_op!(
     ::Val{:solve_row},
-    C::AbstractMatrix{Float32},
-    factor::AbstractMatrix{Float32},
-    B::AbstractMatrix{Float32},
+    C::AbstractMatrix{T},
+    factor::AbstractMatrix{T},
+    B::AbstractMatrix{T},
     d::Int32,
     ::Val{N},
     ::Val{P},
     ::Val{D},
-) where {N,P,D}
+) where {T<:Union{Float32,Float64},N,P,D}
     _validate_compute_shape(Val(N), Val(P), Val(D))
     forward = _solve_forward(factor)
     unit = _solve_unit(factor)
-    work = MVector{Int(N),Float32}(undef)
+    work = MVector{Int(N),T}(undef)
     @inbounds @unroll for i in (1i32):Int32(N)
-        work[i] = d <= Int32(P) ? ours(B, i, d, RowAccess()) : 0.0f0
+        work[i] = d <= Int32(P) ? ours(B, i, d, RowAccess()) : zero(T)
     end
     # Column updates keep one solved scalar live while updating unsolved RHS entries.
     @inbounds @unroll for step in (1i32):Int32(N)
@@ -153,22 +168,22 @@ of the row body, and its suitability depends on transfer costs and final resourc
 """
 @inline function variant_op!(
     ::Val{:solve_col},
-    C::AbstractMatrix{Float32},
-    factor::AbstractMatrix{Float32},
-    B::AbstractMatrix{Float32},
+    C::AbstractMatrix{T},
+    factor::AbstractMatrix{T},
+    B::AbstractMatrix{T},
     d::Int32,
     ::Val{N},
     ::Val{P},
     ::Val{D},
-) where {N,P,D}
+) where {T<:Union{Float32,Float64},N,P,D}
     _validate_compute_shape(Val(N), Val(P), Val(D))
     forward = _solve_forward(factor)
     unit = _solve_unit(factor)
     base = mod1(threadIdx().x, 32i32) - d
     # The caller's complete-group participation contract proves geometry.
-    work = @inbounds RegisterMatrix{Float32}(Val(N), Val(P), Val(D), ColOriented(), base, d)
+    work = @inbounds RegisterMatrix{T}(Val(N), Val(P), Val(D), ColOriented(), base, d)
     @inbounds @unroll for p in (1i32):Int32(P)
-        work.mv[p] = d <= Int32(N) ? ours(B, p, d, ColAccess()) : 0.0f0
+        work.mv[p] = d <= Int32(N) ? ours(B, p, d, ColAccess()) : zero(T)
     end
     @inbounds @unroll for step in (1i32):Int32(N)
         i = forward ? step : Int32(N) - step + 1i32

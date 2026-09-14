@@ -21,7 +21,9 @@ data, rounded to the chosen type.
 ## Implementation scope
 
 Named hybrid matmul variants now accept matching Float32 or Float64 operands.
-Float64 elementwise, Cholesky and solve variants are not enabled by this change.
+The initial matmul change did not enable Float64 elementwise, Cholesky or solve
+variants. Those are now covered by the subsequent
+[Kalman experiment](../kalman/A100_FLOAT64.md).
 The existing generic matmul/device-accessor bodies are reused; no runtime type
 switch is introduced in device code. Planner byte accounting uses the selected
 scalar type. `peak_register_elements` remains a logical element proxy; the runner

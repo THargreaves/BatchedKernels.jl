@@ -71,10 +71,11 @@ end
 
 _variant_eltype(::Type{IAddSubWrapped{T,D}}) where {T,D} = T
 _variant_eltype(T::Type) = eltype(T)
-function _variant_input_domain(types; element_types=(Float32,))
+function _variant_input_domain(types; element_types=(Float32, Float64))
     shapes = map(_variant_shape, types)
     return all(s -> s !== nothing && all(d -> 1 <= d <= 32, s), shapes) &&
-           all(T -> _variant_eltype(T) in element_types, types)
+           all(T -> _variant_eltype(T) in element_types, types) &&
+           all(T -> _variant_eltype(T) === _variant_eltype(first(types)), types)
 end
 
 _variant_triangular(::Type) = false
@@ -90,8 +91,8 @@ end
 """
     orientation_variants(fn, argtypes...)
 
-Return deterministic contracts for Float32 hybrid matrix bodies and Float64
-matmul. Float64 elementwise and factorization variants are not registered. `:row`
+Return deterministic contracts for Float32 and Float64 hybrid matrix bodies.
+Operands must have matching element types. `:row`
 means RowAccess, `:col` ColAccess, and `:any` means broadcast-only input (either
 orientation, still subject to shape/mask rules). The result describes fresh dense
 outputs. Aliases are optional only at the listed operand positions in single/dual
