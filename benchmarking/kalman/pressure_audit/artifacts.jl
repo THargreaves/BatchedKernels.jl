@@ -13,8 +13,8 @@ for policy in (:legacy,:register,:shared_H)
         job=reflect.CompilerJob(source,config)
         compiled=reflect.CUDACore.compile(job)
         write(joinpath(@__DIR__,"$policy.cubin"),compiled.image)
-        open(joinpath(@__DIR__,"$policy.ptx"),"w") do io; CUDA.code_ptx(io,entry.fn,types); end
-        open(joinpath(@__DIR__,"$policy.ll"),"w") do io; CUDA.code_llvm(io,entry.fn,types); end
+        open(joinpath(@__DIR__,"$policy.ptx"),"w") do io; CUDA.code_ptx(io,entry.fn,types;kernel=true); end
+        open(joinpath(@__DIR__,"$policy.ll"),"w") do io; CUDA.code_llvm(io,entry.fn,types;kernel=true); end
     end
     println("SAVED,$policy");flush(stdout)
 end

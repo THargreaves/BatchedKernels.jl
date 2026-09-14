@@ -7,6 +7,10 @@ registers by only 10. Capping existing kernels near the legacy register count
 introduces local memory and slows them down. This is evidence about these generated
 kernels, not a lower bound on an improved implementation.
 
+Follow-up: [phase isolation and compiler diagnostics](PHASE_ORIGIN.md) localize
+the allocation jump to adding the correction product and correct the initial
+disassembler-liveness interpretation below. The exact allocator cause remains open.
+
 No production implementation, supported shapes, or resource admission rules were
 changed for this investigation.
 
@@ -93,7 +97,9 @@ reducing the actual peak by 2D.
 
 ## 3. Final assembly evidence and remaining attribution limit
 
-The disassembler's live-GPR counts fall when matrices move to shared memory:
+The initial disassembler live-GPR maxima are recorded below for reproducibility.
+Follow-up inspection found sharp count jumps at helper calls; these maxima must
+not be interpreted as measured scalar-data liveness:
 
 | Kernel | Allocated registers | Maximum displayed live GPRs |
 |---|---:|---:|
@@ -104,15 +110,20 @@ The disassembler's live-GPR counts fall when matrices move to shared memory:
 | P/H shared H + predicted | 245 | 208 |
 
 These counts use NVIDIA's [`nvdisasm` register-liveness output](https://docs.nvidia.com/cuda/cuda-binary-utilities/#register-life-range-information).
-They are an instruction-local disassembler analysis, not interchangeable with the
-final allocation. Allocation constraints and control flow need separate analysis;
-the difference between the columns is not a count of wasted registers.
+They are a disassembler analysis, not interchangeable with the final allocation.
+In the correction prefix, one small shuffle-helper call raises the displayed count
+from 87 to 207, followed by 88 on return; the helper itself uses seven registers.
+This exposes an interprocedural-analysis complication. The 236→208 maxima above
+do not establish a 28-register reduction in actual scalar-data liveness. Allocation
+constraints and control flow need separate analysis; the difference between the
+columns is not a count of wasted registers.
 
 In the P/H register kernel, 1,938 of the 2,413 static instruction rows with at least
 220 displayed live GPRs are shuffles or calls to the generated shuffle helper.
-This locates high pressure around communication, but does not establish what all
-the live values represent or how frequently these instructions execute. In
-particular, it does **not** prove that the old broadcast-hoisting issue recurred.
+The call-row complication means this histogram cannot locate physical pressure
+in communication or establish what the live values represent. It also does not
+measure execution frequency. In particular, it does **not** prove that the old
+broadcast-hoisting issue recurred.
 
 The new factorization bodies also carry private D-wide working state, and matmul
 snapshots an operand line. Such source-level scratch can overlap or be coalesced
@@ -149,7 +160,10 @@ OPENBLAS_NUM_THREADS=1 julia --project=. benchmarking/kalman/pressure_audit/ph_a
 ```
 
 Run GPU benchmarks sequentially on an otherwise idle GPU. The liveness helper is
-CPU-only. Artifact capture uses the installed CUDA.jl reflection internals; it is
+CPU-only. The initial standalone LLVM/PTX dumps used device-function mode; the dumper now
+passes `kernel=true` to match the binary captures, which already used kernel mode.
+The measured resources and timings are unaffected. Artifact capture uses the
+installed CUDA.jl reflection internals; it is
 research tooling tied to the versions above. Generated binaries/IR are ignored.
 
 For each generated cubin, inspect liveness with:
