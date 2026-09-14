@@ -4,11 +4,12 @@ fuser. Run the test items using the temporary-environment commands in
 `test/variants`. Run correctness with `debug_accessors` both false and true;
 production register cases also require zero compiled local memory.
 
-The hybrid registry currently covers Float32 matmul, addition/subtraction,
+The hybrid registry covers Float32/Float64 matmul, Float32 addition/subtraction,
 out-of-place upper Cholesky, and out-of-place triangular solves. Logical dimensions
 must fit a complete group of at most 32 lanes. Unsupported requests return no
 hybrid variants and retain the existing legacy path and its existing restrictions.
-The registry does not yet drive public fused execution.
+Float64 named hybrid variants are currently limited to matmul; the forced-assignment
+path validates operation support and byte accounting for the selected element type.
 
 Contracts relevant to future code generation:
 

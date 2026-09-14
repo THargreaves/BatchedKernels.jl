@@ -71,10 +71,10 @@ end
 
 _variant_eltype(::Type{IAddSubWrapped{T,D}}) where {T,D} = T
 _variant_eltype(T::Type) = eltype(T)
-function _variant_input_domain(types)
+function _variant_input_domain(types; element_types=(Float32,))
     shapes = map(_variant_shape, types)
     return all(s -> s !== nothing && all(d -> 1 <= d <= 32, s), shapes) &&
-           all(T -> _variant_eltype(T) === Float32, types)
+           all(T -> _variant_eltype(T) in element_types, types)
 end
 
 _variant_triangular(::Type) = false
@@ -90,7 +90,8 @@ end
 """
     orientation_variants(fn, argtypes...)
 
-Return deterministic contracts for supported Float32 hybrid matrix bodies. `:row`
+Return deterministic contracts for Float32 hybrid matrix bodies and Float64
+matmul. Float64 elementwise and factorization variants are not registered. `:row`
 means RowAccess, `:col` ColAccess, and `:any` means broadcast-only input (either
 orientation, still subject to shape/mask rules). The result describes fresh dense
 outputs. Aliases are optional only at the listed operand positions in single/dual
@@ -113,7 +114,8 @@ element types, or shapes. Forced-in-place operations remain on that shared path.
 orientation_variants(::Any, ::Type...) = ()
 
 function orientation_variants(::typeof(*), A::Type, B::Type)
-    _variant_input_domain((A, B)) || return ()
+    _variant_input_domain((A, B); element_types=(Float32, Float64)) || return ()
+    _variant_eltype(A) === _variant_eltype(B) || return ()
     _variant_shape(A)[2] == _variant_shape(B)[1] || return ()
     return (
         _orientation_variant(:matmul_row, (:any, :row), :row, :matmul),

@@ -5,6 +5,10 @@ occupancy reduction** from shared intermediate storage. In the selected cases it
 has not demonstrated a throughput win. This separates that question from the
 Kalman factorization/compiler investigation.
 
+A subsequent [Float64/A100 experiment](A100_FLOAT64.md) extends matmul support
+and tests whether shared intermediates avoid the tighter register-capacity limit.
+The Float32 results below remain unchanged.
+
 No production implementation, compiler constraints, or framework restrictions
 were changed. The benchmark targets D16 and D32; this is not a new library limit.
 

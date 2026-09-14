@@ -49,14 +49,32 @@
         mul,
     )
 
-    # Unsupported hybrid requests retain legacy handling; none of these assertions
-    # claims that the legacy implementation supports the request.
+    # Check supported precision boundaries and rejected hybrid requests. Rejection
+    # does not claim that the legacy implementation supports the request.
     @test isempty(BK.orientation_variants(*, M34, M33)) # contraction mismatch
     @test isempty(BK.orientation_variants(+, M34, M33))
     @test isempty(BK.orientation_variants(cholesky, M34))
     @test isempty(BK.orientation_variants(\, M33, M32)) # factor must be triangular
+    @test map(
+        v -> v.id,
+        BK.orientation_variants(
+            *, BK.TraceMatrix{Float64,3,4}, BK.TraceMatrix{Float64,4,2}
+        ),
+    ) == (:matmul_row, :matmul_col)
+    @test isempty(BK.orientation_variants(*, BK.TraceMatrix{Float64,3,4}, M42))
     @test isempty(
-        BK.orientation_variants(*, BK.TraceMatrix{Float64,3,4}, BK.TraceMatrix{Float64,4,2})
+        BK.orientation_variants(*, BK.TraceMatrix{Float16,3,4}, BK.TraceMatrix{Float16,4,2})
+    )
+    @test isempty(
+        BK.orientation_variants(+, BK.TraceMatrix{Float64,3,3}, BK.TraceMatrix{Float64,3,3})
+    )
+    @test isempty(BK.orientation_variants(cholesky, BK.TraceMatrix{Float64,3,3}))
+    @test isempty(
+        BK.orientation_variants(
+            \,
+            LowerTriangular{Float64,BK.TraceMatrix{Float64,3,3}},
+            BK.TraceMatrix{Float64,3,2},
+        ),
     )
     @test isempty(BK.orientation_variants(*, BK.TraceMatrix{Float32,33,4}, M42))
     @test isempty(BK.orientation_variants(*, Symmetric{Float32,M33}, M32))

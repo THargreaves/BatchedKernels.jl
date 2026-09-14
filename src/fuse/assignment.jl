@@ -177,7 +177,11 @@ function plan_memory(
     1 <= D <= 32 || throw(ArgumentError("D_MAX must be between 1 and 32"))
     32 <= a.nthreads <= 1024 && a.nthreads % 32 == 0 ||
         throw(ArgumentError("nthreads must be a whole number of warps, at most 1024"))
-    T === Float32 || throw(ArgumentError("Hybrid assignments currently support Float32"))
+    T in (Float32, Float64) || throw(
+        ArgumentError(
+            "Hybrid assignments support Float32 and Float64; compute support is variant-specific",
+        ),
+    )
     expected = Assignment(tape)
     keys(a.residences) == keys(expected.residences) ||
         throw(ArgumentError("Incomplete or unknown residence keys"))
