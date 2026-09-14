@@ -1,0 +1,4 @@
+workload,policy,D,N,threads,registers,shared_bytes,local_bytes,occupancy,peak_register_elements,kernel_us,q25_us,q75_us,end_to_end_us,logical_GBs
+covariance_step,legacy,32,8193,32,167,21116,0,0.0833,-1,861.747,860.974,862.413,1069.182,233.655
+covariance_step,register,32,8193,32,255,4220,0,0.1667,192,656.026,655.309,657.509,887.666,306.926
+covariance_step,shared_inputs_register_results,32,8193,32,224,25340,0,0.0625,128,1007.565,1007.398,1031.270,1249.495,199.839

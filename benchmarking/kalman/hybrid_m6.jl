@@ -48,9 +48,10 @@ function forced_assignment(tape, policy; nthreads=128, orientation=:row)
     return Assignment(tape; residences, orientations, variants, nthreads)
 end
 
-function prepare(f, args, policy, reference; nthreads=128, orientation=:row)
+function prepare(f, args, policy, reference; nthreads=128, orientation=:row, assignment_override=nothing)
     tape = BK.trace(f, BK.InputSpec[BK.input_spec(x) for x in args])
     assignment = policy === :legacy ? nothing : forced_assignment(tape, policy; nthreads, orientation)
+    assignment_override === nothing || (assignment = assignment_override)
     output = similar(first(args).data, size(reference))
     println("PREPARE,$(nameof(f)),$policy,$nthreads,$orientation"); flush(stdout)
     t0 = time_ns()
