@@ -43,9 +43,8 @@ function run_kalman_precision()
     input_checks = []
     rng = MersenneTwister(42189)
     for (D, threads) in cases
-        D in (16, 32) && threads == 32 || error(
-            "Selected Kalman scenarios use D16/D32 and 32 threads to fit static shared allocations",
-        )
+        D in (16, 32) && threads in (32, 64) ||
+            error("Selected Kalman scenarios use D16/D32 and 32/64 threads")
         # Same underlying inputs for both precisions in each scenario.
         baseP = Array{Float64}(undef, D, D, N)
         for n in 1:N
@@ -98,13 +97,21 @@ function run_kalman_precision()
                     :shared_predicted,
                     :shared_factor,
                     :shared_H_predicted,
+                    :shared_H_predicted_row_stage,
+                    :shared_predicted_correction,
+                    :shared_H_predicted_output,
                 ),
                 policies,
             ) || error("Unsupported POLICIES entry")
             for policy in policies
                 a = selective_assignment(
                     tape,
-                    if policy === :shared_H_predicted
+                    if policy in (
+                        :shared_H_predicted,
+                        :shared_H_predicted_row_stage,
+                        :shared_predicted_correction,
+                        :shared_H_predicted_output,
+                    )
                         :shared_predicted
                     elseif policy === :register_row_stage
                         :register
@@ -112,9 +119,18 @@ function run_kalman_precision()
                         policy
                     end,
                     threads;
-                    staging=policy === :register_row_stage ? :row : :col,
+                    staging=if policy in
+                               (:register_row_stage, :shared_H_predicted_row_stage)
+                        :row
+                    else
+                        :col
+                    end,
                 )
-                if policy === :shared_H_predicted
+                if policy in (
+                    :shared_H_predicted,
+                    :shared_H_predicted_row_stage,
+                    :shared_H_predicted_output,
+                )
                     for (id, node) in enumerate(tape.nodes)
                         node isa BK.CallNode && BK._isplacement(node.fn) || continue
                         input = tape.nodes[only(tape.nodes[only(node.args).id].args).id]
@@ -123,6 +139,17 @@ function run_kalman_precision()
                             a.orientations[only(node.args).id] = :col
                         end
                     end
+                end
+                # Correction is consumed through the lazy I-minus wrapper; sharing
+                # its owner must therefore rebuild inherited wrapper metadata.
+                products = [
+                    id for (id, node) in enumerate(tape.nodes) if
+                    node isa BK.CallNode && node.fn === (*)
+                ]
+                if policy === :shared_predicted_correction
+                    a.residences[products[end - 1]] = :single
+                elseif policy === :shared_H_predicted_output
+                    a.residences[products[end]] = :single
                 end
                 # Rebuild derived wrapper metadata after changing an owner residence.
                 raw = [i for (i, node) in enumerate(tape.nodes) if !(node isa BK.NewNode)]
@@ -138,6 +165,19 @@ function run_kalman_precision()
                     nthreads=threads,
                 )
                 p = BK.plan_memory(tape, a; D_MAX=D, T)
+                static_limit = CUDA.attribute(
+                    CUDA.device(), CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK
+                )
+                if p.shared_bytes > static_limit
+                    println(
+                        "SKIP,$T,$D,$threads,$policy,static_shared_budget,planned=$(p.shared_bytes),limit=$static_limit",
+                    )
+                    flush(stdout)
+                    continue
+                end
+                println(
+                    "PLAN,$T,$D,$threads,$policy,single=$(p.num_single_slots),dual=$(p.num_dual_slots),shared_bound=$(p.shared_bytes),live_elements=$(p.peak_register_elements)",
+                )
                 println("PREPARE,$T,$D,$threads,$policy")
                 flush(stdout)
                 start = time_ns()
@@ -198,6 +238,7 @@ function run_kalman_precision()
             end
         end
     end
+    isempty(records) && error("No feasible candidates; inspect SKIP records")
     if mode == "timing"
         for r in records
             kernel_time(r)

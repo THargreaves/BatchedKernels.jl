@@ -73,3 +73,16 @@ including partial subgroup participation.
 
 The launcher and timing/CSV path also pass a D16/Float32/batch5 smoke test across
 all five policies. Those tiny-batch timings are not performance evidence.
+
+## Targeted follow-up
+
+The [mixed-storage investigation](MIXED_STORAGE.md) adds correction/output storage
+candidates and a focused launcher which also tests 64-thread blocks where feasible:
+
+```sh
+bash benchmarking/kalman/run_mixed_storage_candidates.sh
+```
+
+The original launcher retains its five-policy, 32-thread defaults. Explicit
+CASES=32:64 is now accepted; oversized static allocations produce a documented
+SKIP record instead of attempting compilation.
