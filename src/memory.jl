@@ -1846,7 +1846,8 @@ handle batch tails and unused lanes.
     _validate_layout_threads(Val(nthreads))
     tid = threadIdx().x
     wid = (tid - 1i32) ÷ 32i32 + 1i32
-    lid = mod1(tid, 32i32)
+    # Masking exposes the nonnegative lane range to transfer-index simplification.
+    lid = ((tid - 1i32) & 31i32) + 1i32
     nmat = 32i32 ÷ Int32(D)
     block_mats = (Int32(nthreads) ÷ 32i32) * nmat
     first_mat = (blockIdx().x - 1i32) * block_mats + (wid - 1i32) * nmat
@@ -1881,7 +1882,8 @@ end
     _validate_layout_threads(Val(nthreads))
     tid = threadIdx().x
     wid = (tid - 1i32) ÷ 32i32 + 1i32
-    lid = mod1(tid, 32i32)
+    # Masking exposes the nonnegative lane range to transfer-index simplification.
+    lid = ((tid - 1i32) & 31i32) + 1i32
     nmat = 32i32 ÷ Int32(D)
     block_mats = (Int32(nthreads) ÷ 32i32) * nmat
     first_mat = (blockIdx().x - 1i32) * block_mats + (wid - 1i32) * nmat
