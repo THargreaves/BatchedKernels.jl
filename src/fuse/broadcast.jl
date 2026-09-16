@@ -118,7 +118,14 @@ function _collect_runtime_inputs!(::Vector, ::Vector, ::Ref, x)
     return error("Unsupported batched broadcast input component of type $(typeof(x))")
 end
 
-function _ensure_compiled!(f, args::Tuple; assignment=nothing, nthreads::Int=256)
+function _ensure_compiled!(
+    f, args::Tuple; assignment=nothing, nthreads::Int=256, shared_memory::Symbol=:static
+)
+    shared_memory in (:static, :dynamic) ||
+        throw(ArgumentError("shared_memory must be :static or :dynamic"))
+    shared_memory === :dynamic &&
+        assignment === nothing &&
+        throw(ArgumentError("dynamic shared memory currently requires a hybrid assignment"))
     32 <= nthreads <= 1024 && nthreads % 32 == 0 ||
         throw(ArgumentError("nthreads must be a multiple of 32 in 32:1024"))
     assignment === nothing ||
@@ -129,7 +136,7 @@ function _ensure_compiled!(f, args::Tuple; assignment=nothing, nthreads::Int=256
     policy = if assignment === nothing
         (:legacy, nthreads)
     else
-        (:forced_hybrid, assignment_key(assignment), CUDA.device())
+        (:forced_hybrid, assignment_key(assignment), shared_memory, CUDA.device())
     end
     key = (f, Tuple(input_cache_key(spec) for spec in input_specs), policy)
 
@@ -159,11 +166,16 @@ function _ensure_compiled!(f, args::Tuple; assignment=nothing, nthreads::Int=256
         order = assignment.order
         planner = plan_memory(tape, assignment; D_MAX, T)
         limit = CUDA.attribute(
-            CUDA.device(), CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK
+            CUDA.device(),
+            if shared_memory === :dynamic
+                CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
+            else
+                CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK
+            end,
         )
         planner.shared_bytes <= limit || throw(
             ArgumentError(
-                "forced assignment needs $(planner.shared_bytes) shared bytes per block; device static limit is $limit",
+                "forced assignment needs $(planner.shared_bytes) shared bytes per block; device $shared_memory limit is $limit",
             ),
         )
     end
@@ -178,6 +190,7 @@ function _ensure_compiled!(f, args::Tuple; assignment=nothing, nthreads::Int=256
         T=T,
         fn_name=gensym(:fused_kernel),
         order=order,
+        shared_memory,
     )
     compiled_fn = Core.eval(@__MODULE__, fn_expr)
     entry = CompiledKernel(
@@ -185,6 +198,28 @@ function _ensure_compiled!(f, args::Tuple; assignment=nothing, nthreads::Int=256
     )
     KERNEL_CACHE[key] = entry
     return entry
+end
+
+# The function attribute is context-local and must be set before occupancy queries
+# or launches above the default shared limit. Include any compiler static storage.
+function _configure_dynamic_shared!(kernel, entry::CompiledKernel)
+    bytes = entry.sig.dynamic_shared_bytes
+    if bytes > 0
+        limit = CUDA.attribute(
+            CUDA.device(), CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
+        )
+        total = bytes + Int(CUDA.memory(kernel).shared)
+        total <= limit || throw(
+            ArgumentError(
+                "compiled kernel needs $total shared bytes; device opt-in limit is $limit",
+            ),
+        )
+        attrs = CUDA.attributes(kernel.fun)
+        if attrs[CUDA.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] < bytes
+            attrs[CUDA.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = bytes
+        end
+    end
+    return bytes
 end
 
 # `_elem_types(Args)` — compute the tuple-of-trace-element-types as a Type
@@ -220,13 +255,17 @@ end
 export fuse, Assignment
 
 """
-    fuse(f, args...; assignment=nothing, nthreads=assignment === nothing ? 256 : assignment.nthreads)
+    fuse(f, args...; assignment=nothing, nthreads=assignment === nothing ? 256 : assignment.nthreads, shared_memory=:static)
 
 Execute the same scalar function and return the same inferred batched output type
 as `f.(args...)`. With a host `Assignment`, use validated forced hybrid storage and
 variant choices; without one, use the corrected legacy planner. Build assignments
 against `trace(f, InputSpec[input_spec(x) for x in args])`; staging normalization
 preserves node IDs. Dictionary/layout choices never enter the device kernel.
+
+With an explicit assignment, `shared_memory=:dynamic` uses an aligned dynamic
+shared arena and opts into the device per-block capacity. The default is `:static`.
+Allocation mode is part of the compilation cache key.
 
 Single, dual and register matrix storage are supported by the audited variants.
 Forced mutation uses shared storage. A forced choice is rejected if unsupported,
@@ -238,23 +277,27 @@ function fuse(
     args::Vararg{Any,N};
     assignment::Union{Nothing,Assignment}=nothing,
     nthreads::Int=assignment === nothing ? 256 : assignment.nthreads,
+    shared_memory::Symbol=:static,
 ) where {F<:Function,N}
     isdefined(F, :instance) || error("fuse only supports singleton function objects")
     elem_types = _elem_types(typeof(args))
     R = Core.Compiler.return_type(F.instance, elem_types)
     BR = batchify_type(R)
     bc = Broadcasted{BatchedStyle}(f, args)
-    result = _broadcast_impl(bc; assignment, nthreads)
+    result = _broadcast_impl(bc; assignment, nthreads, shared_memory)
     return result::BR
 end
 
 function _broadcast_impl(
-    bc::Broadcasted{BatchedStyle}; assignment=nothing, nthreads::Int=256
+    bc::Broadcasted{BatchedStyle};
+    assignment=nothing,
+    nthreads::Int=256,
+    shared_memory::Symbol=:static,
 )
     f = bc.f
     args = bc.args
 
-    entry = _ensure_compiled!(f, args; assignment, nthreads)
+    entry = _ensure_compiled!(f, args; assignment, nthreads, shared_memory)
     compiled_fn = entry.fn
     D_MAX, nthreads, T = entry.D_MAX, entry.nthreads, entry.T
 
@@ -287,9 +330,10 @@ function _broadcast_impl(
     nblocks = cld(N, (nthreads ÷ 32) * (32 ÷ D_MAX))
     if N > 0
         Base.invokelatest() do
-            @cuda threads = nthreads blocks = nblocks compiled_fn(
-                leaf_arrays..., batched_args..., shared_args..., Int32(N)
-            )
+            launch_args = (leaf_arrays..., batched_args..., shared_args..., Int32(N))
+            kernel = @cuda launch = false compiled_fn(launch_args...)
+            shmem = _configure_dynamic_shared!(kernel, entry)
+            kernel(launch_args...; threads=nthreads, blocks=nblocks, shmem)
         end
     end
 

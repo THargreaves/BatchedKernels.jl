@@ -4,8 +4,23 @@ include("hybrid_selective.jl")
 # Batched inputs precede block-common inputs in the generated ABI.
 covariance_four(P, H, A, Q, R) = covariance_step(P, A, Q, H, R)
 
+function precision_kernel_time(r)
+    CUDA.synchronize()
+    return 1e6 * CUDA.@elapsed(
+        begin
+            for _ in 1:20
+                r.kernel(
+                    r.ka...; threads=r.nthreads, blocks=r.blocks, shmem=r.dynamic_shared
+                )
+            end
+        end
+    ) / 20
+end
+
 function run_kalman_precision()
     mode = get(ENV, "MODE", "resources")
+    shared_memory = Symbol(get(ENV, "SHARED_MEMORY", "static"))
+    shared_memory in (:static, :dynamic) || error("SHARED_MEMORY must be static or dynamic")
     mode in ("resources", "timing") || error("MODE must be resources or timing")
     N = parse(Int, get(ENV, "BATCH", mode == "timing" ? "8193" : "5"))
     N > 0 || error("BATCH must be positive")
@@ -25,6 +40,8 @@ function run_kalman_precision()
     BK.DEBUG_ACCESSORS && mode == "timing" && error("Use production accessors for timings")
     CUDA.versioninfo()
     for name in (
+        :MAX_SHARED_MEMORY_PER_BLOCK,
+        :MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
         :MAX_SHARED_MEMORY_PER_MULTIPROCESSOR,
         :RESERVED_SHARED_MEMORY_PER_BLOCK,
         :MAX_REGISTERS_PER_MULTIPROCESSOR,
@@ -35,7 +52,7 @@ function run_kalman_precision()
             "DEVICE,$name,$(CUDA.attribute(CUDA.device(),getproperty(CUDA,Symbol(:DEVICE_ATTRIBUTE_,name))))",
         )
     end
-    println("RUN,mode=$mode,batch=$N,results=$result_path")
+    println("RUN,mode=$mode,batch=$N,shared_memory=$shared_memory,results=$result_path")
     println(
         "No register caps. Local-memory candidates are retained for this precision experiment.",
     )
@@ -43,8 +60,8 @@ function run_kalman_precision()
     input_checks = []
     rng = MersenneTwister(42189)
     for (D, threads) in cases
-        D in (16, 32) && threads in (32, 64) ||
-            error("Selected Kalman scenarios use D16/D32 and 32/64 threads")
+        D in (16, 32) && threads in (32, 64, 128) ||
+            error("Selected Kalman scenarios use D16/D32 and 32/64/128 threads")
         # Same underlying inputs for both precisions in each scenario.
         baseP = Array{Float64}(undef, D, D, N)
         for n in 1:N
@@ -120,7 +137,7 @@ function run_kalman_precision()
                     end,
                     threads;
                     staging=if policy in
-                               (:register_row_stage, :shared_H_predicted_row_stage)
+                        (:register_row_stage, :shared_H_predicted_row_stage)
                         :row
                     else
                         :col
@@ -165,12 +182,17 @@ function run_kalman_precision()
                     nthreads=threads,
                 )
                 p = BK.plan_memory(tape, a; D_MAX=D, T)
-                static_limit = CUDA.attribute(
-                    CUDA.device(), CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK
+                shared_limit = CUDA.attribute(
+                    CUDA.device(),
+                    if shared_memory === :dynamic
+                        CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
+                    else
+                        CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK
+                    end,
                 )
-                if p.shared_bytes > static_limit
+                if p.shared_bytes > shared_limit
                     println(
-                        "SKIP,$T,$D,$threads,$policy,static_shared_budget,planned=$(p.shared_bytes),limit=$static_limit",
+                        "SKIP,$T,$D,$threads,$policy,$(shared_memory)_shared_budget,planned=$(p.shared_bytes),limit=$shared_limit",
                     )
                     flush(stdout)
                     continue
@@ -182,7 +204,7 @@ function run_kalman_precision()
                 flush(stdout)
                 start = time_ns()
                 entry = BK._ensure_compiled!(
-                    covariance_four, args; assignment=a, nthreads=threads
+                    covariance_four, args; assignment=a, nthreads=threads, shared_memory
                 )
                 out = similar(args[1].data)
                 ka = (out, (x.data for x in args)..., Int32(N))
@@ -191,8 +213,9 @@ function run_kalman_precision()
                     @cuda launch = false fn(ka...)
                 end
                 compile_s = (time_ns() - start) / 1e9
+                dynamic_shared = BK._configure_dynamic_shared!(kernel, entry)
                 blocks = cld(N, (threads ÷ 32) * (32 ÷ D))
-                CUDA.@sync kernel(ka...; threads, blocks)
+                CUDA.@sync kernel(ka...; threads, blocks, shmem=dynamic_shared)
                 got = Array(out)
                 rtol, atol = T === Float64 ? (1e-11, 1e-12) : (3e-4, 3e-5)
                 # Check every batch item, not only the concatenated norm.
@@ -205,11 +228,13 @@ function run_kalman_precision()
                 mem = CUDA.memory(kernel)
                 regs = CUDA.registers(kernel)
                 local_bytes = getproperty(mem, :local)
-                active_blocks = CUDA.active_blocks(kernel.fun, threads)
-                occupancy = CUDA.occupancy(kernel.fun, threads)
+                active_blocks = CUDA.active_blocks(
+                    kernel.fun, threads; shmem=dynamic_shared
+                )
+                occupancy = CUDA.occupancy(kernel.fun, threads; shmem=dynamic_shared)
                 status = local_bytes == 0 ? "zero_local" : "local_memory"
                 println(
-                    "RESOURCE,$T,$D,$threads,$policy,$regs,$local_bytes,$(mem.shared),$active_blocks,$occupancy,$relative_error",
+                    "RESOURCE,$T,$D,$threads,$policy,$regs,$local_bytes,$(mem.shared + dynamic_shared),$active_blocks,$occupancy,$relative_error",
                 )
                 flush(stdout)
                 push!(
@@ -225,7 +250,8 @@ function run_kalman_precision()
                         blocks,
                         regs,
                         local_bytes,
-                        shared=mem.shared,
+                        shared=mem.shared + dynamic_shared,
+                        dynamic_shared,
                         active_blocks,
                         occupancy,
                         error=relative_error,
@@ -241,11 +267,11 @@ function run_kalman_precision()
     isempty(records) && error("No feasible candidates; inspect SKIP records")
     if mode == "timing"
         for r in records
-            kernel_time(r)
+            precision_kernel_time(r)
         end
         for _ in 1:9, index in randperm(rng, length(records))
             r = records[index]
-            push!(r.times, kernel_time(r))
+            push!(r.times, precision_kernel_time(r))
         end
     end
     @assert all(

@@ -63,3 +63,16 @@ register/shared computation, wrapped/repeated outputs, partial batches, a Choles
 solve pipeline and public output inference. Run both accessor modes; resource gates
 apply to production builds. See `benchmarking/kalman/hybrid_m6.jl` for the full-fusion
 performance comparison.
+
+Explicit hybrid assignments can opt into a larger per-block shared arena:
+
+```julia
+result = fuse(f, args...; assignment=a, shared_memory=:dynamic)
+```
+
+Static remains the default. Dynamic mode uses constant aligned offsets, checks
+planner bytes against the device's opt-in capacity and configures launch bytes.
+The mode is part of the cache key. Debug accessors retain device arena bounds
+checks; production relies on the validated host launch contract. The focused
+`test_dynamic_shared.jl` covers inference, cache separation, mixed region types,
+partial blocks, unchanged inputs and oversized-arena rejection.

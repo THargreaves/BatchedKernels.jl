@@ -142,3 +142,9 @@ throughput result. Both register baselines also pass at 64 threads; the new mixe
 The final focused launcher passes shell syntax checks and completes the staging
 control timing run with CSV and provenance output. No production code, operation
 algorithm, synchronization contract, or framework domain restriction changed.
+
+The opt-in dynamic-shared capability identified above is now implemented for
+explicit hybrid assignments. The bounded follow-up is described in
+[DYNAMIC_SHARED.md](DYNAMIC_SHARED.md); it tests the existing register and
+H/predicted-shared policies at 32/64/128 threads rather than expanding the placement
+or operation search.

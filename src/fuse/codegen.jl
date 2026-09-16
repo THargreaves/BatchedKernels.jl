@@ -19,6 +19,7 @@ struct KernelSignature
     n_outputs::Int
     n_batched_inputs::Int
     n_shared_inputs::Int
+    dynamic_shared_bytes::Int
 end
 
 # Both planners share the kernel skeleton; only layouts and operation lowering differ.
@@ -56,7 +57,10 @@ function _codegen(
     fn_name::Symbol=:_fused_kernel,
     order::AbstractVector{Int}=1:length(tape.nodes),
     assignment=nothing,
+    shared_memory::Symbol=:static,
 )
+    shared_memory in (:static, :dynamic) ||
+        throw(ArgumentError("shared_memory must be :static or :dynamic"))
     hybrid = assignment !== nothing
     if hybrid
         D_MAX == planner.D_MAX ||
@@ -67,6 +71,24 @@ function _codegen(
             error("codegen: execution order differs from validated assignment")
         nthreads == assignment.nthreads ||
             error("codegen: block size differs from validated assignment")
+    end
+    shared_memory === :dynamic &&
+        !hybrid &&
+        throw(ArgumentError("dynamic shared memory currently requires a hybrid assignment"))
+    # Each view starts at a compile-time byte offset with the same alignment as
+    # the static allocator. The planner rounds each region independently too.
+    dynamic_bytes = Ref(0)
+    function shared_allocation(elems)
+        if shared_memory === :static
+            return :(CuStaticSharedArray($T, ($elems,)))
+        end
+        offset = dynamic_bytes[]
+        alignment = max(32, Base.datatype_alignment(T))
+        dynamic_bytes[] += cld(sizeof(T) * Int(elems), alignment) * alignment
+        allocation = :(CuDynamicSharedArray($T, ($elems,), $offset))
+        # Host launch uses the validated arena size. Keep device bounds checks in
+        # debug builds; production need not carry exception paths for each view.
+        return DEBUG_ACCESSORS ? allocation : :(@inbounds $allocation)
     end
     _validate_layout_threads(Val(nthreads))
     length(order) == length(tape.nodes) ||
@@ -140,7 +162,7 @@ function _codegen(
         for index in 1:count
             sym = Symbol("shmem_", kind, index)
             push!(symbols, sym)
-            push!(stmts, :($sym = CuStaticSharedArray($T, ($elems,))))
+            push!(stmts, :($sym = $(shared_allocation(elems))))
         end
         matrix_pools[kind] = symbols
     end
@@ -153,7 +175,7 @@ function _codegen(
     for s in 1:(planner.num_vector_slots)
         sym = Symbol("shmem_V", s)
         push!(vector_slot_syms, sym)
-        push!(stmts, :($sym = CuStaticSharedArray($T, ($vec_shmem_elems,))))
+        push!(stmts, :($sym = $(shared_allocation(vec_shmem_elems))))
     end
 
     # Scalar output staging slots: one `n_mats_per_block`-sized shmem buffer per
@@ -163,7 +185,7 @@ function _codegen(
     for (node_id, slot) in sort!(collect(planner.scalar_output_slots); by=first)
         shmem_sym = Symbol("shmem_Sout", slot.idx)
         sout_shmem_syms[node_id] = shmem_sym
-        push!(stmts, :($shmem_sym = CuStaticSharedArray($T, ($n_mats_per_block,))))
+        push!(stmts, :($shmem_sym = $(shared_allocation(n_mats_per_block))))
     end
 
     # Scalar tape locals: each BATCHED `TraceScalar` node lives in a Julia local
@@ -195,7 +217,7 @@ function _codegen(
             D_M32 = Int32(D_M)
             pad_interval = div(Int32(32), D_M32 & -D_M32) * D_M32
             shmem_size_fixed = D_M * D_N + (D_M * D_N - 1) ÷ pad_interval
-            push!(stmts, :($shmem_sym = CuStaticSharedArray($T, ($shmem_size_fixed,))))
+            push!(stmts, :($shmem_sym = $(shared_allocation(shmem_size_fixed))))
             push!(
                 stmts,
                 Expr(
@@ -211,7 +233,7 @@ function _codegen(
             shmem_sym = Symbol("shmem_SV", slot.idx)
             view_sym = Symbol("SV", slot.idx)
             D_M, = shape(meta.type)
-            push!(stmts, :($shmem_sym = CuStaticSharedArray($T, ($D_M,))))
+            push!(stmts, :($shmem_sym = $(shared_allocation(D_M))))
             push!(
                 stmts,
                 Expr(
@@ -688,9 +710,17 @@ function _codegen(
     args = [out_syms..., b_in_syms..., s_in_syms..., :(N::Int32)]
     fn_expr = Expr(:function, Expr(:call, fn_name, args...), Expr(:block, stmts...))
 
+    if shared_memory === :dynamic
+        dynamic_bytes[] == planner.shared_bytes ||
+            error("codegen: dynamic shared allocation disagrees with planner")
+    end
     return fn_expr,
     KernelSignature(
-        fn_name, length(leaves), length(batched_input_ids), length(shared_input_ids)
+        fn_name,
+        length(leaves),
+        length(batched_input_ids),
+        length(shared_input_ids),
+        dynamic_bytes[],
     )
 end
 

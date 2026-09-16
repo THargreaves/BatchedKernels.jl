@@ -86,3 +86,8 @@ bash benchmarking/kalman/run_mixed_storage_candidates.sh
 The original launcher retains its five-policy, 32-thread defaults. Explicit
 CASES=32:64 is now accepted; oversized static allocations produce a documented
 SKIP record instead of attempting compilation.
+
+The static-capacity gap is now addressed by the opt-in
+[dynamic-shared comparison](DYNAMIC_SHARED.md). Run its dedicated launcher to
+compare the existing register and H/predicted-shared placements at 32/64/128 threads
+with identical dynamic allocation support for both strategies.
