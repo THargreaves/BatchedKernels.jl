@@ -1,5 +1,6 @@
 # Resource/correctness mode by default. MODE=timing enables throughput measurements.
 include("hybrid_selective.jl")
+include("common_reuse.jl")
 
 # Batched inputs precede block-common inputs in the generated ABI.
 covariance_four(P, H, A, Q, R) = covariance_step(P, A, Q, H, R)
@@ -22,6 +23,10 @@ function run_kalman_precision()
     shared_memory = Symbol(get(ENV, "SHARED_MEMORY", "static"))
     shared_memory in (:static, :dynamic) || error("SHARED_MEMORY must be static or dynamic")
     mode in ("resources", "timing") || error("MODE must be resources or timing")
+    reuse_mode = get(ENV, "COMMON_REUSE", "off")
+    reuse_mode in ("off", "on", "both") || error("COMMON_REUSE must be off/on/both")
+    reuse_mode != "off" && shared_memory != :dynamic && error("Common reuse requires dynamic shared memory")
+    reuse_cases = reuse_mode == "both" ? (false,true) : (reuse_mode == "on",)
     N = parse(Int, get(ENV, "BATCH", mode == "timing" ? "8193" : "5"))
     N > 0 || error("BATCH must be positive")
     cases = [
@@ -52,7 +57,7 @@ function run_kalman_precision()
             "DEVICE,$name,$(CUDA.attribute(CUDA.device(),getproperty(CUDA,Symbol(:DEVICE_ATTRIBUTE_,name))))",
         )
     end
-    println("RUN,mode=$mode,batch=$N,shared_memory=$shared_memory,results=$result_path")
+    println("RUN,mode=$mode,batch=$N,shared_memory=$shared_memory,common_reuse=$reuse_mode,results=$result_path")
     println(
         "No register caps. Local-memory candidates are retained for this precision experiment.",
     )
@@ -202,65 +207,69 @@ function run_kalman_precision()
                 )
                 println("PREPARE,$T,$D,$threads,$policy")
                 flush(stdout)
-                start = time_ns()
-                entry = BK._ensure_compiled!(
-                    covariance_four, args; assignment=a, nthreads=threads, shared_memory
-                )
-                out = similar(args[1].data)
-                ka = (out, (x.data for x in args)..., Int32(N))
-                kernel = Base.invokelatest() do
-                    fn = entry.fn
-                    @cuda launch = false fn(ka...)
+                for reuse in reuse_cases
+                    label = reuse ? Symbol(policy, "_reuse_common") : policy
+                    start = time_ns()
+                    entry = BK._ensure_compiled!(
+                        covariance_four, args; assignment=a, nthreads=threads, shared_memory
+                    )
+                    reuse && (entry = common_reuse_entry(tape, p, entry))
+                    out = similar(args[1].data)
+                    ka = (out, (x.data for x in args)..., Int32(N))
+                    kernel = Base.invokelatest() do
+                        fn = entry.fn
+                        @cuda launch = false fn(ka...)
+                    end
+                    compile_s = (time_ns() - start) / 1e9
+                    dynamic_shared = BK._configure_dynamic_shared!(kernel, entry)
+                    blocks = cld(N, (threads ÷ 32) * (32 ÷ D))
+                    CUDA.@sync kernel(ka...; threads, blocks, shmem=dynamic_shared)
+                    got = Array(out)
+                    rtol, atol = T === Float64 ? (1e-11, 1e-12) : (3e-4, 3e-5)
+                    # Check every batch item, not only the concatenated norm.
+                    @assert all(
+                        isapprox(view(got, :, :, n), view(reference, :, :, n); rtol, atol) for
+                        n in 1:N
+                    )
+                    relative_error =
+                        maximum(abs.(got .- reference)) / max(maximum(abs, reference), eps(T))
+                    mem = CUDA.memory(kernel)
+                    regs = CUDA.registers(kernel)
+                    local_bytes = getproperty(mem, :local)
+                    active_blocks = CUDA.active_blocks(
+                        kernel.fun, threads; shmem=dynamic_shared
+                    )
+                    occupancy = CUDA.occupancy(kernel.fun, threads; shmem=dynamic_shared)
+                    status = local_bytes == 0 ? "zero_local" : "local_memory"
+                    println(
+                        "RESOURCE,$T,$D,$threads,$label,$regs,$local_bytes,$(mem.shared + dynamic_shared),$active_blocks,$occupancy,$relative_error",
+                    )
+                    flush(stdout)
+                    push!(
+                        records,
+                        (;
+                            T,
+                            D,
+                            N,
+                            policy=label,
+                            kernel,
+                            ka,
+                            nthreads=threads,
+                            blocks,
+                            regs,
+                            local_bytes,
+                            shared=mem.shared + dynamic_shared,
+                            dynamic_shared,
+                            active_blocks,
+                            occupancy,
+                            error=relative_error,
+                            compile_s,
+                            peak=p.peak_register_elements,
+                            status,
+                            times=Float64[],
+                        ),
+                    )
                 end
-                compile_s = (time_ns() - start) / 1e9
-                dynamic_shared = BK._configure_dynamic_shared!(kernel, entry)
-                blocks = cld(N, (threads ÷ 32) * (32 ÷ D))
-                CUDA.@sync kernel(ka...; threads, blocks, shmem=dynamic_shared)
-                got = Array(out)
-                rtol, atol = T === Float64 ? (1e-11, 1e-12) : (3e-4, 3e-5)
-                # Check every batch item, not only the concatenated norm.
-                @assert all(
-                    isapprox(view(got, :, :, n), view(reference, :, :, n); rtol, atol) for
-                    n in 1:N
-                )
-                relative_error =
-                    maximum(abs.(got .- reference)) / max(maximum(abs, reference), eps(T))
-                mem = CUDA.memory(kernel)
-                regs = CUDA.registers(kernel)
-                local_bytes = getproperty(mem, :local)
-                active_blocks = CUDA.active_blocks(
-                    kernel.fun, threads; shmem=dynamic_shared
-                )
-                occupancy = CUDA.occupancy(kernel.fun, threads; shmem=dynamic_shared)
-                status = local_bytes == 0 ? "zero_local" : "local_memory"
-                println(
-                    "RESOURCE,$T,$D,$threads,$policy,$regs,$local_bytes,$(mem.shared + dynamic_shared),$active_blocks,$occupancy,$relative_error",
-                )
-                flush(stdout)
-                push!(
-                    records,
-                    (;
-                        T,
-                        D,
-                        N,
-                        policy,
-                        kernel,
-                        ka,
-                        nthreads=threads,
-                        blocks,
-                        regs,
-                        local_bytes,
-                        shared=mem.shared + dynamic_shared,
-                        dynamic_shared,
-                        active_blocks,
-                        occupancy,
-                        error=relative_error,
-                        compile_s,
-                        peak=p.peak_register_elements,
-                        status,
-                        times=Float64[],
-                    ),
-                )
             end
         end
     end
