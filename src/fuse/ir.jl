@@ -80,6 +80,10 @@ end
 # Emit a CallNode that produces an output of the given trace type.
 function emit_call!(tape::Tape, fn::F, arg_refs::Vector{NodeRef}, ::Type{Out}) where {F,Out}
     lc = combined_lifecycle(tape, arg_refs)
+    # Shared inputs are read-only. Computed values get ordinary per-particle
+    # storage even when all operands are common to the batch. Hoisting such
+    # work is an optimization; it must not be required for a valid scalar graph.
+    lc == SHARED && (lc = BATCHED)
     return push_node!(tape, CallNode(fn, arg_refs), NodeMeta(Out, lc))
 end
 

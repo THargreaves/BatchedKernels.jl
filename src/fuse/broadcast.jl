@@ -4,7 +4,8 @@
 #
 # The user-facing entry point is `f.(args...)` where `args` are batched
 # containers. `Base.copy(::Broadcasted{BatchedStyle})` traces, plans, compiles,
-# caches, and launches; the kernel cache key is `(f, input_cache_key(specs))`.
+# caches, and launches; the cache key includes the function, input specialization,
+# storage policy, launch geometry, shared allocation mode and CUDA device.
 #
 # Type stability is obtained via `Core.Compiler.return_type` on the scalar
 # function with trace-time argument types, mapped to the runtime output type
@@ -123,13 +124,27 @@ function _collect_runtime_inputs!(::Vector, ::Vector, ::Ref, x)
 end
 
 function _ensure_compiled!(
-    f, args::Tuple; assignment=nothing, nthreads::Int=256, shared_memory::Symbol=:static
+    f,
+    args::Tuple;
+    assignment=nothing,
+    policy::Symbol=:auto,
+    nthreads::Int=128,
+    shared_memory::Symbol=:static,
 )
+    policy in (:auto, :legacy) || throw(ArgumentError("policy must be :auto or :legacy"))
+    assignment !== nothing &&
+        policy === :legacy &&
+        throw(ArgumentError("explicit assignment cannot be combined with policy=:legacy"))
     shared_memory in (:static, :dynamic) ||
         throw(ArgumentError("shared_memory must be :static or :dynamic"))
     shared_memory === :dynamic &&
         assignment === nothing &&
-        throw(ArgumentError("dynamic shared memory currently requires a hybrid assignment"))
+        policy === :legacy &&
+        throw(
+            ArgumentError(
+                "dynamic shared memory requires an automatic or explicit hybrid assignment"
+            ),
+        )
     32 <= nthreads <= 1024 && nthreads % 32 == 0 ||
         throw(ArgumentError("nthreads must be a multiple of 32 in 32:1024"))
     assignment === nothing ||
@@ -137,12 +152,12 @@ function _ensure_compiled!(
         throw(ArgumentError("nthreads must match the forced assignment"))
     input_specs = InputSpec[input_spec(arg) for arg in args]
     input_types = Type[input_trace_type(spec) for spec in input_specs]
-    policy = if assignment === nothing
-        (:legacy, nthreads)
+    cache_policy = if assignment === nothing
+        (policy, nthreads, shared_memory, CUDA.device())
     else
         (:forced_hybrid, assignment_key(assignment), shared_memory, CUDA.device())
     end
-    key = (f, Tuple(input_cache_key(spec) for spec in input_specs), policy)
+    key = (f, Tuple(input_cache_key(spec) for spec in input_specs), cache_policy)
 
     if haskey(KERNEL_CACHE, key)
         cached = KERNEL_CACHE[key]
@@ -162,6 +177,17 @@ function _ensure_compiled!(
     1 <= D_MAX <= 32 || throw(ArgumentError("matrix group dimension must be in 1:32"))
 
     tape = trace(f, input_specs)
+    # Geometry must cover intermediate extents as well as input extents.
+    for meta in tape.metas
+        if meta.type <: Union{TraceMatrix,TraceVector}
+            D_MAX = max(D_MAX, maximum(shape(meta.type)))
+        end
+    end
+    1 <= D_MAX <= 32 ||
+        throw(ArgumentError("intermediate matrix group dimension must be in 1:32"))
+    if assignment === nothing && policy === :auto
+        assignment = automatic_assignment(tape; nthreads)
+    end
     if assignment === nothing
         order = schedule(tape)
         planner = plan_memory(tape; order=order)
@@ -259,15 +285,18 @@ end
 export fuse, Assignment
 
 """
-    fuse(f, args...; assignment=nothing, nthreads=assignment === nothing ? 256 : assignment.nthreads, shared_memory=:static)
+    fuse(f, args...; policy=:auto, assignment=nothing,
+         nthreads=assignment === nothing ? 128 : assignment.nthreads, shared_memory=:static)
 
 Execute the same scalar function and return the same inferred batched output type
-as `f.(args...)`. With a host `Assignment`, use validated forced hybrid storage and
-variant choices; without one, use the corrected legacy planner. Build assignments
+as `f.(args...)`. The default `policy=:auto` uses deterministic register-first
+planning with dual shared storage for conflicting orientations. `policy=:legacy`
+selects the original scheduler/planner. A host `Assignment` overrides automatic
+selection with validated storage and variant choices. Build assignments
 against `trace(f, InputSpec[input_spec(x) for x in args])`; staging normalization
 preserves node IDs. Dictionary/layout choices never enter the device kernel.
 
-With an explicit assignment, `shared_memory=:dynamic` uses an aligned dynamic
+With automatic or explicit hybrid planning, `shared_memory=:dynamic` uses an aligned dynamic
 shared arena and opts into the device per-block capacity. The default is `:static`.
 Allocation mode is part of the compilation cache key.
 
@@ -280,28 +309,30 @@ function fuse(
     f::F,
     args::Vararg{Any,N};
     assignment::Union{Nothing,Assignment}=nothing,
-    nthreads::Int=assignment === nothing ? 256 : assignment.nthreads,
+    nthreads::Int=assignment === nothing ? 128 : assignment.nthreads,
     shared_memory::Symbol=:static,
+    policy::Symbol=:auto,
 ) where {F<:Function,N}
     isdefined(F, :instance) || error("fuse only supports singleton function objects")
     elem_types = _elem_types(typeof(args))
     R = Core.Compiler.return_type(F.instance, elem_types)
     BR = batchify_type(R)
     bc = Broadcasted{BatchedStyle}(f, args)
-    result = _broadcast_impl(bc; assignment, nthreads, shared_memory)
+    result = _broadcast_impl(bc; assignment, nthreads, shared_memory, policy)
     return result::BR
 end
 
 function _broadcast_impl(
     bc::Broadcasted{BatchedStyle};
     assignment=nothing,
-    nthreads::Int=256,
+    nthreads::Int=128,
     shared_memory::Symbol=:static,
+    policy::Symbol=:auto,
 )
     f = bc.f
     args = bc.args
 
-    entry = _ensure_compiled!(f, args; assignment, nthreads, shared_memory)
+    entry = _ensure_compiled!(f, args; assignment, nthreads, shared_memory, policy)
     compiled_fn = entry.fn
     D_MAX, nthreads, T = entry.D_MAX, entry.nthreads, entry.T
 

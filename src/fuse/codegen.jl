@@ -147,13 +147,17 @@ function _codegen(
     matrix_pools = Dict{Symbol,Vector{Symbol}}()
     matrix_specs = if hybrid
         (
-        (
-            :Ms,
-            planner.num_single_slots,
-            Int(single_region_elems(Val(D_MAX), Val(nthreads))),
-        ),
-        (:Md, planner.num_dual_slots, Int(dual_region_elems(Val(D_MAX), Val(nthreads)))),
-    )
+            (
+                :Ms,
+                planner.num_single_slots,
+                Int(single_region_elems(Val(D_MAX), Val(nthreads))),
+            ),
+            (
+                :Md,
+                planner.num_dual_slots,
+                Int(dual_region_elems(Val(D_MAX), Val(nthreads))),
+            ),
+        )
     else
         ((:M, planner.num_matrix_slots, Int(mat_shmem_elems)),)
     end
@@ -372,7 +376,10 @@ function _codegen(
                 stmts,
                 :(
                     $view = @inbounds RegisterMatrix{$T}(
-                        Val(Int32($M)), Val(Int32($Nlogical)), Val($D32), $o,
+                        Val(Int32($M)),
+                        Val(Int32($Nlogical)),
+                        Val($D32),
+                        $o,
                         (min(warp_matrix_id, $n_mats_per_warp) - 1i32) * $D32,
                         d,
                     )
@@ -407,9 +414,6 @@ function _codegen(
         slot = planner.slots[node_id]
         global_in = input_sym[node_id]
         D_M, = shape(meta.type)
-        D_M == D_MAX || error(
-            "codegen: batched vector with D_M=$D_M ≠ D_MAX=$D_MAX not yet supported (masked vector view pending).",
-        )
         _push_warp_fence!(stmts)
         push!(
             stmts,
@@ -486,7 +490,9 @@ function _codegen(
                         o = physical_orientation(src_ref.id)
                         push!(
                             stmts,
-                            :(interm_to_dual_transfer!($dest_raw, $source_raw, $(dims...), N, $o)),
+                            :(interm_to_dual_transfer!(
+                                $dest_raw, $source_raw, $(dims...), N, $o
+                            )),
                         )
                     end
                 end
@@ -508,7 +514,9 @@ function _codegen(
                         o = physical_orientation(i)
                         push!(
                             stmts,
-                            :(dual_to_interm_transfer!($dest_raw, $source, $(dims...), N, $o)),
+                            :(dual_to_interm_transfer!(
+                                $dest_raw, $source, $(dims...), N, $o
+                            )),
                         )
                     end
                 end
@@ -599,8 +607,11 @@ function _codegen(
                 node_view_sym[i]
             else
                 dest_slot = planner.slots[i]
-                hybrid && dest_slot.kind in (:Ms, :Md) ?
-                    node_view_sym[i] : slot_view_sym(dest_slot)
+                if hybrid && dest_slot.kind in (:Ms, :Md)
+                    node_view_sym[i]
+                else
+                    slot_view_sym(dest_slot)
+                end
             end
         end
         node_view_sym[i] = dest
@@ -623,6 +634,36 @@ function _codegen(
     # Matrix inputs are loaded eagerly via `_load_to_single` tape nodes, so
     # this is a no-op for them.
     maybe_load_batched_inputs_for_ref!(tape.output)
+
+    # Stage scalar leaders before any global output writes. The block barrier
+    # already required for their cross-warp write also orders matrix/vector
+    # staging against cooperative output reads. This keeps one block barrier,
+    # including in diagnostic builds where the assembler may lower a warp
+    # barrier to a convergence fast path rather than an executed WARPSYNC.
+    # scalar_stage! gates the leader and active batch internally.
+    scalar_leaf_indices = Int[
+        k for (k, leaf) in enumerate(leaves) if leaf.trace_type <: TraceScalar
+    ]
+    for k in scalar_leaf_indices
+        leaf = leaves[k]
+        s_local = scalar_node_sym[leaf.node_id]
+        shmem_sym = sout_shmem_syms[leaf.node_id]
+        push!(
+            stmts,
+            :(scalar_stage!(
+                $shmem_sym,
+                $s_local,
+                lid,
+                warp_matrix_id,
+                block_matrix_id,
+                active,
+                Val($D32),
+            )),
+        )
+    end
+    if !isempty(scalar_leaf_indices)
+        push!(stmts, :(sync_threads()))
+    end
 
     # Matrix and vector output leaves; scalar leaves are handled below.
     # Matrix leaves point at the `_dual_to_single` tape node that already
@@ -668,13 +709,15 @@ function _codegen(
             )
         else
             D_M, = shape(leaf.trace_type)
-            D_M == D_MAX || error(
-                "codegen: batched vector output with D_M=$D_M ≠ D_MAX=$D_MAX not yet supported.",
-            )
             push!(
                 stmts,
                 :(vector_write!(
-                    $out_sym, $(slot_shmem_sym(leaf_slot)), Val($D32), Val($nthreads32), N
+                    $out_sym,
+                    $(slot_shmem_sym(leaf_slot)),
+                    Val(Int32($D_M)),
+                    Val($D32),
+                    Val($nthreads32),
+                    N,
                 )),
             )
         end
@@ -682,33 +725,6 @@ function _codegen(
 
     _push_warp_fence!(stmts)
 
-    # Scalar output leaves. Pattern: stage each leader's register value into its
-    # :Sout slot, sync_threads once, then cooperatively write each slot to its
-    # global out buffer. `scalar_stage!` is leader-and-active-gated internally,
-    # so we call it unconditionally outside the `if active` block.
-    scalar_leaf_indices = Int[
-        k for (k, leaf) in enumerate(leaves) if leaf.trace_type <: TraceScalar
-    ]
-    for k in scalar_leaf_indices
-        leaf = leaves[k]
-        s_local = scalar_node_sym[leaf.node_id]
-        shmem_sym = sout_shmem_syms[leaf.node_id]
-        push!(
-            stmts,
-            :(scalar_stage!(
-                $shmem_sym,
-                $s_local,
-                lid,
-                warp_matrix_id,
-                block_matrix_id,
-                active,
-                Val($D32),
-            )),
-        )
-    end
-    if !isempty(scalar_leaf_indices)
-        push!(stmts, :(sync_threads()))
-    end
     for k in scalar_leaf_indices
         leaf = leaves[k]
         out_sym = out_syms[k]

@@ -115,6 +115,11 @@ element types, or shapes. Forced-in-place operations remain on that shared path.
 orientation_variants(::Any, ::Type...) = ()
 
 function orientation_variants(::typeof(*), A::Type, B::Type)
+    if B <: TraceVector
+        _variant_input_domain((A,)) || return ()
+        eltype(A) === eltype(B) && _variant_shape(A)[2] == shape(B)[1] || return ()
+        return (_orientation_variant(:matvec_col, (:col,), :none, :matvec),)
+    end
     _variant_input_domain((A, B); element_types=(Float32, Float64)) || return ()
     _variant_eltype(A) === _variant_eltype(B) || return ()
     _variant_shape(A)[2] == _variant_shape(B)[1] || return ()
@@ -143,6 +148,25 @@ function orientation_variants(fn::Union{typeof(+),typeof(-)}, A::Type, B::Type)
         ),
     )
 end
+function orientation_variants(::typeof(/), A::Type, B::Type)
+    _variant_input_domain((A,)) || return ()
+    (B <: Number && (B <: TraceScalar ? eltype(B) : B) === eltype(A)) || return ()
+    return (
+        _orientation_variant(:divide_row, (:row,), :row, :matrix_divide),
+        _orientation_variant(:divide_col, (:col,), :col, :matrix_divide),
+    )
+end
+
+function orientation_variants(::typeof(one), A::Type)
+    _variant_input_domain((A,)) || return ()
+    m, n = _variant_shape(A)
+    m == n || return ()
+    return (
+        _orientation_variant(:identity_row, (:any,), :row, :matrix_identity),
+        _orientation_variant(:identity_col, (:any,), :col, :matrix_identity),
+    )
+end
+
 function orientation_variants(::typeof(cholesky), A::Type)
     _variant_input_domain((A,)) || return ()
     s = _variant_shape(A)
@@ -150,6 +174,12 @@ function orientation_variants(::typeof(cholesky), A::Type)
     return (_orientation_variant(:cholesky_row, (:row,), :row, :square_spd),)
 end
 function orientation_variants(::typeof(\), A::Type, B::Type)
+    if B <: TraceVector
+        _variant_input_domain((A,)) && _variant_triangular(A) || return ()
+        a = _variant_shape(A)
+        eltype(A) === eltype(B) && a[1] == a[2] == shape(B)[1] || return ()
+        return (_orientation_variant(:solve_vector_col, (:col,), :none, :vector_solve),)
+    end
     _variant_input_domain((A, B)) && _variant_triangular(A) || return ()
     a, b = _variant_shape(A), _variant_shape(B)
     a[1] == a[2] == b[1] || return ()
@@ -159,22 +189,46 @@ function orientation_variants(::typeof(\), A::Type, B::Type)
     )
 end
 
+function orientation_variants(::typeof(symmetric_part), A::Type)
+    _variant_input_domain((A,)) || return ()
+    m, n = _variant_shape(A)
+    m == n || return ()
+    return (_orientation_variant(:symmetric_row, (:both,), :row, :square_symmetric),)
+end
+
+function orientation_variants(::typeof(logdet), A::Type)
+    _variant_input_domain((A,)) || return ()
+    m, n = _variant_shape(A)
+    m == n || return ()
+    return (_orientation_variant(:logdet_any, (:any,), :none, :scalar_logdet),)
+end
+
 """Emit a validated variant call; assignment/residence and alias validation belongs to M5."""
 function emit_variant(
     v::OrientationVariant, dest::Symbol, args::Vector, types::Vector, D_MAX::Int
 )
     1 <= D_MAX <= 32 || throw(ArgumentError("D_MAX must be in 1:32"))
-    length(args) == length(types) == length(v.input_access) ||
-        throw(ArgumentError("variant arity mismatch"))
-    shapes = map(_variant_shape, types)
-    all(s -> s !== nothing && maximum(s) <= D_MAX, shapes) ||
+    length(args) == length(types) || throw(ArgumentError("variant arity mismatch"))
+    matrix_types = filter(t -> _variant_shape(t) !== nothing, types)
+    length(matrix_types) == length(v.input_access) ||
+        throw(ArgumentError("variant matrix operand mismatch"))
+    shapes = map(_variant_shape, matrix_types)
+    all(s -> maximum(s) <= D_MAX, shapes) ||
         throw(ArgumentError("variant shape exceeds D_MAX"))
-    fn = if v.shape_rule === :matmul
+    fn = if v.shape_rule in (:matmul, :matvec)
         (*)
+    elseif v.shape_rule === :matrix_divide
+        (/)
+    elseif v.shape_rule === :matrix_identity
+        one
     elseif v.shape_rule === :square_spd
         cholesky
-    elseif v.shape_rule === :triangular_solve
+    elseif v.shape_rule in (:triangular_solve, :vector_solve)
         (\)
+    elseif v.shape_rule === :square_symmetric
+        symmetric_part
+    elseif v.shape_rule === :scalar_logdet
+        logdet
     elseif startswith(String(v.id), "add")
         (+)
     else
@@ -182,9 +236,13 @@ function emit_variant(
     end
     any(candidate -> candidate == v, orientation_variants(fn, types...)) ||
         throw(ArgumentError("unsupported variant/type combination"))
+    if v.shape_rule === :scalar_logdet
+        n = shapes[1][1]
+        return :($dest = variant_logdet($(args[1]), d, Val(Int32($n)), Val(Int32($D_MAX))))
+    end
     dims = if v.shape_rule === :matmul
         (shapes[1][1], shapes[1][2], shapes[2][2], D_MAX)
-    elseif v.shape_rule === :square_spd
+    elseif v.shape_rule in (:square_spd, :square_symmetric, :vector_solve)
         (shapes[1][1], D_MAX)
     elseif v.shape_rule === :triangular_solve
         (shapes[2]..., D_MAX)
@@ -201,3 +259,4 @@ function emit_variant(
         [:(Val(Int32($n))) for n in dims]...,
     )
 end
+

@@ -83,3 +83,40 @@ end
     )
     return C
 end
+
+@inline function variant_op!(
+    ::Val{:divide_row}, C, A, b, d::Int32, ::Val{M}, ::Val{N}, ::Val{D}
+) where {M,N,D}
+    if d <= Int32(N)
+        @unroll for k in (1i32):Int32(M)
+            ours_write!(C, k, d, ours(A, k, d, RowAccess()) / b, RowAccess())
+        end
+    end
+    return C
+end
+
+@inline function variant_op!(
+    ::Val{:divide_col}, C, A, b, d::Int32, ::Val{M}, ::Val{N}, ::Val{D}
+) where {M,N,D}
+    variant_op!(Val(:divide_row), adjoint(C), adjoint(A), b, d, Val(N), Val(M), Val(D))
+    return C
+end
+
+@inline function variant_op!(
+    ::Val{:identity_row}, C, A, d::Int32, ::Val{M}, ::Val{N}, ::Val{D}
+) where {M,N,D}
+    if d <= Int32(N)
+        @unroll for k in (1i32):Int32(M)
+            value = ifelse(k == d, one(eltype(C)), zero(eltype(C)))
+            ours_write!(C, k, d, value, RowAccess())
+        end
+    end
+    return C
+end
+
+@inline function variant_op!(
+    ::Val{:identity_col}, C, A, d::Int32, ::Val{M}, ::Val{N}, ::Val{D}
+) where {M,N,D}
+    variant_op!(Val(:identity_row), adjoint(C), A, d, Val(N), Val(M), Val(D))
+    return C
+end

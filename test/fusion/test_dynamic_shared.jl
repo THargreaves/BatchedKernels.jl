@@ -31,7 +31,9 @@
     @test_throws ArgumentError BK._ensure_compiled!(
         f, args; assignment=a, nthreads=64, shared_memory=:invalid
     )
-    @test_throws ArgumentError BK._ensure_compiled!(f, args; shared_memory=:dynamic)
+    @test_throws ArgumentError BK._ensure_compiled!(
+        f, args; policy=:legacy, shared_memory=:dynamic
+    )
     out = @inferred BK.fuse(f, args...; assignment=a, shared_memory=:dynamic)
     reference = (
         hcat((ah[:, :, b] * vh[:, b] + wh for b in 1:N)...),

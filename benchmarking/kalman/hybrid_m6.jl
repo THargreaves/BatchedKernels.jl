@@ -55,7 +55,7 @@ function prepare(f, args, policy, reference; nthreads=128, orientation=:row, ass
     output = similar(first(args).data, size(reference))
     println("PREPARE,$(nameof(f)),$policy,$nthreads,$orientation"); flush(stdout)
     t0 = time_ns()
-    entry = BK._ensure_compiled!(f, args; assignment, nthreads)
+    entry = BK._ensure_compiled!(f, args; assignment, nthreads, policy=assignment === nothing ? :legacy : :auto)
     ka = (output, (x.data for x in args)..., Int32(size(reference, 3)))
     kernel = Base.invokelatest() do
         fn = entry.fn
@@ -95,7 +95,7 @@ function end_time(r)
         r.kernel(out, r.ka[2:end]...; threads=r.nthreads, blocks=r.blocks)
         out
     else
-        fuse(r.f, r.args...; assignment=r.assignment, nthreads=r.nthreads)
+        fuse(r.f, r.args...; assignment=r.assignment, nthreads=r.nthreads, policy=r.assignment === nothing ? :legacy : :auto)
     end
     CUDA.synchronize()
     return (time_ns() - t0) / 1e3

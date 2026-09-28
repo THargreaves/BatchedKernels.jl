@@ -195,28 +195,34 @@ function plan_memory(
         all(r -> haskey(pos, r.id) && pos[r.id] < pos[i], node_refs(node)) ||
             throw(ArgumentError("Assignment violates dependency order at %$i"))
         if haskey(a.residences, i)
-            shape = _assignment_shape(tape.metas[i].type)
+            logicalshape = _assignment_shape(tape.metas[i].type)
             _variant_eltype(tape.metas[i].type) === T ||
                 throw(ArgumentError("Matrix element type disagrees with planner at %$i"))
-            all(x -> 1 <= x <= D, shape) ||
+            all(x -> 1 <= x <= D, logicalshape) ||
                 throw(ArgumentError("Matrix shape at %$i exceeds D_MAX"))
             r, o = a.residences[i], a.orientations[i]
-            r in (:global, :shared_input, :single, :dual, :register) || throw(
-                ArgumentError("Unsupported residence $r at %$i"),
-            )
+            r in (:global, :shared_input, :single, :dual, :register) ||
+                throw(ArgumentError("Unsupported residence $r at %$i"))
             o in (:row, :col, :both) || throw(ArgumentError("Invalid orientation at %$i"))
             r in (:dual, :shared_input) &&
                 o !== :both &&
                 throw(ArgumentError("Dual/shared input must be both-oriented"))
             r in (:single, :register) &&
                 !(o in (:row, :col)) &&
-                throw(ArgumentError("Single/register storage needs row or column orientation"))
+                throw(
+                    ArgumentError("Single/register storage needs row or column orientation")
+                )
             if node isa InputNode
                 r === expected.residences[i] ||
                     throw(ArgumentError("Input residence cannot be changed at %$i"))
             elseif node isa NewNode
-                r === :register && _variant_shape(tape.metas[i].type) === nothing &&
-                    throw(ArgumentError("Register storage is unsupported for this matrix wrapper at %$i"))
+                r === :register &&
+                    _variant_shape(tape.metas[i].type) === nothing &&
+                    throw(
+                        ArgumentError(
+                            "Register storage is unsupported for this matrix wrapper at %$i"
+                        ),
+                    )
                 ps = [x.id for x in node_refs(node) if haskey(a.residences, x.id)]
                 length(ps) == 1 || throw(ArgumentError("Unsupported matrix wrapper at %$i"))
                 p = only(ps)
@@ -238,9 +244,14 @@ function plan_memory(
                         ArgumentError("Global transfer staging must use single storage")
                     )
                 elseif _isplacement(fn)
-                    r in (:single, :dual, :register) || throw(ArgumentError("Invalid input placement"))
+                    r in (:single, :dual, :register) ||
+                        throw(ArgumentError("Invalid input placement"))
                 elseif r in (:global, :shared_input)
-                    throw(ArgumentError("Computed values need batched shared or register storage"))
+                    throw(
+                        ArgumentError(
+                            "Computed values need batched shared or register storage"
+                        ),
+                    )
                 end
                 if fn === _load_to_single
                     length(node.args) == 1 ||
@@ -249,7 +260,7 @@ function plan_memory(
                     tape.nodes[p] isa InputNode &&
                         get(a.residences, p, nothing) === :global ||
                         throw(ArgumentError("Load requires a global matrix input"))
-                    _assignment_shape(tape.metas[p].type) == shape ||
+                    _assignment_shape(tape.metas[p].type) == logicalshape ||
                         throw(ArgumentError("Load shape mismatch"))
                 end
                 if _isplacement(fn) || _isstage(fn)
@@ -258,7 +269,7 @@ function plan_memory(
                     p = only(node.args).id
                     haskey(a.residences, p) ||
                         throw(ArgumentError("Transfer requires matrix input"))
-                    _assignment_shape(tape.metas[p].type) == shape ||
+                    _assignment_shape(tape.metas[p].type) == logicalshape ||
                         throw(ArgumentError("Transfer shape mismatch"))
                     if _isplacement(fn) && r === :single && o !== a.orientations[p]
                         throw(
@@ -273,9 +284,12 @@ function plan_memory(
                                 ArgumentError("Input placement requires raw single storage")
                             )
                     else
-                        a.residences[p] in (:single, :dual, :shared_input, :register) || throw(
-                            ArgumentError("Output staging requires a logical shared or register view"),
-                        )
+                        a.residences[p] in (:single, :dual, :shared_input, :register) ||
+                            throw(
+                                ArgumentError(
+                                    "Output staging requires a logical shared or register view",
+                                ),
+                            )
                     end
                     # A structured or remapped view requires materialization.
                     raw = !(tape.nodes[p] isa NewNode)
@@ -296,7 +310,7 @@ function plan_memory(
                 target = _maybe_inplace_idx(tape, node)
                 if target !== nothing
                     p = node.args[target].id
-                    shape == _assignment_shape(tape.metas[p].type) ||
+                    logicalshape == _assignment_shape(tape.metas[p].type) ||
                         throw(ArgumentError("Forced mutation cannot change logical shape"))
                     a.residences[i] !== :register && a.residences[p] !== :register ||
                         throw(ArgumentError("Forced mutation requires shared storage"))
@@ -348,10 +362,14 @@ function plan_memory(
                 (inputshapes[1][1], inputshapes[2][2])
             elseif v.shape_rule === :triangular_solve
                 inputshapes[2]
+            elseif v.shape_rule in (:matvec, :vector_solve)
+                (inputshapes[1][1],)
+            elseif v.shape_rule === :scalar_logdet
+                ()
             else
                 inputshapes[1]
             end
-            _assignment_shape(tape.metas[i].type) == outputshape ||
+            shape(tape.metas[i].type) == outputshape ||
                 throw(ArgumentError("Variant output shape mismatch at %$i"))
             length(matrixargs) == length(v.input_access) ||
                 throw(ArgumentError("Variant operand mismatch"))
@@ -363,10 +381,12 @@ function plan_memory(
                     a.orientations[p] in (req, :both) ||
                     throw(ArgumentError("Variant input orientation mismatch at %$i"))
             end
-            a.residences[i] in v.output_residences ||
-                throw(ArgumentError("Variant output residence mismatch"))
-            a.orientations[i] in (v.output_access, :both) ||
-                throw(ArgumentError("Variant output orientation mismatch"))
+            if haskey(a.residences, i)
+                a.residences[i] in v.output_residences ||
+                    throw(ArgumentError("Variant output residence mismatch"))
+                a.orientations[i] in (v.output_access, :both) ||
+                    throw(ArgumentError("Variant output orientation mismatch at %$i"))
+            end
         end
     end
     for i in eachindex(tape.nodes)
@@ -400,12 +420,21 @@ function plan_memory(
     for i in 1:N
         owners[i] == i || continue
         haskey(a.residences, i) && a.residences[i] === :register || continue
-        width = _register_line_elements(_assignment_shape(tape.metas[i].type), a.orientations[i])
+        width = _register_line_elements(
+            _assignment_shape(tape.metas[i].type), a.orientations[i]
+        )
         push!(register_intervals, (pos[i], ownerlast[i], width))
     end
     peak_register_elements = maximum(
-        (sum((width for (start, stop, width) in register_intervals if start <= at <= stop); init=0)
-         for at in 1:(N + 1));
+        (
+            sum(
+                (
+                    width for
+                    (start, stop, width) in register_intervals if start <= at <= stop
+                );
+                init=0,
+            ) for at in 1:(N + 1)
+        );
         init=0,
     )
     shared = Dict{Int,SlotAssignment}()
