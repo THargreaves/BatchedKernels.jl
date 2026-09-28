@@ -16,15 +16,23 @@
         matrices = similar(raw)
         for i in 1:n
             # Retain a nonsymmetric component to exercise A + A' explicitly.
-            matrices[:, :, i] = raw[:, :, i] * raw[:, :, i]' + T(2) * I +
+            matrices[:, :, i] =
+                raw[:, :, i] * raw[:, :, i]' +
+                T(2) * I +
                 T(0.1) * (raw[:, :, i] - raw[:, :, i]')
         end
         v, w = randn(rng, T, 3, n), randn(rng, T, 3, n)
         scales = T[2, 3, -2, 0.5, 4]
-        args = (BatchedCuMatrix(CuArray(matrices)), BatchedCuVector(CuArray(v)),
-            BatchedCuVector(CuArray(w)), BatchedCuScalar(CuArray(scales)))
-        expected = [conventional(matrices[:, :, i], v[:, i], w[:, i], scales[i]) for i in 1:n]
-        tolerance = T === Float32 ? 3f-5 : 2e-12
+        args = (
+            BatchedCuMatrix(CuArray(matrices)),
+            BatchedCuVector(CuArray(v)),
+            BatchedCuVector(CuArray(w)),
+            BatchedCuScalar(CuArray(scales)),
+        )
+        expected = [
+            conventional(matrices[:, :, i], v[:, i], w[:, i], scales[i]) for i in 1:n
+        ]
+        tolerance = T === Float32 ? 3.0f-5 : 2e-12
         # CUDA 5 / Julia 1.12 retains an unsupported scalar-input bounds-error
         # path in larger Float64 legacy graphs, including graphs using only old
         # operations. Exercise both precisions on the default planner and retain
@@ -43,7 +51,9 @@
             end
             contaminated = fill(T(NaN), 3, 3, n)
             contaminated[1, 2, :] .= T(Inf)
-            identities = Array(fuse(identity_matrix, BatchedCuMatrix(CuArray(contaminated)); policy).data)
+            identities = Array(
+                fuse(identity_matrix, BatchedCuMatrix(CuArray(contaminated)); policy).data
+            )
             @test all(identities[:, :, i] == Matrix{T}(I, 3, 3) for i in 1:n)
         end
         @test Array(args[1].data) == matrices

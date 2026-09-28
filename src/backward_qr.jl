@@ -10,8 +10,9 @@ Return an upper root of `I + C*C'` using QR of the implicit stack `[I; C']`.
 Preserves StaticArrays on CPU. The fused implementation does not form the Gram
 matrix and supports rectangular real Float32/Float64 inputs with extents in 1:32.
 """
-qr_identity_plus(C::AbstractMatrix) =
-    qr_upper_stack(_qr_dense(C)', _qr_identity(_qr_dense(C)))
+function qr_identity_plus(C::AbstractMatrix)
+    return qr_upper_stack(_qr_dense(C)', _qr_identity(_qr_dense(C)))
+end
 
 function _residual_pad(B::AbstractMatrix, r::AbstractVector)
     T = promote_type(eltype(B), eltype(r))

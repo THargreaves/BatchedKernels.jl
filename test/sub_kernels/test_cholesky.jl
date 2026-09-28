@@ -28,7 +28,7 @@
             Us = CUDA.zeros(Float32, D, D, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_cholesky_inplace!(
-                Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
+                Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode
             )
 
             # CPU comparison
@@ -79,7 +79,7 @@ end
             Us = CUDA.zeros(Float32, D, D, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_cholesky_out_of_place!(
-                Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
+                Us, As, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode
             )
 
             # CPU comparison

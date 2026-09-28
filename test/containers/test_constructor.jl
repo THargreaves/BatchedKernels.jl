@@ -38,38 +38,57 @@
     @test belief[2].covariance == backing[:, :, 3]
 
     state = @inferred BatchedStruct(State, (; x=means, z=belief))
-    ancestry = BatchedCuScalar(Int64[2^40, 2^40+1, 2^40+2])
-    weights = BatchedCuScalar(zeros(Float32,n))
-    weighted = @inferred BatchedStruct(Weighted, (; state, log_w=weights, ancestor=ancestry))
+    ancestry = BatchedCuScalar(Int64[2 ^ 40, 2 ^ 40 + 1, 2 ^ 40 + 2])
+    weights = BatchedCuScalar(zeros(Float32, n))
+    weighted = @inferred BatchedStruct(
+        Weighted, (; state, log_w=weights, ancestor=ancestry)
+    )
     @test eltype(weighted) === Weighted{eltype(state),Float32,Int64}
     @test weighted.components.ancestor === ancestry
     @test weighted[2].ancestor == Int64(2)^40+1
 
     # Concrete logical types may have abstract fields, as generated outputs do.
-    abstract_belief = BatchedStruct(Belief{AbstractVector{Float32},AbstractMatrix{Float32}},
-        (; mean=means, covariance=matrices))
-    @test eltype(abstract_belief) === Belief{AbstractVector{Float32},AbstractMatrix{Float32}}
+    abstract_belief = BatchedStruct(
+        Belief{AbstractVector{Float32},AbstractMatrix{Float32}},
+        (; mean=means, covariance=matrices),
+    )
+    @test eltype(abstract_belief) ===
+        Belief{AbstractVector{Float32},AbstractMatrix{Float32}}
     @test abstract_belief[1].mean == means[1]
-    @test_throws ArgumentError BatchedStruct(NestedParameter,
-        (; value=NoIndex{SVector{2,Float32}}(n)))
-    nested = BatchedStruct(NestedParameter{Float32,2},
-        (; value=NoIndex{SVector{2,Float32}}(n)))
+    @test_throws ArgumentError BatchedStruct(
+        NestedParameter, (; value=NoIndex{SVector{2,Float32}}(n))
+    )
+    nested = BatchedStruct(
+        NestedParameter{Float32,2}, (; value=NoIndex{SVector{2,Float32}}(n))
+    )
     @test eltype(nested) === NestedParameter{Float32,2}
     @test length(nested) == n
-    opaque = BatchedStruct(Weighted, (; state=NoIndex{eltype(state)}(n),
-        log_w=NoIndex{Float32}(n), ancestor=NoIndex{Int64}(n)))
+    opaque = BatchedStruct(
+        Weighted,
+        (;
+            state=NoIndex{eltype(state)}(n),
+            log_w=NoIndex{Float32}(n),
+            ancestor=NoIndex{Int64}(n),
+        ),
+    )
     @test eltype(opaque) === eltype(weighted)
 
-    matched = @inferred BatchedStruct(MatchingFields,
-        (; a=NoIndex{AbstractVector{Float32}}(n), b=NoIndex{AbstractVector{Float32}}(n)))
+    matched = @inferred BatchedStruct(
+        MatchingFields,
+        (; a=NoIndex{AbstractVector{Float32}}(n), b=NoIndex{AbstractVector{Float32}}(n)),
+    )
     @test eltype(matched) === MatchingFields{AbstractVector{Float32}}
-    @test_throws ArgumentError BatchedStruct(MatchingFields,
-        (; a=NoIndex{Float32}(n), b=NoIndex{Float64}(n)))
+    @test_throws ArgumentError BatchedStruct(
+        MatchingFields, (; a=NoIndex{Float32}(n), b=NoIndex{Float64}(n))
+    )
     @test_throws ArgumentError BatchedStruct(Belief, (; mean=means, wrong=matrices))
-    @test_throws DimensionMismatch BatchedStruct(Belief,
-        (; mean=means, covariance=BatchedCuMatrix(zeros(Float32,2,2,n+1))))
-    @test_throws ArgumentError BatchedStruct(Weighted,
-        (; state, log_w=weights, ancestor=BatchedCuScalar(zeros(Float32,n))))
-    @test_throws ArgumentError BatchedStruct(Belief{Vector{Float64},Matrix{Float64}},
-        (; mean=means, covariance=matrices))
+    @test_throws DimensionMismatch BatchedStruct(
+        Belief, (; mean=means, covariance=BatchedCuMatrix(zeros(Float32, 2, 2, n+1)))
+    )
+    @test_throws ArgumentError BatchedStruct(
+        Weighted, (; state, log_w=weights, ancestor=BatchedCuScalar(zeros(Float32, n)))
+    )
+    @test_throws ArgumentError BatchedStruct(
+        Belief{Vector{Float64},Matrix{Float64}}, (; mean=means, covariance=matrices)
+    )
 end

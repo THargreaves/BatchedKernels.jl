@@ -12,8 +12,7 @@ function qr_upper_stack(A::QRTraceMatrix{T}, B::QRTraceMatrix{T}) where {T}
     n = size(B, 1)
     size(B, 2) == size(A, 2) == n || throw(DimensionMismatch("Invalid QR stack"))
     tape = _trace_tape(B)
-    _trace_tape(A) === tape ||
-        throw(ArgumentError("QR operands belong to different tapes"))
+    _trace_tape(A) === tape || throw(ArgumentError("QR operands belong to different tapes"))
     refs = NodeRef[register_wrapped!(tape, A), register_wrapped!(tape, B)]
     ref = emit_call!(tape, qr_upper_stack, refs, TraceMatrix{T,n,n})
     return TraceMatrix{T,n,n}(tape, ref)

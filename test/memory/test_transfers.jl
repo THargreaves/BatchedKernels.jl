@@ -119,22 +119,20 @@
             value = input[i, j, batch]
             result = structured && i < j ? 0.0f0 : value
             expected_output[i, j, batch] = result
-            r_in =
-                matrix * D^2 + (
-                    if input_orientation isa BK.RowOriented
-                        (j - 1) * D + i - 1
-                    else
-                        (i - 1) * D + j - 1
-                    end
-                )
-            r_out =
-                matrix * D^2 + (
-                    if output_orientation isa BK.RowOriented
-                        (j - 1) * D + i - 1
-                    else
-                        (i - 1) * D + j - 1
-                    end
-                )
+            r_in = matrix * D^2 + (
+                if input_orientation isa BK.RowOriented
+                    (j - 1) * D + i - 1
+                else
+                    (i - 1) * D + j - 1
+                end
+            )
+            r_out = matrix * D^2 + (
+                if output_orientation isa BK.RowOriented
+                    (j - 1) * D + i - 1
+                else
+                    (i - 1) * D + j - 1
+                end
+            )
             expected_loaded[warp * single_stride + r_in + r_in ÷ interval + 1, block] =
                 value
             expected_staged[warp * single_stride + r_out + r_out ÷ interval + 1, block] =

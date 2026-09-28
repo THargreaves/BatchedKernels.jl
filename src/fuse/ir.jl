@@ -150,7 +150,7 @@ function emit_results!(tape::Tape, fn, args::Vector{NodeRef}, types::Tuple)
     producer = emit_call!(tape, fn, args, Tuple{types...})
     lc = meta_at(tape, producer).lifecycle
     return ntuple(length(types)) do k
-        push_node!(tape, ResultNode(producer, k), NodeMeta(types[k], lc))
+        return push_node!(tape, ResultNode(producer, k), NodeMeta(types[k], lc))
     end
 end
 
@@ -167,7 +167,7 @@ function call_result_ids(tape::Tape, id::Int)
         1 <= node.index <= length(types) && ids[node.index] == 0 ||
             throw(ArgumentError("Invalid or repeated result projection at %$j"))
         tape.metas[j].type === types[node.index] &&
-            tape.metas[j].lifecycle == tape.metas[id].lifecycle ||
+        tape.metas[j].lifecycle == tape.metas[id].lifecycle ||
             throw(ArgumentError("Result metadata disagrees with producer at %$j"))
         ids[node.index] = j
     end

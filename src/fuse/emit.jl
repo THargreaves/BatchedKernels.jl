@@ -82,16 +82,29 @@ function emit_primitive(::typeof(/), dest::Symbol, args::Vector, types::Vector, 
     _is_scalar_op(types) && return _emit_scalar_assign(/, dest, args)
     m, n = shape(types[1])
     return :(variant_op!(
-        Val(:divide_row), $dest, $(args[1]), $(args[2]), d,
-        Val(Int32($m)), Val(Int32($n)), Val(Int32($D_MAX))
+        Val(:divide_row),
+        $dest,
+        $(args[1]),
+        $(args[2]),
+        d,
+        Val(Int32($m)),
+        Val(Int32($n)),
+        Val(Int32($D_MAX)),
     ))
 end
 
-function emit_primitive(::typeof(one), dest::Symbol, args::Vector, types::Vector, D_MAX::Int)
+function emit_primitive(
+    ::typeof(one), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
     m, n = shape(types[1])
     return :(variant_op!(
-        Val(:identity_row), $dest, $(args[1]), d,
-        Val(Int32($m)), Val(Int32($n)), Val(Int32($D_MAX))
+        Val(:identity_row),
+        $dest,
+        $(args[1]),
+        d,
+        Val(Int32($m)),
+        Val(Int32($n)),
+        Val(Int32($D_MAX)),
     ))
 end
 
@@ -292,9 +305,13 @@ function emit_primitive(
     return :($dest = variant_norm_sq($v, d, Val(Int32($D_M)), Val(Int32($D_MAX))))
 end
 
-function emit_primitive(::typeof(dot), dest::Symbol, args::Vector, types::Vector, D_MAX::Int)
+function emit_primitive(
+    ::typeof(dot), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
     n, = shape(types[1])
-    return :($dest = variant_dot($(args[1]), $(args[2]), d, Val(Int32($n)), Val(Int32($D_MAX))))
+    return :(
+        $dest = variant_dot($(args[1]), $(args[2]), d, Val(Int32($n)), Val(Int32($D_MAX)))
+    )
 end
 
 function emit_primitive(

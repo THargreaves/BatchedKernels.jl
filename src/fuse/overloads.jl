@@ -437,7 +437,7 @@ end
 # Matching-type operands use the specific method above. Reject mixed traced
 # precision explicitly rather than leaving the two Number overloads ambiguous.
 function Base.:/(::TraceScalar, ::TraceScalar)
-    throw(ArgumentError("Traced scalar division requires matching element types"))
+    return throw(ArgumentError("Traced scalar division requires matching element types"))
 end
 
 function Base.:-(s::TraceScalar{T}) where {T}

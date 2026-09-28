@@ -10,15 +10,7 @@ end
 Matrix multiplication kernel for the case where one warp handles multiple matrices.
 """
 @inline function kernel_matmul!(
-    Cs,
-    As,
-    Bs,
-    ::Val{A_adj},
-    ::Val{B_adj},
-    ::Val{D},
-    ::Val{nthreads},
-    N::Int32,
-    ::Val{mode},
+    Cs, As, Bs, ::Val{A_adj}, ::Val{B_adj}, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode}
 ) where {D,nthreads,A_adj,B_adj,mode}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -31,7 +23,8 @@ Matrix multiplication kernel for the case where one warp handles multiple matric
     wid = div(tid - 1i32, 32i32) + 1i32
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     d = mod1(lid, D)
-    grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+    grid_mtrx_id =
+        warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
     warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
     shmem_elems = warp_shmem_size * n_warps
@@ -61,9 +54,7 @@ Matrix multiplication kernel for the case where one warp handles multiple matric
 
     # Store C
     dual_to_interm_transfer!(shmem_1, shmem_3, Val(D), Val(nthreads), N)
-    intermediate_layout_write!(
-        Cs, shmem_1, Val(D), Val(nthreads), N, Val(mode)
-    )
+    intermediate_layout_write!(Cs, shmem_1, Val(D), Val(nthreads), N, Val(mode))
 
     return nothing
 end
@@ -80,14 +71,7 @@ Overloaded kernel called without A_adj, B_adj arguments, defaulting these to fal
 end
 
 @inline function kernel_matmul!(
-    Cs,
-    As,
-    Bs,
-    ::Val{D1},
-    ::Val{D2},
-    ::Val{D},
-    ::Val{nthreads},
-    N::Int32,
+    Cs, As, Bs, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32
 ) where {D1,D2,D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -100,7 +84,8 @@ end
     wid = div(tid - 1i32, 32i32) + 1i32
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     d = mod1(lid, D)
-    grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+    grid_mtrx_id =
+        warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
     warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
     shmem_elems = warp_shmem_size * n_warps
@@ -133,7 +118,7 @@ end
 end
 
 @inline function kernel_trig_matmul!(
-    C, A, L, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32,
+    C, A, L, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32
 ) where {D1,D2,D,nthreads}
     # shape(A) = (D1,D2)
     # shape(L) = (D2,D2)
@@ -149,7 +134,8 @@ end
     wid = div(tid - 1i32, 32i32) + 1i32
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     d = mod1(lid, D)
-    grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+    grid_mtrx_id =
+        warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
     warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
     shmem_elems = warp_shmem_size * n_warps
@@ -177,13 +163,7 @@ end
 end
 
 @inline function kernel_gram!(
-    Gs,
-    As,
-    ::Val{D1},
-    ::Val{D2},
-    ::Val{D},
-    ::Val{nthreads},
-    N::Int32,
+    Gs, As, ::Val{D1}, ::Val{D2}, ::Val{D}, ::Val{nthreads}, N::Int32
 ) where {D1,D2,D,nthreads}
     n_mats_per_warp = 32i32 ÷ D
     n_warps = nthreads ÷ 32i32
@@ -196,7 +176,8 @@ end
     wid = div(tid - 1i32, 32i32) + 1i32
     warp_matrix_id = div(lid - 1i32, D) + 1i32
     d = mod1(lid, D)
-    grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+    grid_mtrx_id =
+        warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
 
     warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
     shmem_elems = warp_shmem_size * n_warps
@@ -217,5 +198,5 @@ end
 
     # Store G
     dual_to_interm_transfer!(shmem_1, G, Val(D2), Val(D2), Val(D), Val(nthreads), N)
-    intermediate_layout_write!(Gs, shmem_1, Val(D2), Val(D2), Val(D), Val(nthreads), N) 
+    intermediate_layout_write!(Gs, shmem_1, Val(D2), Val(D2), Val(D), Val(nthreads), N)
 end

@@ -45,7 +45,7 @@
     @test all(
         v ->
             v.synchronization == :caller_entry_and_exit_shared_fences &&
-                v.participation == :complete_matrix_group,
+            v.participation == :complete_matrix_group,
         mul,
     )
 

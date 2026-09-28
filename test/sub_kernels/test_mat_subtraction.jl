@@ -11,7 +11,9 @@
     # Test both modes
     modes = (Val(:indep), Val(:conseq))
 
-    @inline function kernel_sub!(Cs, As, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode}) where {D,nthreads,mode}
+    @inline function kernel_sub!(
+        Cs, As, Bs, ::Val{D}, ::Val{nthreads}, N::Int32, ::Val{mode}
+    ) where {D,nthreads,mode}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
         n_mats_per_block = n_warps * n_mats_per_warp
@@ -23,7 +25,10 @@
         wid = div(tid - 1i32, 32i32) + 1i32
         warp_matrix_id = div(lid - 1i32, D) + 1i32
         d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+        grid_mtrx_id =
+            warp_matrix_id +
+            (wid - 1i32) * n_mats_per_warp +
+            (bid - 1i32) * n_mats_per_block
 
         warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
         shmem_elems = warp_shmem_size * n_warps
@@ -38,7 +43,7 @@
         # Load B
         intermediate_layout_load!(shmem_3, Bs, Val(D), Val(nthreads), N)
         interm_to_dual_transfer!(shmem_2, shmem_3, Val(D), Val(nthreads), N)
-        
+
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             # Create dual-access matrices
             A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
@@ -67,7 +72,7 @@
             Cs = CUDA.zeros(Float32, D, D, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_sub!(
-                Cs, As, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode,
+                Cs, As, Bs, Val(Int32(D)), Val(Int32(nthreads)), Int32(N), mode
             )
 
             # CPU comparison
@@ -92,13 +97,7 @@ end
     N = 2^12 + 113
 
     @inline function kernel_sub!(
-        Cs,
-        As,
-        Bs,
-        ::Val{D1},
-        ::Val{D2},
-        ::Val{nthreads},
-        N::Int32,
+        Cs, As, Bs, ::Val{D1}, ::Val{D2}, ::Val{nthreads}, N::Int32
     ) where {D1,D2,nthreads}
         D = max(D1, D2)
         n_mats_per_warp = 32i32 ÷ D
@@ -112,7 +111,10 @@ end
         wid = div(tid - 1i32, 32i32) + 1i32
         warp_matrix_id = div(lid - 1i32, D) + 1i32
         d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+        grid_mtrx_id =
+            warp_matrix_id +
+            (wid - 1i32) * n_mats_per_warp +
+            (bid - 1i32) * n_mats_per_block
 
         warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
         shmem_elems = warp_shmem_size * n_warps
@@ -122,12 +124,16 @@ end
 
         # Load A
         intermediate_layout_load!(shmem_3, As, Val(D1), Val(D2), Val(D), Val(nthreads), N)
-        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(
+            shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N
+        )
 
         # Load B
         intermediate_layout_load!(shmem_3, Bs, Val(D1), Val(D2), Val(D), Val(nthreads), N)
-        interm_to_dual_transfer!(shmem_2, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N)
-        
+        interm_to_dual_transfer!(
+            shmem_2, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N
+        )
+
         # Create dual-access matrices
         A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
         B = DualAccessMatrix(shmem_2, Val(D), warp_matrix_id)
@@ -157,7 +163,7 @@ end
             Cs = CUDA.zeros(Float32, D1, D2, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_sub!(
-                Cs, As, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
+                Cs, As, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
             )
 
             # CPU comparison
@@ -166,7 +172,7 @@ end
             Cs_cpu = As_cpu .- Bs_cpu
 
             max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
-            
+
             if max_error > 1e-5
                 println("D1=$D1, D2=$D2")
             end

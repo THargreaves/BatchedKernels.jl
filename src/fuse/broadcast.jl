@@ -371,7 +371,7 @@ function _broadcast_impl(
             launch_args = (leaf_arrays..., batched_args..., shared_args..., Int32(N))
             kernel = @cuda launch = false compiled_fn(launch_args...)
             shmem = _configure_dynamic_shared!(kernel, entry)
-            kernel(launch_args...; threads=nthreads, blocks=nblocks, shmem)
+            return kernel(launch_args...; threads=nthreads, blocks=nblocks, shmem)
         end
     end
 
@@ -460,7 +460,7 @@ end
 # A failed scalar trace inference should report an unsupported graph rather
 # than the ambiguous bottom-type dispatch among the output mapping methods.
 function batchify_type(::Type{Union{}})
-    throw(
+    return throw(
         ArgumentError(
             "Scalar function has no supported return type for these traced inputs"
         ),

@@ -31,8 +31,8 @@
     variants[only(add_ids)] = :add_row
     single_ids = [
         i for (i, meta) in enumerate(tape.metas) if meta.type <: BK.TraceMatrix &&
-        meta.lifecycle == BK.BATCHED &&
-        !(tape.nodes[i] isa BK.InputNode)
+            meta.lifecycle == BK.BATCHED &&
+            !(tape.nodes[i] isa BK.InputNode)
     ]
     assignment = BK.Assignment(
         tape;

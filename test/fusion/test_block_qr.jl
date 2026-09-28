@@ -273,21 +273,19 @@ end
                 copy(x)
             end
         end
-        args = Tuple(
-            if i in batchids
-                if ndims(common[i]) == 1
-                    BatchedCuVector(CuArray(x))
-                else
-                    BatchedCuMatrix(CuArray(x))
-                end
+        args = Tuple(if i in batchids
+            if ndims(common[i]) == 1
+                BatchedCuVector(CuArray(x))
             else
-                if ndims(common[i]) == 1
-                    SharedCuVector(CuArray(x), N)
-                else
-                    SharedCuMatrix(CuArray(x), N)
-                end
-            end for (i, x) in enumerate(host)
-        )
+                BatchedCuMatrix(CuArray(x))
+            end
+        else
+            if ndims(common[i]) == 1
+                SharedCuVector(CuArray(x), N)
+            else
+                SharedCuMatrix(CuArray(x), N)
+            end
+        end for (i, x) in enumerate(host))
         result = @inferred fuse(srkf_step, args...; nthreads=64)
         μs, Us, lls = map(x -> Array(x.data), values(result.components))
         @test size(μs) == (n, N) && size(Us) == (n, n, N) && size(lls) == (N,)
@@ -380,8 +378,8 @@ end
     for T in (Float32, Float64)
         values = T[0, -0.0, nextfloat(zero(T)), floatmin(T), -1, 3, floatmax(T), Inf, NaN]
         @test all(
-            isequal(BK._qr_absmax(abs(a), b), max(abs(a), abs(b))) for a in values,
-            b in values
+            isequal(BK._qr_absmax(abs(a), b), max(abs(a), abs(b))) for
+            a in values, b in values
         )
         scales = T === Float32 ? T[1e-40, 1e-25, 1, 1e25] : T[1e-310, 1e-200, 1, 1e200]
         for scale in scales

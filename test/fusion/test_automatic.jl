@@ -61,7 +61,7 @@ end
         (Float32, 3, 2, 0, :common),
     )
     for (T, d, m, N, lifecycle) in cases
-        spd(k) = (X = randn(T, k, k); X * X' / T(k) + Matrix{T}(I, k, k))
+        spd(k) = (X=randn(T, k, k); X * X' / T(k) + Matrix{T}(I, k, k))
         common = (
             randn(T, d),
             spd(d),
@@ -100,21 +100,19 @@ end
                 copy(x)
             end
         end
-        args = Tuple(
-            if i in batchids
-                if ndims(common[i]) == 2
-                    BatchedCuMatrix(CuArray(x))
-                else
-                    BatchedCuVector(CuArray(x))
-                end
+        args = Tuple(if i in batchids
+            if ndims(common[i]) == 2
+                BatchedCuMatrix(CuArray(x))
             else
-                if ndims(x) == 2
-                    SharedCuMatrix(CuArray(x), N)
-                else
-                    SharedCuVector(CuArray(x), N)
-                end
-            end for (i, x) in enumerate(arrays)
-        )
+                BatchedCuVector(CuArray(x))
+            end
+        else
+            if ndims(x) == 2
+                SharedCuMatrix(CuArray(x), N)
+            else
+                SharedCuVector(CuArray(x), N)
+            end
+        end for (i, x) in enumerate(arrays))
         out = @inferred fuse(joseph_kalman_step, args...; nthreads=64)
         got = map(x -> Array(x.data), values(getfield(out, :components)))
         @test size(got[1]) == (d, N)

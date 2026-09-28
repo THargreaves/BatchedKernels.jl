@@ -69,7 +69,7 @@ function _register_line_elements(shape::Tuple{Integer,Integer}, orientation::Sym
     m, n = shape
     orientation === :row && return m
     orientation === :col && return n
-    throw(ArgumentError("Register storage needs row or column orientation"))
+    return throw(ArgumentError("Register storage needs row or column orientation"))
 end
 
 function Assignment(
@@ -280,7 +280,7 @@ function plan_memory(
                         throw(ArgumentError("Load requires one operand"))
                     p = only(node.args).id
                     tape.nodes[p] isa InputNode &&
-                        get(a.residences, p, nothing) === :global ||
+                    get(a.residences, p, nothing) === :global ||
                         throw(ArgumentError("Load requires a global matrix input"))
                     _assignment_shape(tape.metas[p].type) == logicalshape ||
                         throw(ArgumentError("Load shape mismatch"))

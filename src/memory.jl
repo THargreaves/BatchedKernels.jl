@@ -648,8 +648,7 @@ end
     dest::RegisterMatrix{T,M,N,D,RowOriented}, source::SingleAccessMatrix{T,M,N,D}
 ) where {T,M,N,D}
     @unroll for k in 1i32:Int32(M)
-        @inbounds dest.mv[k] = dest.d <= Int32(N) ?
-            source[k, dest.d] : zero(T)
+        @inbounds dest.mv[k] = dest.d <= Int32(N) ? source[k, dest.d] : zero(T)
     end
     return dest
 end
@@ -657,8 +656,7 @@ end
     dest::RegisterMatrix{T,M,N,D,ColOriented}, source::SingleAccessMatrix{T,M,N,D}
 ) where {T,M,N,D}
     @unroll for k in 1i32:Int32(N)
-        @inbounds dest.mv[k] = dest.d <= Int32(M) ?
-            source[dest.d, k] : zero(T)
+        @inbounds dest.mv[k] = dest.d <= Int32(M) ? source[dest.d, k] : zero(T)
     end
     return dest
 end

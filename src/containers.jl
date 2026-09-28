@@ -170,7 +170,8 @@ function BatchedStruct(::Type{T}, components::NamedTuple) where {T}
     isstructtype(body) && !(body <: Tuple) ||
         throw(ArgumentError("BatchedStruct requires a composite struct type"))
     names = fieldnames(body)
-    isempty(names) && throw(ArgumentError("cannot infer batch length for a fieldless struct"))
+    isempty(names) &&
+        throw(ArgumentError("cannot infer batch length for a fieldless struct"))
     length(components) == length(names) && all(name -> haskey(components, name), names) ||
         throw(ArgumentError("components must have the fields $names"))
     ordered = NamedTuple{names}(components)
@@ -183,17 +184,20 @@ function BatchedStruct(::Type{T}, components::NamedTuple) where {T}
     types = map(eltype, values(ordered))
     R = _composite_constructor_type(T, Tuple{types...})
     isconcretetype(R) && R <: T || throw(
-        ArgumentError("cannot determine one concrete element type for $T; specify it explicitly"),
+        ArgumentError(
+            "cannot determine one concrete element type for $T; specify it explicitly"
+        ),
     )
-    all(type <: fieldtype(R, name) for (name, type) in zip(names, types)) || throw(
-        ArgumentError("component element types do not match the fields of $R"),
-    )
+    all(type <: fieldtype(R, name) for (name, type) in zip(names, types)) ||
+        throw(ArgumentError("component element types do not match the fields of $R"))
     return BatchedStruct{R,typeof(ordered)}(ordered, n)
 end
 
 # This is declared-type substitution, not inference of a constructor's return
 # type. Generate only from type metadata so the chosen element type is a literal.
-@generated function _composite_constructor_type(::Type{T}, ::Type{Types}) where {T,Types<:Tuple}
+@generated function _composite_constructor_type(
+    ::Type{T}, ::Type{Types}
+) where {T,Types<:Tuple}
     isconcretetype(T) && return :($T)
     body = Base.unwrap_unionall(T)
     params = Any[body.parameters...]
@@ -216,7 +220,9 @@ end
         Core.apply_type(Base.typename(body).wrapper, params...)
     catch err
         err isa TypeError || rethrow()
-        return :(throw(ArgumentError("component element types violate declared parameter bounds")))
+        return :(throw(
+            ArgumentError("component element types violate declared parameter bounds")
+        ))
     end
     return :($result)
 end
