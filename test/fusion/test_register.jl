@@ -147,7 +147,7 @@ end
     mixed = register_assignment(rectangular, A, B; orientation=:col, shared_products=true)
     result = @inferred BK.fuse(rectangular, A, B; assignment=registers)
     shared_result = @inferred BK.fuse(rectangular, A, B; assignment=mixed)
-    legacy = @inferred BK.fuse(rectangular, A, B; nthreads=64)
+    legacy = @inferred BK.fuse(rectangular, A, B; policy=:legacy, nthreads=64)
     references = [rectangular(left[:, :, batch], right[:, :, batch]) for batch in 1:N]
     CUDA.@allowscalar for got in (result, shared_result, legacy), component in 1:3
         @test all(1:N) do batch
@@ -173,7 +173,7 @@ end
     F, R = BK.BatchedCuMatrix(CuArray(spd)), BK.BatchedCuMatrix(CuArray(rhs))
     factor_assignment = register_assignment(factor_solve, F, R)
     solved = @inferred BK.fuse(factor_solve, F, R; assignment=factor_assignment)
-    baseline = @inferred BK.fuse(factor_solve, F, R; nthreads=64)
+    baseline = @inferred BK.fuse(factor_solve, F, R; policy=:legacy, nthreads=64)
     reference = cat((spd[:, :, b] \ rhs[:, :, b] for b in 1:N)...; dims=3)
     @test Array(solved.data) ≈ reference rtol = 5.0f-5 atol = 5.0f-6
     @test Array(baseline.data) ≈ reference rtol = 5.0f-5 atol = 5.0f-6

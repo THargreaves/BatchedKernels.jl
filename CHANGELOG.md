@@ -4,9 +4,12 @@
 
 ### Fusion and numerical operations
 
-- Automatic register-first storage is the default fusion policy. Explicit
-  `policy=:legacy` and custom `Assignment` remain available for supported graphs.
-  Hybrid kernels can use static or dynamic shared-memory allocation.
+- Automatic register-first storage is the default fusion policy. Custom
+  `Assignment`s remain available; `policy=:legacy` keeps the original all-shared
+  planner as a benchmark ablation baseline. Hybrid kernels can use static or
+  dynamic shared-memory allocation.
+- Fused kernels accept Float32 and Float64 inputs only; other element types now
+  raise an `ArgumentError` under every policy.
 - Add implicit stacked/block QR and residual-compression operations, preserving
   StaticArrays on CPU and returning independently planned matrix/vector/scalar
   results on GPU. Logical stacks can exceed the lane-group width.

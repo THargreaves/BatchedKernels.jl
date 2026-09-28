@@ -205,7 +205,7 @@ end
     A, B = BK.BatchedCuMatrix(CuArray(left)), BK.BatchedCuMatrix(CuArray(right))
     dual = assignment_for(repeated_wrappers, A, B)
     mixed = assignment_for(repeated_wrappers, A, B; mixed=true)
-    legacy = repeated_wrappers.(A, B)
+    legacy = BK.fuse(repeated_wrappers, A, B; policy=:legacy)
     hybrid_dual = @inferred BK.fuse(repeated_wrappers, A, B; assignment=dual)
     hybrid_mixed = @inferred BK.fuse(repeated_wrappers, A, B; assignment=mixed)
     CUDA.@allowscalar for batch in (1, 20, 23)
@@ -227,7 +227,9 @@ end
         (four_shared(left[:, :, batch], shared_cpu...) for batch in 1:N)...; dims=3
     )
     @test Array(shared_result.data) ≈ reference rtol = 5.0f-5 atol = 5.0f-6
-    shared_legacy = @inferred BK.fuse(four_shared, A, shared_gpu...; nthreads=64)
+    shared_legacy = @inferred BK.fuse(
+        four_shared, A, shared_gpu...; policy=:legacy, nthreads=64
+    )
     @test Array(shared_legacy.data) ≈ reference rtol = 5.0f-5 atol = 5.0f-6
 
     entry = BK._ensure_compiled!(

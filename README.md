@@ -1,8 +1,9 @@
 # BatchedKernels.jl
 
 Generate a CUDA kernel from a scalar Julia function over small matrices, vectors,
-and scalars. The same scalar code can run on CPU arrays or StaticArrays. The
-supported GPU numerical types are Float32 and Float64; individual matrix extents
+and scalars. The same scalar code can run on CPU arrays or StaticArrays. Fused
+kernels support Float32 and Float64 only (other element types are rejected);
+individual matrix extents
 are currently bounded by a 32-lane group. QR can operate on implicit stacks larger
 than that group.
 
@@ -18,7 +19,8 @@ C = fuse(product, A, B)  # C.data is a 3×3×1000 CuArray
 
 Use named singleton functions at the fusion boundary. Closures, callable structs,
 arbitrary scalar indexing, and mutation inside the traced function are not
-supported. This is a compiler for a defined set of array operations, rather than
+supported, apart from explicit in-place `cholesky!` and `ldiv!`, which keep their
+shared-memory implementation. This is a compiler for a defined set of array operations, rather than
 a general Julia-to-GPU transformation.
 
 ## Public integration surface
@@ -29,7 +31,7 @@ a general Julia-to-GPU transformation.
 | `SharedCuMatrix`, `SharedCuVector` | Reuse one device array across a batch |
 | `BatchedStruct`, `SharedValue` | Composite states and literal fields |
 | `fuse(f, args...; ...)` | Allocate results and launch a generated kernel |
-| `Assignment` | Explicit storage/orientation choices for an advanced caller |
+| `Assignment`, `automatic_assignment` | Explicit storage/orientation choices for an advanced caller |
 | `symmetric_part`, `covariance_pushforward` | Scalar matrix operations with supported tracing |
 | `qr_upper_stack`, `qr_upper_blocks` | Implicit stacked/block R-only QR |
 | `qr_identity_plus`, `qr_compress_residual` | Gaussian residual propagation and compression |
@@ -37,7 +39,8 @@ a general Julia-to-GPU transformation.
 
 `fuse` defaults to `policy=:auto`, which prefers register intermediates and uses
 shared memory for staging and incompatible access orientations. `policy=:legacy`
-retains the earlier scheduler and planner for supported graphs. An explicit
+retains the earlier all-shared scheduler and planner as an ablation baseline for
+benchmarks; it is not intended for applications. An explicit
 `assignment` selects the custom hybrid path. QR with multiple results requires
 automatic or custom assignment. `nthreads` and `shared_memory=:static/:dynamic`
 control launch geometry and shared allocation; device resource limits still apply.

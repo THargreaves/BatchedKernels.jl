@@ -174,6 +174,8 @@ function _ensure_compiled!(
     T = T_ref[]
     D_MAX === nothing && error("Could not infer matrix dimension from inputs")
     T === nothing && error("Could not infer element type from inputs")
+    T in (Float32, Float64) ||
+        throw(ArgumentError("fused kernels support Float32 and Float64 inputs, got $T"))
     1 <= D_MAX <= 32 || throw(ArgumentError("matrix group dimension must be in 1:32"))
 
     tape = trace(f, input_specs)
@@ -291,7 +293,8 @@ export fuse, Assignment
 Execute the same scalar function and return the same inferred batched output type
 as `f.(args...)`. The default `policy=:auto` uses deterministic register-first
 planning with dual shared storage for conflicting orientations. `policy=:legacy`
-selects the original scheduler/planner. A host `Assignment` overrides automatic
+selects the original all-shared scheduler/planner, kept as an ablation baseline for
+benchmarks. Inputs must be Float32 or Float64. A host `Assignment` overrides automatic
 selection with validated storage and variant choices. Build assignments
 against `trace(f, InputSpec[input_spec(x) for x in args])`; staging normalization
 preserves node IDs. Dictionary/layout choices never enter the device kernel.

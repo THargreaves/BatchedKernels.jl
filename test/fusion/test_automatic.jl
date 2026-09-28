@@ -246,3 +246,12 @@ end
         f, SharedCuMatrix(CUDA.ones(3, 3), 4), BatchedCuVector(CUDA.ones(3, 2))
     )
 end
+
+@testitem "Unsupported element types are rejected" tags = [:gpu] begin
+    using BatchedKernels, CUDA
+    product(A, B) = A * B
+    A = BatchedCuMatrix(CUDA.rand(Float16, 3, 3, 4))
+    for policy in (:auto, :legacy)
+        @test_throws ArgumentError fuse(product, A, A; policy)
+    end
+end
