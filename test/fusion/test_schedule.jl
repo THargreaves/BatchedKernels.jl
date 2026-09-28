@@ -1,4 +1,4 @@
-@testitem "Scheduler" begin
+@testitem "Scheduler" tags = [:cpu] begin
     # CPU-only scheduler unit tests. Operate on hand-built Tapes — no GPU /
     # trace pass needed. Verify the subset-DP scheduler finds the slot-optimal
     # ordering for a handful of canonical DAG shapes (linear chain, diamond,

@@ -1,25 +1,12 @@
-using TestItems
-using TestItemRunner
+using TestItems, TestItemRunner, CUDA
 
-@run_package_tests
-
-# Sub-kernel tests — exercise src/memory.jl + src/operations.jl directly
-# via hand-written CUDA kernels.
-include("sub_kernels/test_cholesky.jl")
-include("sub_kernels/test_matmul.jl")
-include("sub_kernels/test_solve.jl")
-include("sub_kernels/test_mat_subtraction.jl")
-include("sub_kernels/test_vector_ops.jl")
-include("sub_kernels/test_qr.jl")
-include("sub_kernels/test_transpose.jl")
-
-# Fuser unit tests — CPU-only tests over tape / planner / scheduler.
-include("fusion/test_schedule.jl")
-
-# Fused-kernel end-to-end tests — exercise the broadcast API and the full
-# trace → plan → codegen pipeline.
-include("fused_kernels/test_matmul.jl")
-include("fused_kernels/test_cholesky.jl")
-include("fused_kernels/test_solve.jl")
-include("fused_kernels/test_vector_ops.jl")
-include("fused_kernels/test_scalars.jl")
+# TestItemRunner discovers every @testitem, including the sub-kernel suites.
+# CPU-only machines run explicitly tagged algebra/planner/layout tests. Set this
+# variable on a GPU machine to exercise the same selection used by hosted CI.
+const cpu_only = get(ENV, "BATCHEDKERNELS_TEST_CPU_ONLY", "false") == "true"
+if cpu_only || !CUDA.functional()
+    @info "Running CPU tests; CUDA kernel tests require a functional GPU"
+    @run_package_tests filter = ti -> :cpu in ti.tags
+else
+    @run_package_tests
+end
