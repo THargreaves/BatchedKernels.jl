@@ -77,7 +77,7 @@ function main(force::Bool)
         Val(:jax_vmap) => "JAX (vmap)",
     )
 
-    path = "studies/benchmarks/bench_qr_q"
+    path = "benchmarks/bench_qr_q"
 
     generate_plots(2, 32, methods, Float32, path, force)
 end

@@ -1,8 +1,8 @@
 # ======================================================================
-# studies/config/Schedule.jl
+# benchmarking/config/Schedule.jl
 #
 # Single source of truth for the tuned block size (nthreads). The tuning
-# pipeline (studies/tune_nthreads) writes config/nthreads_schedule.csv;
+# pipeline (tune_nthreads/) writes config/nthreads_schedule.csv;
 # every consumer -- roofline, benchmarks, any other study -- reads the
 # block size through best_nthreads(op, D) here, so there is exactly one
 # place the schedule is interpreted.
@@ -30,7 +30,7 @@ function _load()
     if !isfile(SCHEDULE_CSV)
         @warn "Schedule: $SCHEDULE_CSV not found; best_nthreads will " *
               "return DEFAULT_NTHREADS ($DEFAULT_NTHREADS) for every op. " *
-              "Run studies/tune_nthreads/run_tuning.sh to generate it."
+              "Run benchmarking/tune_nthreads/run_tuning.sh to generate it."
         return tbl
     end
     lines  = readlines(SCHEDULE_CSV)

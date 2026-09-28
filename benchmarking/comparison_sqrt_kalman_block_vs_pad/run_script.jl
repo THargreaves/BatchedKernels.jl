@@ -99,7 +99,7 @@ function main(force::Bool)
         Val(:pad) => "Padded",
     )
 
-    path = "studies/comparison_sqrt_kalman_block_vs_pad"
+    path = "comparison_sqrt_kalman_block_vs_pad"
 
     generate_plots(2, 16, methods, Float32, path, force)
 end

@@ -37,7 +37,7 @@ const SHMEM_BYTES_PER_WAVEFRONT = 128.0
     bench_times(op, impl) -> Dict{Int,Float64}
 
 Read the benchmark timing table
-benchmarking/studies/benchmarks/bench_<op>/tables/<op>.csv and return
+benchmarking/benchmarks/bench_<op>/tables/<op>.csv and return
 D -> time per matrix (seconds) for `impl`.
 """
 function bench_times(op::AbstractString, impl::AbstractString)

@@ -36,10 +36,10 @@ set -e
 #
 #   STEP 3  decide_nthreads.jl     -- cheap, always runs
 #       in : results/nthreads_benchmarks.csv + occupancy_prediction.csv
-#       out: results/nthreads_schedule.csv  <-- the deliverable
+#       out: ../config/nthreads_schedule.csv  <-- the deliverable
 #            results/TUNING.md              <-- auto-generated writeup
 #
-# results/nthreads_schedule.csv is then consumed by the roofline pipeline
+# ../config/nthreads_schedule.csv is then consumed by the roofline pipeline
 # (best_nthreads(op,D)) so subsequent profiling uses the tuned block size.
 # ======================================================================
 
@@ -92,7 +92,7 @@ case "$STEP" in
         run_decide
         echo
         echo "=== tuning complete ==="
-        echo "schedule : results/nthreads_schedule.csv"
+        echo "schedule : ../config/nthreads_schedule.csv"
         echo "writeup  : results/TUNING.md"
         ;;
 esac

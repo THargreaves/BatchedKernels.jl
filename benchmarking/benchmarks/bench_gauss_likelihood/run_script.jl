@@ -88,7 +88,7 @@ function main(force::Bool)
         Val(:cublas_cusolver) => "cuBLAS/cuSOLVER",
     )
 
-    path = "studies/benchmarks/bench_gauss_likelihood"
+    path = "benchmarks/bench_gauss_likelihood"
 
     generate_plots(2, 32, methods, Float32, path, force)
 end

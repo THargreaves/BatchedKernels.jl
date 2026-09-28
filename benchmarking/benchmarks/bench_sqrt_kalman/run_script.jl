@@ -102,7 +102,7 @@ function main(force::Bool)
         Val(:cublas) => "cuBLAS",
     )
 
-    path = "studies/benchmarks/bench_sqrt_kalman"
+    path = "benchmarks/bench_sqrt_kalman"
 
     generate_plots(2, 32, methods, Float32, path, force)
 end

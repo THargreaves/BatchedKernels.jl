@@ -85,7 +85,7 @@ function generate_plots(D_min::Integer, D_max::Integer, n_steps::Int, path::Stri
 end
 
 function main(force::Bool)
-    path = "studies/comparison_kalman_bank_conflict"
+    path = "comparison_kalman_bank_conflict"
 
     # Not configured for multi-step!
     for n_steps in [1,]

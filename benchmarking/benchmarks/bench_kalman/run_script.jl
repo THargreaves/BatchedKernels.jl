@@ -94,7 +94,7 @@ function main(force::Bool)
         Val(:cublas_cusolver) => "cuBLAS/cuSOLVER",
     )
 
-    path = "studies/benchmarks/bench_kalman"
+    path = "benchmarks/bench_kalman"
 
     generate_plots(2, 32, methods, Float32, path, force)
 end

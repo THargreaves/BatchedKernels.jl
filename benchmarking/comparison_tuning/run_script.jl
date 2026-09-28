@@ -80,7 +80,7 @@ function generate_plots(D_min::Integer, D_max::Integer, n_steps::Int, T::Type, p
 end
 
 function main(force::Bool)
-    path = "studies/comparison_tuning"
+    path = "comparison_tuning"
 
     generate_plots(2, 32, 1, Float32, path, force)
 end
