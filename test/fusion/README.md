@@ -1,5 +1,9 @@
-The forced hybrid-storage path is an explicit integration surface. Ordinary
-`f.(args...)` continues to use the corrected legacy planner.
+Ordinary `f.(args...)` and `fuse(f, args...)` use a deterministic register-first
+planner. `fuse(...; policy=:legacy)` retains the original scheduler/planner.
+The automatic policy propagates access requirements through wrappers and produces
+values in dual-access shared storage when their orientations conflict. It uses tape
+order and stable registry ordering, without timing or a register-pressure search.
+Explicit assignments remain available for experiments and validated overrides.
 
 ```julia
 using BatchedKernels
@@ -37,7 +41,9 @@ domain (such as a `Symmetric` staging source) are rejected during planning. Host
 execution; each emitted matrix value has a concrete shape/layout binding. The
 forced cache key includes the complete assignment, order, geometry and device.
 
-`fuse(f, args...; nthreads=64)` selects the legacy path with explicit block geometry.
+`fuse(f, args...; policy=:legacy, nthreads=64)` selects legacy block geometry.
+The default block size is 128 threads; explicitly supplied assignments retain their
+own block size. Allocation remains part of each public call.
 Shared inputs are distributed across available warps, even with more inputs than
 warps. Both paths fence shared producer/consumer and slot-reuse boundaries. These
 conservative boundaries are not yet a performance tuning policy.
@@ -76,3 +82,64 @@ The mode is part of the cache key. Debug accessors retain device arena bounds
 checks; production relies on the validated host launch contract. The focused
 `test_dynamic_shared.jl` covers inference, cache separation, mixed region types,
 partial blocks, unchanged inputs and oversized-arena rejection.
+
+The complete Joseph forward example is `examples/kalman.jl`; it returns mean,
+covariance and one log-likelihood increment per particle. `test_automatic.jl`
+checks independent CPU references, rectangular observations, common/batched model
+inputs, Float32/Float64, empty/partial/full batches, input preservation and inferred
+outputs. Matrix-vector products and triangular-vector solves consume audited matrix
+layouts; vectors retain shared storage. Scalar reductions use complete group masks,
+including D=32 and logical observations smaller than the group.
+
+Run only this item file through a directory filter (passing a file path to
+`run_tests` does not discover test items):
+
+```julia
+TestItemRunner.run_tests("test/fusion";
+    filter=ti -> occursin("test_automatic.jl", ti.filename), verbose=true)
+```
+
+
+Structured R-only QR uses tuple-valued `CallNode`s with matrix/vector/scalar `ResultNode`
+projections. The producer executes once; projections emit no code and own fresh
+storage. Every result interval begins at the producer's schedule position, even
+when a custom order delays the projection. Variant output-access tuples specify
+each block independently. Ordinary single-result operation contracts are unchanged.
+`Assignment` selects the registered QR variant for these calls by default (dual
+outputs); automatic assignment chooses register/dual placements by access demand.
+The legacy scheduler/planner rejects multi-result tapes explicitly.
+
+`test_block_qr.jl` covers static CPU inference, promoted element types, result
+lifetimes, independent output storage policies, unequal/padded/full-warp blocks,
+assembled dimensions over 32, scaled norms, zero pivots, rank-deficient roots,
+rectangular process noise, complete SRKF likelihoods and repeated zero-noise steps.
+
+
+QR performance variants additionally exercise column-owned `:row` and row-owned
+`:col` contracts, including custom shared assignments and the original legacy
+stack lowering. Numerical edge coverage includes genuinely subnormal columns
+(Float32 1e-40, Float64 1e-310), huge/tiny normal scales, exact Float64 magnitude
+ordering, masked triangular inputs and rescaled Gram comparisons. Existing SRKF
+recursion and mean/root/likelihood tolerances are retained.
+
+
+`test_backward.jl` adds residual compression and identity-plus QR, StaticArrays
+inference, normalized multi-step likelihoods checked against an independently
+assembled joint Gaussian, zero/rank-deficient process noise, and shared suffix
+weights for both forward covariance representations. It covers scalar inputs,
+composite message recurrence, common-only calculations, delayed vector projections,
+unused results, rectangular blocks, and stacks larger than a lane group.
+`backward_reference.jl` supplies the dense reference only; no application package
+is required to run these tests.
+
+## GeneralisedFilters integration regressions
+
+`test_composite_shapes.jl` verifies independent type parameters for equally typed
+model matrices with different logical shapes. `test_wrapped_products.jl` checks
+triangular-root products, including adjoint/transpose orientation and nonzero
+data in the masked triangle. The separate
+[real-package harness](../../integration/generalised_filters/README.md) validates
+wrapped state recursion and likelihood conventions against GeneralisedFilters.
+
+The package test entry point discovers all test items. CPU-only environments run
+`:cpu` tests; `BATCHEDKERNELS_TEST_CPU_ONLY=true` selects that path explicitly.
