@@ -229,6 +229,10 @@ function emit_variant(v::OrientationVariant, dest, args::Vector, types::Vector, 
         qr_upper_stack
     elseif v.shape_rule === :qr_blocks
         qr_upper_blocks
+    elseif v.shape_rule === :qr_identity
+        qr_identity_plus
+    elseif v.shape_rule === :qr_residual
+        qr_compress_residual
     elseif v.shape_rule === :scalar_logdet
         logdet
     elseif startswith(String(v.id), "add")
@@ -241,6 +245,20 @@ function emit_variant(v::OrientationVariant, dest, args::Vector, types::Vector, 
     if v.shape_rule === :scalar_logdet
         n = shapes[1][1]
         return :($dest = variant_logdet($(args[1]), d, Val(Int32($n)), Val(Int32($D_MAX))))
+    end
+    if v.shape_rule === :qr_residual
+        m, n = shapes[1]
+        p = length(shapes) == 2 ? shapes[2][1] : 0
+        call = Expr(
+            :call,
+            :variant_compress_residual!,
+            dest.args[1],
+            dest.args[2],
+            args...,
+            :d,
+            [:(Val(Int32($x))) for x in (m, n, p, D_MAX)]...,
+        )
+        return dest.args[3] === nothing ? call : :($(dest.args[3]) = $call)
     end
     dims = if v.shape_rule === :matmul
         (shapes[1][1], shapes[1][2], shapes[2][2], D_MAX)
@@ -286,6 +304,32 @@ function orientation_variants(::typeof(qr_upper_blocks), A::Type, B::Type, C::Ty
         ),
         _orientation_variant(
             :qr_blocks_col, (:col, :col, :col), (:col, :col, :col), :qr_blocks
+        ),
+    )
+end
+
+function orientation_variants(::typeof(qr_identity_plus), A::Type)
+    _variant_input_domain((A,)) || return ()
+    return (_orientation_variant(:qr_identity_col, (:col,), :row, :qr_identity),)
+end
+
+function orientation_variants(
+    ::typeof(qr_compress_residual), A::Type, a::Type, rest::Type...
+)
+    length(rest) in (0, 2) || return ()
+    mats = isempty(rest) ? (A,) : (A, rest[1])
+    vecs = isempty(rest) ? (a,) : (a, rest[2])
+    _variant_input_domain(mats) || return ()
+    n = _variant_shape(A)[2]
+    all(
+        _variant_shape(m)[2] == n &&
+            v <: TraceVector &&
+            shape(v) == (_variant_shape(m)[1],) &&
+            eltype(v) === eltype(A) for (m, v) in zip(mats, vecs)
+    ) || return ()
+    return (
+        _orientation_variant(
+            :qr_residual_row, map(_ -> :row, mats), (:row, :none, :none), :qr_residual
         ),
     )
 end

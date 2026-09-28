@@ -394,6 +394,11 @@ function plan_memory(
                 inputshapes[2]
             elseif v.shape_rule === :qr_blocks
                 (inputshapes[1], (inputshapes[1][1], inputshapes[3][2]), inputshapes[3])
+            elseif v.shape_rule === :qr_identity
+                (inputshapes[1][1], inputshapes[1][1])
+            elseif v.shape_rule === :qr_residual
+                n = inputshapes[1][2]
+                ((n, n), (n,), ())
             elseif v.shape_rule === :scalar_logdet
                 ()
             else
