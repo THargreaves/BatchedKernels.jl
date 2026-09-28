@@ -51,7 +51,7 @@ end
         end
     end
     base = mod1(threadIdx().x, 32i32) - d
-    mask = _matrix_group_mask(Val(D), base)
+    mask = @inbounds _register_group_mask(Val(D), base)
     if s !== nothing
         @inbounds @unroll for i in (1i32):Int32(N)
             value = shfl_sync(mask, rhs[i], _shuffle_source(base + 1i32))

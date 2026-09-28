@@ -314,8 +314,8 @@ function emit_primitive(
     candidates = orientation_variants(qr_upper_stack, types...)
     isempty(candidates) &&
         throw(ArgumentError("Unsupported QR stack shapes or element types"))
-    # Legacy storage keeps its established row-owned compute body. The hybrid
-    # registry also offers column-owned QR, so it no longer has a sole entry.
+    # Legacy storage keeps the established row-owned body, `:qr_stack_col` (named for
+    # its ColAccess contract: each lane owns a row). The column-owned body is hybrid-only.
     variant = only(v for v in candidates if v.id === :qr_stack_col)
     return emit_variant(variant, dest, args, types, D_MAX)
 end

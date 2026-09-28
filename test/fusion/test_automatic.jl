@@ -2,7 +2,6 @@
     using BatchedKernels, LinearAlgebra
     const BK = BatchedKernels
     specs = BK.InputSpec[BK.LeafInput(BK.TraceMatrix{Float32,3,3}, BK.BATCHED) for _ in 1:2]
-    conflict(A, B) = (C = A * B; C + C')
     # Symmetrization explicitly needs both orientations; wrappers preserve ownership.
     f(A, B) = symmetric_part(A * B)
     tape = BK.trace(f, specs)

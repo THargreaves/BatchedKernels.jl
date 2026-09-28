@@ -99,7 +99,6 @@ TestItemRunner.run_tests("test/fusion";
     filter=ti -> occursin("test_automatic.jl", ti.filename), verbose=true)
 ```
 
-
 Structured R-only QR uses tuple-valued `CallNode`s with matrix/vector/scalar `ResultNode`
 projections. The producer executes once; projections emit no code and own fresh
 storage. Every result interval begins at the producer's schedule position, even
@@ -114,14 +113,12 @@ lifetimes, independent output storage policies, unequal/padded/full-warp blocks,
 assembled dimensions over 32, scaled norms, zero pivots, rank-deficient roots,
 rectangular process noise, complete SRKF likelihoods and repeated zero-noise steps.
 
-
 QR performance variants additionally exercise column-owned `:row` and row-owned
 `:col` contracts, including custom shared assignments and the original legacy
 stack lowering. Numerical edge coverage includes genuinely subnormal columns
 (Float32 1e-40, Float64 1e-310), huge/tiny normal scales, exact Float64 magnitude
 ordering, masked triangular inputs and rescaled Gram comparisons. Existing SRKF
 recursion and mean/root/likelihood tolerances are retained.
-
 
 `test_backward.jl` adds residual compression and identity-plus QR, StaticArrays
 inference, normalized multi-step likelihoods checked against an independently

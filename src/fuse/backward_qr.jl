@@ -1,5 +1,5 @@
 function qr_identity_plus(C::QRTraceMatrix{T}) where {T}
-    tape = _qr_trace_tape(C)
+    tape = _trace_tape(C)
     m = size(C, 1)
     ref = emit_call!(
         tape, qr_identity_plus, NodeRef[register_wrapped!(tape, C)], TraceMatrix{T,m,m}
@@ -8,13 +8,13 @@ function qr_identity_plus(C::QRTraceMatrix{T}) where {T}
 end
 
 function _trace_compress_residual(B, r, rest...)
-    tape = _qr_trace_tape(B)
+    tape = _trace_tape(B)
     n = size(B, 2)
     refs = NodeRef[]
     for (matrix, vector) in ((B, r), rest...)
         size(matrix, 1) == length(vector) && size(matrix, 2) == n ||
             throw(DimensionMismatch("Residual dimensions mismatch"))
-        _qr_trace_tape(matrix) === tape && vector.tape === tape ||
+        _trace_tape(matrix) === tape && vector.tape === tape ||
             throw(ArgumentError("QR operands belong to different tapes"))
         push!(refs, register_wrapped!(tape, matrix), vector.ref)
     end

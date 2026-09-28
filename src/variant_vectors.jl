@@ -20,7 +20,7 @@ end
 ) where {N,D}
     T = eltype(y)
     base = mod1(threadIdx().x, 32i32) - d
-    mask = _matrix_group_mask(Val(D), base)
+    mask = @inbounds _register_group_mask(Val(D), base)
     value = d <= Int32(N) ? @inbounds(x[d]) : zero(T)
     @unroll for step in (1i32):Int32(N)
         k = _solve_forward(A) ? step : Int32(N) - step + 1i32
@@ -41,13 +41,9 @@ end
     return y
 end
 
-# A full group mask is needed even when the logical vector is shorter than D.
-@inline _matrix_group_mask(::Val{D}, base::Int32) where {D} =
-    (typemax(UInt32) >> (32 - Int(D))) << (base % UInt32)
-
 @inline function _group_sum(value, d::Int32, ::Val{D}) where {D}
     base = mod1(threadIdx().x, 32i32) - d
-    mask = _matrix_group_mask(Val(D), base)
+    mask = @inbounds _register_group_mask(Val(D), base)
     total = warp_reduce_sum(mask, value, d, Val(Int32(D)))
     return shfl_sync(mask, total, _shuffle_source(base + 1i32))
 end

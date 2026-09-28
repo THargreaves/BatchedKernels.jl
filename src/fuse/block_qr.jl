@@ -7,14 +7,12 @@ const QRTraceMatrix{T} = Union{
     UpperTriangular{T,<:TraceMatrix{T}},
     LowerTriangular{T,<:TraceMatrix{T}},
 }
-_qr_trace_tape(A::TraceMatrix) = A.tape
-_qr_trace_tape(A) = _qr_trace_tape(parent(A))
 
 function qr_upper_stack(A::QRTraceMatrix{T}, B::QRTraceMatrix{T}) where {T}
     n = size(B, 1)
     size(B, 2) == size(A, 2) == n || throw(DimensionMismatch("Invalid QR stack"))
-    tape = _qr_trace_tape(B)
-    _qr_trace_tape(A) === tape ||
+    tape = _trace_tape(B)
+    _trace_tape(A) === tape ||
         throw(ArgumentError("QR operands belong to different tapes"))
     refs = NodeRef[register_wrapped!(tape, A), register_wrapped!(tape, B)]
     ref = emit_call!(tape, qr_upper_stack, refs, TraceMatrix{T,n,n})
@@ -27,8 +25,8 @@ function qr_upper_blocks(
     m, n = size(A, 1), size(C, 1)
     size(A) == (m, m) && size(B) == (n, m) && size(C) == (n, n) ||
         throw(DimensionMismatch("Invalid QR block dimensions"))
-    tape = _qr_trace_tape(A)
-    _qr_trace_tape(B) === tape && _qr_trace_tape(C) === tape ||
+    tape = _trace_tape(A)
+    _trace_tape(B) === tape && _trace_tape(C) === tape ||
         throw(ArgumentError("QR operands belong to different tapes"))
     refs = NodeRef[register_wrapped!(tape, x) for x in (A, B, C)]
     r1, r2, r3 = emit_results!(
@@ -44,7 +42,7 @@ end
 
 function covariance_root_logdet(A::QRTraceMatrix{T}) where {T}
     size(A, 1) == size(A, 2) || throw(DimensionMismatch("Root must be square"))
-    tape = _qr_trace_tape(A)
+    tape = _trace_tape(A)
     ref = emit_call!(tape, logdet, NodeRef[register_wrapped!(tape, A)], TraceScalar{T})
     return TraceScalar{T}(tape, ref)
 end

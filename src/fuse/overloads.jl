@@ -51,14 +51,14 @@ const TraceTriangularMatrix{T} = Union{
     UpperTriangular{T,<:Transpose{T,<:TraceMatrix{T}}},
     LowerTriangular{T,<:Transpose{T,<:TraceMatrix{T}}},
 }
-_product_tape(A::TraceMatrix) = A.tape
-_product_tape(A) = _product_tape(parent(A))
+_trace_tape(A::TraceMatrix) = A.tape
+_trace_tape(A) = _trace_tape(parent(A))
 function _trace_wrapped_product(A::AbstractMatrix{T}, B::AbstractMatrix{T}) where {T}
     m, k = size(A)
     kb, n = size(B)
     k == kb || throw(DimensionMismatch("Matrix product inner dimensions differ"))
-    tape = _product_tape(A)
-    tape === _product_tape(B) ||
+    tape = _trace_tape(A)
+    tape === _trace_tape(B) ||
         throw(ArgumentError("Product operands belong to different tapes"))
     refs = NodeRef[register_wrapped!(tape, A), register_wrapped!(tape, B)]
     ref = emit_call!(tape, *, refs, TraceMatrix{T,m,n})

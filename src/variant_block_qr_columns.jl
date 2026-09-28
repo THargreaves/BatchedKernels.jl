@@ -15,7 +15,7 @@ end
 ) where {R,P,Q,D,K}
     T = eltype(left)
     base = mod1(threadIdx().x, 32i32) - d
-    mask = _matrix_group_mask(Val(D), base)
+    mask = @inbounds _register_group_mask(Val(D), base)
     # Broadcast once, then reuse for both the projection and rank-one update.
     # Keeping this explicit avoids a second shuffle of every reflector element.
     reflector = MVector{Int(R),T}(undef)

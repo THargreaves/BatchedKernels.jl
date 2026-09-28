@@ -3,7 +3,7 @@
 # groups participate in every shuffle, including lanes outside either block.
 @inline function _qr_group_max(x, d::Int32, ::Val{D}) where {D}
     base = mod1(threadIdx().x, 32i32) - d
-    mask = _matrix_group_mask(Val(D), base)
+    mask = @inbounds _register_group_mask(Val(D), base)
     @unroll for s in 0:4
         offset = Int32(1 << s)
         other = shfl_sync(mask, x, _shuffle_source(base + min(d + offset, Int32(D))))
@@ -17,7 +17,7 @@ end
 ) where {M,N,K,D}
     T = eltype(top)
     base = mod1(threadIdx().x, 32i32) - d
-    mask = _matrix_group_mask(Val(D), base)
+    mask = @inbounds _register_group_mask(Val(D), base)
     @inbounds @unroll for j in (1i32):Int32(K)
         xt = j <= d <= Int32(M) ? top[j] : zero(T)
         xb = j <= d + Int32(M) && d <= Int32(N) ? bot[j] : zero(T)
