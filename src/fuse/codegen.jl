@@ -451,7 +451,7 @@ function _codegen(
         elseif node isa ConstNode
             continue
         end
-        if node isa NewNode
+        if node isa Union{NewNode,ResultNode}
             continue
         end
         _push_warp_fence!(stmts)
@@ -597,6 +597,32 @@ function _codegen(
 
         arg_exprs = Any[arg_kernel_expr(tape, ref, node_view_sym) for ref in node.args]
         arg_types = Any[tape.metas[ref.id].type for ref in node.args]
+
+        if _is_multi_call(tape, i)
+            ids = call_result_ids(tape, i)
+            # Unused result blocks need no final store; the QR recurrence still
+            # computes any working values needed to obtain the other blocks.
+            destinations = Any[
+                if planner.last_use[id] == findfirst(==(id), order)
+                    nothing
+                elseif tape.metas[id].type <: TraceVector
+                    node_view_sym[id] = slot_view_sym(planner.slots[id])
+                else
+                    node_view_sym[id]
+                end for id in ids
+            ]
+            variant_id = assignment.variants[i]
+            chosen = only(
+                v for
+                v in orientation_variants(node.fn, arg_types...) if v.id === variant_id
+            )
+            emit_expr = emit_variant(
+                chosen, Expr(:tuple, destinations...), arg_exprs, arg_types, D_MAX
+            )
+            push!(stmts, Expr(:if, :active, Expr(:block, emit_expr)))
+            _push_warp_fence!(stmts)
+            continue
+        end
 
         if slot_kind(node, meta) == :scalar
             # Scalar destinations write into the Julia local — the corresponding

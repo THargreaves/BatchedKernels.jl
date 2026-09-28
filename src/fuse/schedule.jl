@@ -521,6 +521,7 @@ end
 const _SCHEDULE_MAX_NODES = 60
 
 function schedule(tape::Tape)::Vector{Int}
+    _require_single_result_calls(tape)
     schedulable = _collect_schedulable(tape)
     k = length(schedulable)
     if k == 0

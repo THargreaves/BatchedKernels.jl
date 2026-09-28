@@ -6,6 +6,7 @@
 # on phantom trace values. Nodes are one of:
 #   - `InputNode`: a top-level batched/shared input
 #   - `CallNode`: a primitive operation on tape values
+#   - `ResultNode`: an independently owned matrix, vector, or scalar result of a tuple-valued call
 #   - `NewNode`: a structural wrapper (Adjoint, Triangular, Cholesky, tuples,
 #                user structs)
 #   - `ConstNode`: a trace-time literal
@@ -27,6 +28,12 @@ end
 struct CallNode <: TapeNode
     fn::Any
     args::Vector{NodeRef}
+end
+
+"""One independently owned result of a tuple-valued primitive call."""
+struct ResultNode <: TapeNode
+    producer::NodeRef
+    index::Int
 end
 
 struct NewNode <: TapeNode
@@ -135,4 +142,53 @@ function show_node(io, tape, n::NewNode)
     print(io, "new(", n.T, "; ")
     join(io, (string(p.first, "=%", p.second.id) for p in n.fields), ", ")
     return print(io, ")")
+end
+
+# Multi-result calls have no storage of their own. Projections are fresh values,
+# born together at the producer, rather than aliases or separately executed calls.
+function emit_results!(tape::Tape, fn, args::Vector{NodeRef}, types::Tuple)
+    producer = emit_call!(tape, fn, args, Tuple{types...})
+    lc = meta_at(tape, producer).lifecycle
+    return ntuple(length(types)) do k
+        push_node!(tape, ResultNode(producer, k), NodeMeta(types[k], lc))
+    end
+end
+
+function _is_multi_call(tape::Tape, id::Int)
+    return tape.nodes[id] isa CallNode && tape.metas[id].type <: Tuple
+end
+
+function call_result_ids(tape::Tape, id::Int)
+    _is_multi_call(tape, id) || return [id]
+    types = fieldtypes(tape.metas[id].type)
+    ids = zeros(Int, length(types))
+    for (j, node) in enumerate(tape.nodes)
+        node isa ResultNode && node.producer.id == id || continue
+        1 <= node.index <= length(types) && ids[node.index] == 0 ||
+            throw(ArgumentError("Invalid or repeated result projection at %$j"))
+        tape.metas[j].type === types[node.index] &&
+            tape.metas[j].lifecycle == tape.metas[id].lifecycle ||
+            throw(ArgumentError("Result metadata disagrees with producer at %$j"))
+        ids[node.index] = j
+    end
+    all(!=(0), ids) || throw(ArgumentError("Missing result projection at %$id"))
+    return ids
+end
+
+function _result_birth(tape::Tape, id::Int, pos)
+    return pos[tape.nodes[id] isa ResultNode ? tape.nodes[id].producer.id : id]
+end
+
+function show_node(io::IO, ::Tape, n::ResultNode)
+    return print(io, "result %", n.producer.id, "[", n.index, "]")
+end
+
+function _require_single_result_calls(tape::Tape)
+    any(n -> n isa ResultNode, tape.nodes) && throw(
+        ArgumentError(
+            "Multi-result primitives require policy=:auto or an explicit Assignment; " *
+            "the legacy scheduler/planner does not support them",
+        ),
+    )
+    return nothing
 end

@@ -9,7 +9,7 @@ const _VARIANT_OUTPUT_RESIDENCES = (:single, :dual, :register)
 struct OrientationVariant{I<:Tuple,R<:Tuple,A<:Tuple}
     id::Symbol
     input_access::I
-    output_access::Symbol
+    output_access::Union{Symbol,Tuple}
     input_residences::R
     output_residences::Tuple{Symbol,Symbol,Symbol}
     body::Symbol
@@ -95,7 +95,7 @@ Return deterministic contracts for Float32 and Float64 hybrid matrix bodies.
 Operands must have matching element types. `:row`
 means RowAccess, `:col` ColAccess, and `:any` means broadcast-only input (either
 orientation, still subject to shape/mask rules). The result describes fresh dense
-outputs. Aliases are optional only at the listed operand positions in single/dual
+outputs; multi-result variants specify an output-access tuple in result order. Aliases are optional only at the listed operand positions in single/dual
 storage, with identical unwrapped shape/map; registers never alias tape operands.
 Candidate positions alone never authorize reuse: every other input overlapping the
 output must read the same pointwise element-to-lane/address map. In particular,
@@ -204,9 +204,7 @@ function orientation_variants(::typeof(logdet), A::Type)
 end
 
 """Emit a validated variant call; assignment/residence and alias validation belongs to M5."""
-function emit_variant(
-    v::OrientationVariant, dest::Symbol, args::Vector, types::Vector, D_MAX::Int
-)
+function emit_variant(v::OrientationVariant, dest, args::Vector, types::Vector, D_MAX::Int)
     1 <= D_MAX <= 32 || throw(ArgumentError("D_MAX must be in 1:32"))
     length(args) == length(types) || throw(ArgumentError("variant arity mismatch"))
     matrix_types = filter(t -> _variant_shape(t) !== nothing, types)
@@ -227,6 +225,10 @@ function emit_variant(
         (\)
     elseif v.shape_rule === :square_symmetric
         symmetric_part
+    elseif v.shape_rule === :qr_stack
+        qr_upper_stack
+    elseif v.shape_rule === :qr_blocks
+        qr_upper_blocks
     elseif v.shape_rule === :scalar_logdet
         logdet
     elseif startswith(String(v.id), "add")
@@ -242,6 +244,10 @@ function emit_variant(
     end
     dims = if v.shape_rule === :matmul
         (shapes[1][1], shapes[1][2], shapes[2][2], D_MAX)
+    elseif v.shape_rule === :qr_stack
+        (shapes[1][1], shapes[2][1], D_MAX)
+    elseif v.shape_rule === :qr_blocks
+        (shapes[1][1], shapes[3][1], D_MAX)
     elseif v.shape_rule in (:square_spd, :square_symmetric, :vector_solve)
         (shapes[1][1], D_MAX)
     elseif v.shape_rule === :triangular_solve
@@ -260,3 +266,26 @@ function emit_variant(
     )
 end
 
+function orientation_variants(::typeof(qr_upper_stack), A::Type, B::Type)
+    _variant_input_domain((A, B)) || return ()
+    r, n = _variant_shape(A)
+    _variant_shape(B) == (n, n) || return ()
+    return (
+        _orientation_variant(:qr_stack_row, (:row, :row), :row, :qr_stack),
+        _orientation_variant(:qr_stack_col, (:col, :col), :col, :qr_stack),
+    )
+end
+
+function orientation_variants(::typeof(qr_upper_blocks), A::Type, B::Type, C::Type)
+    _variant_input_domain((A, B, C)) || return ()
+    m, n = _variant_shape(B)[2], _variant_shape(B)[1]
+    _variant_shape(A) == (m, m) && _variant_shape(C) == (n, n) || return ()
+    return (
+        _orientation_variant(
+            :qr_blocks_row, (:row, :row, :row), (:row, :row, :row), :qr_blocks
+        ),
+        _orientation_variant(
+            :qr_blocks_col, (:col, :col, :col), (:col, :col, :col), :qr_blocks
+        ),
+    )
+end

@@ -67,6 +67,7 @@ function pool_kind(meta::NodeMeta)
 end
 
 function plan_memory(tape::Tape; order::AbstractVector{Int}=1:length(tape.nodes))
+    _require_single_result_calls(tape)
     N = length(tape.nodes)
     length(order) == N ||
         error("plan_memory: order length $(length(order)) ≠ tape length $N")
@@ -252,6 +253,7 @@ end
 node_refs(::InputNode) = NodeRef[]
 node_refs(::ConstNode) = NodeRef[]
 node_refs(n::CallNode) = n.args
+node_refs(n::ResultNode) = NodeRef[n.producer]
 node_refs(n::NewNode) = NodeRef[p.second for p in n.fields]
 
 function resolve_slot_owner(tape::Tape, ref::NodeRef)

@@ -7,7 +7,9 @@ Explicit host metadata for hybrid storage compilation. Matrix placements
 use `:single` (`:row` or `:col`), `:dual` (`:both`), or `:register` (`:row` or
 `:col`); input handles and shared inputs retain their assigned residence. Compute
 calls default to `:legacy`, which requires dual-access batched operands. Named
-orientation variants permit single or register storage. Wrapper metadata follows its
+orientation variants permit single or register storage. Multi-result calls default
+to their first registered variant, with independent dual outputs born together at
+the producer. Wrapper metadata follows its
 parent, swapping row/column for transpose. Register values are fresh SSA values:
 they have no shared slot; logical wrappers retain their parent ownership. `plan_memory` validates and snapshots the
 assignment before allocating independent single/dual pools.
@@ -80,9 +82,22 @@ function Assignment(
 )
     rs = Dict{Int,Symbol}()
     os = Dict{Int,Symbol}()
-    vs = Dict{Int,Symbol}(
-        i => :legacy for (i, n) in enumerate(tape.nodes) if n isa CallNode
-    )
+    vs = Dict{Int,Symbol}()
+    for (i, node) in enumerate(tape.nodes)
+        node isa CallNode || continue
+        vs[i] = :legacy
+        if _is_multi_call(tape, i)
+            candidates = orientation_variants(
+                node.fn, (tape.metas[r.id].type for r in node.args)...
+            )
+            isempty(candidates) && throw(
+                ArgumentError(
+                    "Unsupported multi-result primitive or operand shapes at %$i"
+                ),
+            )
+            vs[i] = first(candidates).id
+        end
+    end
     for (i, n) in enumerate(tape.nodes)
         m = tape.metas[i]
         _assignment_shape(m.type) === nothing && continue
@@ -194,6 +209,13 @@ function plan_memory(
     for (i, node) in enumerate(tape.nodes)
         all(r -> haskey(pos, r.id) && pos[r.id] < pos[i], node_refs(node)) ||
             throw(ArgumentError("Assignment violates dependency order at %$i"))
+        if node isa ResultNode
+            _is_multi_call(tape, node.producer.id) ||
+                throw(ArgumentError("Result %$i has no multi-result producer"))
+            call_result_ids(tape, node.producer.id)
+            (!haskey(a.residences, i) || a.residences[i] in (:single, :dual, :register)) ||
+                throw(ArgumentError("Result %$i needs fresh computed storage"))
+        end
         if haskey(a.residences, i)
             logicalshape = _assignment_shape(tape.metas[i].type)
             _variant_eltype(tape.metas[i].type) === T ||
@@ -329,7 +351,11 @@ function plan_memory(
             end
         end
         node isa CallNode || continue
+        outputs = call_result_ids(tape, i)
         variant = a.variants[i]
+        _is_multi_call(tape, i) &&
+            variant === :legacy &&
+            throw(ArgumentError("Multi-result primitive at %$i requires a named variant"))
         staging = node.fn === _load_to_single || _isplacement(node.fn) || _isstage(node.fn)
         if staging
             variant === :legacy ||
@@ -364,12 +390,21 @@ function plan_memory(
                 inputshapes[2]
             elseif v.shape_rule in (:matvec, :vector_solve)
                 (inputshapes[1][1],)
+            elseif v.shape_rule === :qr_stack
+                inputshapes[2]
+            elseif v.shape_rule === :qr_blocks
+                (inputshapes[1], (inputshapes[1][1], inputshapes[3][2]), inputshapes[3])
             elseif v.shape_rule === :scalar_logdet
                 ()
             else
                 inputshapes[1]
             end
-            shape(tape.metas[i].type) == outputshape ||
+            actualshape = if _is_multi_call(tape, i)
+                Tuple(shape(tape.metas[o].type) for o in outputs)
+            else
+                shape(tape.metas[i].type)
+            end
+            actualshape == outputshape ||
                 throw(ArgumentError("Variant output shape mismatch at %$i"))
             length(matrixargs) == length(v.input_access) ||
                 throw(ArgumentError("Variant operand mismatch"))
@@ -381,11 +416,15 @@ function plan_memory(
                     a.orientations[p] in (req, :both) ||
                     throw(ArgumentError("Variant input orientation mismatch at %$i"))
             end
-            if haskey(a.residences, i)
-                a.residences[i] in v.output_residences ||
+            accesses = v.output_access isa Tuple ? v.output_access : (v.output_access,)
+            length(outputs) == length(accesses) ||
+                throw(ArgumentError("Variant result count mismatch"))
+            for (out, access) in zip(outputs, accesses)
+                haskey(a.residences, out) || continue
+                a.residences[out] in v.output_residences ||
                     throw(ArgumentError("Variant output residence mismatch"))
-                a.orientations[i] in (v.output_access, :both) ||
-                    throw(ArgumentError("Variant output orientation mismatch at %$i"))
+                a.orientations[out] in (access, :both) ||
+                    throw(ArgumentError("Variant output orientation mismatch at %$out"))
             end
         end
     end
@@ -423,7 +462,7 @@ function plan_memory(
         width = _register_line_elements(
             _assignment_shape(tape.metas[i].type), a.orientations[i]
         )
-        push!(register_intervals, (pos[i], ownerlast[i], width))
+        push!(register_intervals, (_result_birth(tape, i, pos), ownerlast[i], width))
     end
     peak_register_elements = maximum(
         (
@@ -461,9 +500,9 @@ function plan_memory(
         owners[i] == i || continue
         if haskey(a.residences, i) && a.residences[i] in (:single, :dual)
             kind = a.residences[i] === :single ? :Ms : :Md
-            push!(intervals, (i, kind, pos[i], ownerlast[i]))
+            push!(intervals, (i, kind, _result_birth(tape, i, pos), ownerlast[i]))
         elseif meta.lifecycle == BATCHED && meta.type <: TraceVector && !(node isa NewNode)
-            push!(intervals, (i, :V, pos[i], ownerlast[i]))
+            push!(intervals, (i, :V, _result_birth(tape, i, pos), ownerlast[i]))
         end
     end
     owner_slots, counts = _allocate_owner_intervals(intervals)

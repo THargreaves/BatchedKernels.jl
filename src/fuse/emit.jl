@@ -305,3 +305,17 @@ function emit_primitive(
         Val(:symmetric_row), $dest, $(args[1]), d, Val(Int32($n)), Val(Int32($D_MAX))
     ))
 end
+
+# The standalone stack also works with legacy dual storage. Multi-result block
+# QR uses the hybrid planner because all result lifetimes start at its producer.
+function emit_primitive(
+    ::typeof(qr_upper_stack), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
+    candidates = orientation_variants(qr_upper_stack, types...)
+    isempty(candidates) &&
+        throw(ArgumentError("Unsupported QR stack shapes or element types"))
+    # Legacy storage keeps its established row-owned compute body. The hybrid
+    # registry also offers column-owned QR, so it no longer has a sole entry.
+    variant = only(v for v in candidates if v.id === :qr_stack_col)
+    return emit_variant(variant, dest, args, types, D_MAX)
+end

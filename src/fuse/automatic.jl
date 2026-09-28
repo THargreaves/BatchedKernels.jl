@@ -72,7 +72,15 @@ function automatic_assignment(tape::Tape; nthreads::Int=128)
                 for (p, access) in zip(matrixargs, candidate.input_access)
                     demand!(trial, p, access)
                 end
-                haskey(roots, i) && demand!(trial, i, candidate.output_access)
+                outputs = call_result_ids(tape, i)
+                accesses = if candidate.output_access isa Tuple
+                    candidate.output_access
+                else
+                    (candidate.output_access,)
+                end
+                for (out, access) in zip(outputs, accesses)
+                    haskey(roots, out) && demand!(trial, out, access)
+                end
                 # Minimize the number of elements promoted to shared storage.
                 # Stable registry order breaks ties; no shape threshold or timing.
                 score = sum(
