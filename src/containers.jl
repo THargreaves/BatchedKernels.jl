@@ -28,7 +28,8 @@ struct BatchedCuMatrix{T,D1,D2,A<:AbstractArray{T,3},V} <: AbstractVector{V}
 end
 function BatchedCuMatrix(data::A) where {T,A<:AbstractArray{T,3}}
     D1, D2 = size(data, 1), size(data, 2)
-    V = typeof(view(data, :, :, 1))
+    # Only the view type is needed; permit an empty batch without dereferencing it.
+    V = typeof(@inbounds view(data, :, :, 1))
     return BatchedCuMatrix{T,D1,D2,A,V}(data)
 end
 inner_shape(::Type{<:BatchedCuMatrix{T,D1,D2}}) where {T,D1,D2} = (D1, D2)
@@ -47,7 +48,7 @@ struct BatchedCuVector{T,D,A<:AbstractArray{T,2},V} <: AbstractVector{V}
 end
 function BatchedCuVector(data::A) where {T,A<:AbstractArray{T,2}}
     D = size(data, 1)
-    V = typeof(view(data, :, 1))
+    V = typeof(@inbounds view(data, :, 1))
     return BatchedCuVector{T,D,A,V}(data)
 end
 inner_shape(::Type{<:BatchedCuVector{T,D}}) where {T,D} = (D,)
@@ -61,9 +62,8 @@ Base.getindex(x::BatchedCuVector, i::Integer) = view(x.data, :, i)
 # BatchedCuScalar
 # -----------------------------------------------------------------------------
 #
-# One scalar per batch entry, backed by a length-N device vector. Output-only
-# in A3 (no top-level scalar input dispatch yet): produced by reductions and
-# returned by the broadcast surface.
+# One scalar per batch entry, backed by a length-N device vector. Reductions
+# produce these containers; they can also feed subsequent fused calls.
 
 struct BatchedCuScalar{T,A<:AbstractVector{T}} <: AbstractVector{T}
     data::A
@@ -148,6 +148,79 @@ struct BatchedStruct{T,C<:NamedTuple} <: AbstractVector{T}
     components::C
     batch_n::Int
 end
+"""
+    BatchedStruct(T, components::NamedTuple)
+
+Build a batch of composite values of type `T` from named batches of its fields.
+`T` may be a parametric struct type whose unresolved parameters appear directly
+as field types. Those parameters are filled from the component element types,
+without indexing or copying their storage. Fields sharing a parameter must have
+identical element types; parameter bounds remain enforced.
+Components must have the declared field names and equal lengths. Named fields
+are reordered to declaration order, and integer fields retain their exact types.
+
+A concrete `T` preserves its declared field types, including abstract fields.
+Supply a concrete type for nested, value or unused parameters that cannot be
+obtained from a direct field type. No constructor inference, type promotion or
+custom constructor computation is performed. At least one field is required
+so the batch length can be inferred.
+"""
+function BatchedStruct(::Type{T}, components::NamedTuple) where {T}
+    body = Base.unwrap_unionall(T)
+    isstructtype(body) && !(body <: Tuple) ||
+        throw(ArgumentError("BatchedStruct requires a composite struct type"))
+    names = fieldnames(body)
+    isempty(names) && throw(ArgumentError("cannot infer batch length for a fieldless struct"))
+    length(components) == length(names) && all(name -> haskey(components, name), names) ||
+        throw(ArgumentError("components must have the fields $names"))
+    ordered = NamedTuple{names}(components)
+    all(c -> c isa AbstractVector, values(ordered)) ||
+        throw(ArgumentError("each composite component must be a batch vector"))
+    n = length(first(ordered))
+    all(c -> length(c) == n, values(ordered)) ||
+        throw(DimensionMismatch("composite component batch lengths differ"))
+    foreach(Base.require_one_based_indexing, values(ordered))
+    types = map(eltype, values(ordered))
+    R = _composite_constructor_type(T, Tuple{types...})
+    isconcretetype(R) && R <: T || throw(
+        ArgumentError("cannot determine one concrete element type for $T; specify it explicitly"),
+    )
+    all(type <: fieldtype(R, name) for (name, type) in zip(names, types)) || throw(
+        ArgumentError("component element types do not match the fields of $R"),
+    )
+    return BatchedStruct{R,typeof(ordered)}(ordered, n)
+end
+
+# This is declared-type substitution, not inference of a constructor's return
+# type. Generate only from type metadata so the chosen element type is a literal.
+@generated function _composite_constructor_type(::Type{T}, ::Type{Types}) where {T,Types<:Tuple}
+    isconcretetype(T) && return :($T)
+    body = Base.unwrap_unionall(T)
+    params = Any[body.parameters...]
+    fields = fieldtypes(body)
+    for (i, parameter) in enumerate(params)
+        parameter isa TypeVar || continue
+        positions = findall(field -> field === parameter, fields)
+        if isempty(positions)
+            message = "Parameter $(parameter.name) is not a direct field type of $T; supply a concrete type"
+            return :(throw(ArgumentError($message)))
+        end
+        replacement = Types.parameters[first(positions)]
+        if !all(j -> Types.parameters[j] === replacement, positions)
+            message = "Fields sharing parameter $(parameter.name) need identical component element types"
+            return :(throw(ArgumentError($message)))
+        end
+        params[i] = replacement
+    end
+    result = try
+        Core.apply_type(Base.typename(body).wrapper, params...)
+    catch err
+        err isa TypeError || rethrow()
+        return :(throw(ArgumentError("component element types violate declared parameter bounds")))
+    end
+    return :($result)
+end
+
 Base.eltype(::Type{<:BatchedStruct{T}}) where {T} = T
 Base.size(x::BatchedStruct) = (x.batch_n,)
 Base.length(x::BatchedStruct) = x.batch_n
@@ -171,4 +244,36 @@ function Base.show(io::IO, ::MIME"text/plain", x::BatchedStruct{T}) where {T}
     for (k, v) in pairs(x.components)
         println(io, "  .", k, " :: ", typeof(v))
     end
+end
+
+# Rebuild a parametric struct from its declared field-to-parameter relationships.
+# Concrete parameter values are not identities: e.g. H and R may both be Matrix
+# while their distinct parameters must become differently shaped TraceMatrices.
+function _replace_composite_field_types(::Type{T}, replacements) where {T}
+    wrapper = Base.typename(T).wrapper
+    body = wrapper
+    variables = TypeVar[]
+    while body isa UnionAll
+        push!(variables, body.var)
+        body = body.body
+    end
+    params = Any[T.parameters...]
+    for (i, variable) in enumerate(variables)
+        replacement = nothing
+        for name in fieldnames(body)
+            if fieldtype(body, name) === variable && haskey(replacements, name)
+                candidate = replacements[name]
+                if replacement !== nothing && replacement !== candidate
+                    throw(
+                        ArgumentError(
+                            "Fields sharing type parameter $(variable.name) need matching traced types",
+                        ),
+                    )
+                end
+                replacement = candidate
+            end
+        end
+        replacement === nothing || (params[i] = replacement)
+    end
+    return Core.apply_type(wrapper, params...)
 end

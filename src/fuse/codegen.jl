@@ -292,7 +292,7 @@ function _codegen(
         )
     end
 
-    node_view_sym = Dict{Int,Symbol}()
+    node_view_sym = copy(scalar_node_sym)
     for id in shared_input_ids
         node_view_sym[id] = shared_input_view_syms[id]
     end
@@ -392,6 +392,17 @@ function _codegen(
         node = tape.nodes[node_id]
         meta = tape.metas[node_id]
         (node isa InputNode && meta.lifecycle == BATCHED) || return nothing
+        if meta.type <: TraceScalar
+            global_in = input_sym[node_id]
+            dest = scalar_node_sym[node_id]
+            # Uniform within each matrix group; guarded for partial batches.
+            push!(stmts, :(
+                if active
+                    $dest = @inbounds $global_in[grid_mtrx_id]
+                end
+            ))
+            return push!(loaded, node_id)
+        end
         meta.type <: TraceVector || return nothing
         slot = planner.slots[node_id]
         global_in = input_sym[node_id]

@@ -148,20 +148,7 @@ trace_element_type(::Type{SharedValue{T}}) where {T} = T
         traced_by_field[name] = trace_element_type(ct)
     end
 
-    base = Base.typename(T).wrapper
-    new_params = Any[]
-    for param in T.parameters
-        replaced = false
-        for f in fnames
-            if fieldtype(T, f) === param && haskey(traced_by_field, f)
-                push!(new_params, traced_by_field[f])
-                replaced = true
-                break
-            end
-        end
-        replaced || push!(new_params, param)
-    end
-    result = base{new_params...}
+    result = _replace_composite_field_types(T, traced_by_field)
     return :($result)
 end
 
@@ -341,6 +328,9 @@ end
 function input_spec(x::SharedCuMatrix)
     return LeafInput(trace_element_type(typeof(x)), SHARED)
 end
+function input_spec(x::BatchedCuScalar)
+    return LeafInput(trace_element_type(typeof(x)), BATCHED)
+end
 function input_spec(x::BatchedCuVector)
     return LeafInput(trace_element_type(typeof(x)), BATCHED)
 end
@@ -392,7 +382,7 @@ function _reconstruct_trace_arg!(tape::Tape, spec::LeafInput)
         tape, InputNode(length(tape.inputs) + 1), NodeMeta(spec.trace_type, spec.lifecycle)
     )
     push!(tape.inputs, ref)
-    (spec.trace_type <: TraceMatrix || spec.trace_type <: TraceVector) ||
+    (spec.trace_type <: Union{TraceMatrix,TraceVector,TraceScalar}) ||
         error("trace: leaf input type $(spec.trace_type) not supported")
     # Batched matrix inputs are loaded via LoadNode (global → single layout)
     # and TransferNode (single → dual layout). The downstream user code

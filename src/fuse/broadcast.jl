@@ -15,6 +15,7 @@
 struct BatchedStyle <: Broadcast.BroadcastStyle end
 Base.BroadcastStyle(::Type{<:BatchedCuMatrix}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:BatchedCuVector}) = BatchedStyle()
+Base.BroadcastStyle(::Type{<:BatchedCuScalar}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:SharedCuMatrix}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:SharedCuVector}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:SharedValue}) = BatchedStyle()
@@ -47,8 +48,8 @@ end
 
 function _infer_D_MAX_T_from_spec!(D_ref::Ref, T_ref::Ref, spec::LeafInput)
     TT = spec.trace_type
-    (TT <: TraceMatrix || TT <: TraceVector) || return nothing
-    leaf_max = maximum(shape(TT))
+    (TT <: Union{TraceMatrix,TraceVector,TraceScalar}) || return nothing
+    leaf_max = TT <: TraceScalar ? 1 : maximum(shape(TT))
     t_param = eltype(TT)
     if D_ref[] === nothing
         D_ref[] = leaf_max
@@ -82,7 +83,10 @@ function _collect_runtime_inputs!(
     return nothing
 end
 function _collect_runtime_inputs!(
-    batched_args::Vector, shared_args::Vector, N_ref::Ref, x::BatchedCuVector
+    batched_args::Vector,
+    shared_args::Vector,
+    N_ref::Ref,
+    x::Union{BatchedCuVector,BatchedCuScalar},
 )
     _set_or_check_batch_n!(N_ref, batch_size(x))
     push!(batched_args, x.data)
@@ -91,19 +95,19 @@ end
 function _collect_runtime_inputs!(
     batched_args::Vector, shared_args::Vector, N_ref::Ref, x::SharedCuMatrix
 )
-    N_ref[] !== nothing && _set_or_check_batch_n!(N_ref, batch_size(x))
+    _set_or_check_batch_n!(N_ref, batch_size(x))
     push!(shared_args, x.data)
     return nothing
 end
 function _collect_runtime_inputs!(
     batched_args::Vector, shared_args::Vector, N_ref::Ref, x::SharedCuVector
 )
-    N_ref[] !== nothing && _set_or_check_batch_n!(N_ref, batch_size(x))
+    _set_or_check_batch_n!(N_ref, batch_size(x))
     push!(shared_args, x.data)
     return nothing
 end
 function _collect_runtime_inputs!(::Vector, ::Vector, N_ref::Ref, x::SharedValue)
-    N_ref[] !== nothing && _set_or_check_batch_n!(N_ref, batch_size(x))
+    _set_or_check_batch_n!(N_ref, batch_size(x))
     return nothing
 end
 function _collect_runtime_inputs!(
@@ -371,22 +375,10 @@ function _runtime_composite_type(::Type{T}, components::NamedTuple) where {T}
         elts = ntuple(i -> _component_element_type(components[i]), length(components))
         return Tuple{elts...}
     end
-    base = Base.typename(T).wrapper
-    new_params = Any[]
-    for p in T.parameters
-        replaced = false
-        for f in fieldnames(T)
-            if hasfield(T, f)
-                if fieldtype(T, f) === p
-                    push!(new_params, _component_element_type(components[f]))
-                    replaced = true
-                    break
-                end
-            end
-        end
-        replaced || push!(new_params, p)
-    end
-    return base{new_params...}
+    replacements = Dict(
+        name => _component_element_type(value) for (name, value) in pairs(components)
+    )
+    return _replace_composite_field_types(T, replacements)
 end
 
 _component_element_type(c::BatchedCuMatrix{T,D1,D2}) where {T,D1,D2} = AbstractMatrix{T}
@@ -426,24 +418,20 @@ end
     fnames = fieldnames(TT)
     isempty(fnames) && return :($TT)
     sfs = Type[scalar_form(fieldtype(TT, f)) for f in fnames]
-    base = Base.typename(TT).wrapper
-    new_params = Any[]
-    for p in TT.parameters
-        replaced = false
-        for (i, f) in enumerate(fnames)
-            if fieldtype(TT, f) === p
-                push!(new_params, sfs[i])
-                replaced = true
-                break
-            end
-        end
-        replaced || push!(new_params, p)
-    end
-    result = base{new_params...}
+    result = _replace_composite_field_types(TT, Dict(zip(fnames, sfs)))
     return :($result)
 end
 
 # Leaf batchify_type rules
+# A failed scalar trace inference should report an unsupported graph rather
+# than the ambiguous bottom-type dispatch among the output mapping methods.
+function batchify_type(::Type{Union{}})
+    throw(
+        ArgumentError(
+            "Scalar function has no supported return type for these traced inputs"
+        ),
+    )
+end
 batchify_type(::Type{T}) where {T<:Union{Number,AbstractChar,Bool,Nothing}} = SharedValue{T}
 function batchify_type(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N}
     return BatchedCuMatrix{
