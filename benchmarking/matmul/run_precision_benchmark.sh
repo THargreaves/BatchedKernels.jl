@@ -6,9 +6,8 @@ cd "$repo_root"
 julia_bin="${JULIA_BIN:-julia}"
 output_dir="${RESULT_DIR:-$repo_root/benchmarking/matmul/precision_runs/$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$output_dir"
-git rev-parse HEAD > "$output_dir/revision.txt"
-git status --short > "$output_dir/worktree_status.txt"
-git diff HEAD -- src benchmarking/matmul > "$output_dir/source_changes.patch"
+source benchmarking/run_environment.sh
+record_run_environment "$output_dir" "$julia_bin"
 export OPENBLAS_NUM_THREADS=1
 export MODE="${MODE:-timing}"
 export RESULTS="$output_dir/results.csv"
