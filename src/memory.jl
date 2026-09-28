@@ -1,9 +1,20 @@
 import Base: @propagate_inbounds
 import LinearAlgebra: AdjOrTransAbsMat, wrapperop
 using KernelAbstractions.Extras: @unroll
+using StaticArrays: MVector
 
 export DualAccessMatrix,
     SingleAccessMatrix,
+    RegisterMatrix,
+    Orientation,
+    RowOriented,
+    ColOriented,
+    BothOriented,
+    AccessConvention,
+    RowAccess,
+    ColAccess,
+    orientation,
+    flip,
     SharedMatrix,
     IAddSubSetterMatrix,
     IAddSubGetterMatrix,
@@ -12,9 +23,11 @@ export DualAccessMatrix,
 export BlockMatrix_2_1, BlockMatrixLowerTrig_2_2
 export intermediate_layout_load!, intermediate_layout_write!
 export interm_to_dual_transfer!, dual_to_interm_transfer!
+export single_to_register!, register_to_single!
 export shared_matrix_load!, shared_vector_load!
 export vector_load!, vector_write!
 export scalar_stage!, scalar_write!
+export single_region_elems, dual_region_elems
 
 """
 Abstraction of shared memory layout for a matrix accessible both column and row-wise.
@@ -403,44 +416,345 @@ end
     return nothing
 end
 
-struct SingleAccessMatrix{T,pad_interval} <: AbstractMatrix{T}
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}
+"""Physical ownership of matrix entries, independent of an operation's access convention."""
+abstract type Orientation end
+struct RowOriented <: Orientation end
+struct ColOriented <: Orientation end
+struct BothOriented <: Orientation end
+
+"""Logical indexing convention selected statically by a compute operation."""
+abstract type AccessConvention end
+struct RowAccess <: AccessConvention end
+struct ColAccess <: AccessConvention end
+
+@inline flip(::RowOriented) = ColOriented()
+@inline flip(::ColOriented) = RowOriented()
+@inline flip(::BothOriented) = BothOriented()
+@inline flip(::RowAccess) = ColAccess()
+@inline flip(::ColAccess) = RowAccess()
+
+@inline function _validate_compute_shape(::Val{M}, ::Val{N}, ::Val{D}) where {M,N,D}
+    (M isa Integer && N isa Integer && D isa Integer && 1 <= M <= D <= 32 && 1 <= N <= D) ||
+        throw(ArgumentError("compute layouts require 1 <= M,N <= D_MAX <= 32"))
+    return nothing
+end
+
+@inline function _single_pad_interval(::Val{D}) where {D}
+    d = Int32(D)
+    return (32i32 ÷ (d & -d)) * d
+end
+
+# The last stored element determines the footprint; no trailing pad is necessary.
+@inline function _single_warp_stride(::Val{D}) where {D}
+    _validate_compute_shape(Val(D), Val(D), Val(D))
+    d = Int32(D)
+    q = (32i32 ÷ d) * d * d
+    return q + (q - 1i32) ÷ _single_pad_interval(Val(D))
+end
+
+@inline function _validate_layout_threads(::Val{nthreads}) where {nthreads}
+    (nthreads isa Integer && 32 <= nthreads <= 1024 && nthreads % 32 == 0) ||
+        throw(ArgumentError("layout regions require 32..1024 threads in complete warps"))
+    return nothing
+end
+
+"""Element count of a new padded single-compute region for a complete thread block."""
+@inline function single_region_elems(::Val{D}, ::Val{nthreads}) where {D,nthreads}
+    _validate_layout_threads(Val(nthreads))
+    return _single_warp_stride(Val(D)) * (Int32(nthreads) ÷ 32i32)
+end
+
+@inline function _dual_warp_stride(::Val{D}) where {D}
+    _validate_compute_shape(Val(D), Val(D), Val(D))
+    d = Int32(D)
+    n = 32i32 ÷ d
+    padding = mod(n - mod(n * d, 32i32), 32i32)
+    return n * d * d + padding * (d - 1i32)
+end
+
+"""Element count of an existing dual-layout region for a complete thread block."""
+@inline function dual_region_elems(::Val{D}, ::Val{nthreads}) where {D,nthreads}
+    _validate_layout_threads(Val(nthreads))
+    return _dual_warp_stride(Val(D)) * (Int32(nthreads) ÷ 32i32)
+end
+
+@inline _single_raw_index(
+    ::Val{D}, ::RowOriented, inner::Int32, i::Int32, j::Int32
+) where {D} = inner + (j - 1i32) * Int32(D) + i - 1i32
+@inline _single_raw_index(
+    ::Val{D}, ::ColOriented, inner::Int32, i::Int32, j::Int32
+) where {D} = inner + (i - 1i32) * Int32(D) + j - 1i32
+
+# Offsets are zero-based; the returned backing-storage index is one-based.
+@inline function _single_address(
+    ::Val{D}, o, outer::Int32, inner::Int32, i::Int32, j::Int32
+) where {D}
+    r = _single_raw_index(Val(D), o, inner, i, j)
+    return outer + r + r ÷ _single_pad_interval(Val(D)) + 1i32
+end
+
+@inline function _single_transfer_address(
+    ::Val{D}, o, wid::Int32, mid::Int32, i::Int32, j::Int32
+) where {D}
+    return _single_address(
+        Val(D),
+        o,
+        (wid - 1i32) * _single_warp_stride(Val(D)),
+        (mid - 1i32) * Int32(D) * Int32(D),
+        i,
+        j,
+    )
+end
+
+"""
+    SingleAccessMatrix(storage, Val(M), Val(N), Val(D_MAX), orientation, wid, matrix_id)
+
+A logical M×N matrix in a padded D_MAX×D_MAX compute tile. Row orientation stores
+columns consecutively; col orientation transposes the physical map. `wid` and
+`matrix_id` are one-based warp and within-warp matrix indices. Storage is concrete
+(one-based shared device storage in kernels, or a one-based vector for CPU layout
+validation).
+
+This map is separate from the legacy packed rectangular intermediate transfers.
+"""
+struct SingleAccessMatrix{T,M,N,D,O<:Union{RowOriented,ColOriented},S<:AbstractVector{T}} <:
+       AbstractMatrix{T}
+    shmem::S
     outer_offset::Int32
     inner_offset::Int32
+
+    @inline function SingleAccessMatrix(
+        shmem::S, ::Val{M}, ::Val{N}, ::Val{D}, ::O, wid::Int32, matrix_id::Int32
+    ) where {T,M,N,D,O<:Union{RowOriented,ColOriented},S<:AbstractVector{T}}
+        _validate_compute_shape(Val(M), Val(N), Val(D))
+        d = Int32(D)
+        stride = _single_warp_stride(Val(D))
+        @boundscheck begin
+            Base.require_one_based_indexing(shmem)
+            (wid >= 1i32 && 1i32 <= matrix_id <= 32i32 ÷ d) ||
+                throw(ArgumentError("invalid warp or within-warp matrix index"))
+            wid * stride <= length(shmem) || throw(BoundsError(shmem, wid * stride))
+        end
+        return new{T,M,N,D,O,S}(shmem, (wid - 1i32) * stride, (matrix_id - 1i32) * d * d)
+    end
 end
 
-# TODO: shouldn't be baking in the warp_matrix_id if we want to use it with global memory
-"""
-A single access matrix view into shared memory.
+@inline Base.size(::SingleAccessMatrix{T,M,N}) where {T,M,N} = (Int(M), Int(N))
+@inline Base.IndexStyle(::Type{<:SingleAccessMatrix}) = IndexCartesian()
+@inline orientation(::Type{<:SingleAccessMatrix{T,M,N,D,O}}) where {T,M,N,D,O} = O()
+@inline orientation(::Type{<:DualAccessMatrix}) = BothOriented()
 
-Rows of the matrices can be accessed in parallel without bank conflicts. Padding is included
-between warps to be compatible with the dual access layout without the need for
-synchronisation. 
-"""
-function SingleAccessMatrix(
-    shmem::CuDeviceVector{T,CUDA.AS.Shared}, ::Val{D}, wid::Int32, warp_matrix_id::Int32
-) where {T,D}
-    n_mats_per_warp = 32i32 ÷ D
-
-    dual_access_padding = mod(n_mats_per_warp - mod(n_mats_per_warp * D, 32i32), 32i32)
-    dual_access_stride = (n_mats_per_warp * D + dual_access_padding) * D
-
-    outer_offset = dual_access_stride * (wid - 1i32)
-    inner_offset = (warp_matrix_id - 1i32) * D^2
-
-    pad_interval = div(32i32, D & -D) * D
-
-    return SingleAccessMatrix{T,pad_interval}(shmem, outer_offset, inner_offset)
+@inline function _single_index(
+    A::SingleAccessMatrix{T,M,N,D,O}, i::Int32, j::Int32
+) where {T,M,N,D,O}
+    return _single_address(Val(D), O(), A.outer_offset, A.inner_offset, i, j)
 end
 
-# TODO: replace div with magic number
 @propagate_inbounds @inline function Base.getindex(
-    A::SingleAccessMatrix{T,pad_interval}, i::Int32
-) where {T,pad_interval}
-    warp_idx = A.inner_offset + i
-    padding = (warp_idx - 1i32) ÷ pad_interval
-    return A.shmem[A.outer_offset + warp_idx + padding] = v
+    A::SingleAccessMatrix, i::Integer, j::Integer
+)
+    @boundscheck checkbounds(A, i, j)
+    return @inbounds A.shmem[_single_index(A, Int32(i), Int32(j))]
 end
+@propagate_inbounds @inline function Base.setindex!(
+    A::SingleAccessMatrix, v, i::Integer, j::Integer
+)
+    @boundscheck checkbounds(A, i, j)
+    @inbounds A.shmem[_single_index(A, Int32(i), Int32(j))] = v
+    return A
+end
+
+@inline _register_line_width(::Val{M}, ::Val{N}, ::RowOriented) where {M,N} = M
+@inline _register_line_width(::Val{M}, ::Val{N}, ::ColOriented) where {M,N} = N
+
+# base is the number of lanes before the group: CUDA.jl shuffles use base+j.
+@propagate_inbounds @inline function _register_group_mask(::Val{D}, base::Int32) where {D}
+    _validate_compute_shape(Val(D), Val(D), Val(D))
+    @boundscheck begin
+        (0i32 <= base <= 32i32 - Int32(D) && base % Int32(D) == 0i32) || throw(
+            ArgumentError("register base must start a complete D_MAX-wide lane group")
+        )
+    end
+    return (typemax(UInt32) >>> (32i32 - Int32(D))) << base
+end
+
+"""
+    RegisterMatrix(mv, Val(M), Val(N), Val(D_MAX), orientation, base, mask, d)
+    RegisterMatrix{T}(Val(M), Val(N), Val(D_MAX), orientation, base, d)
+
+A lane's owned line of a logical M×N matrix. Row orientation needs M registers and
+col orientation N registers. `base` is zero-based and `d` one-based within the group;
+`mask` must name exactly that complete group. The allocating constructor initializes
+all offered entries to zero, including entries in lanes without a logical line.
+
+Runtime base/mask/d checks are bounds checks. An `@inbounds` caller must first prove
+that base starts a complete aligned D_MAX-wide group, mask covers exactly that group,
+and 1 <= d <= D_MAX. This permits kernels with proven geometry to omit exception
+paths that can otherwise require local stack memory. Shape and line-width validation
+remain unconditional compile-time checks.
+
+There is deliberately no general indexing implementation: cross-lane access requires
+the explicit collective accessors (`ours`, `ours_write!`, and `theirs`).
+"""
+struct RegisterMatrix{T,M,N,D,O<:Union{RowOriented,ColOriented},L} <: AbstractMatrix{T}
+    mv::MVector{L,T}
+    base::Int32
+    mask::UInt32
+    d::Int32
+
+    @propagate_inbounds @inline function RegisterMatrix(
+        mv::MVector{L,T},
+        ::Val{M},
+        ::Val{N},
+        ::Val{D},
+        o::O,
+        base::Int32,
+        mask::UInt32,
+        d::Int32,
+    ) where {T,M,N,D,O<:Union{RowOriented,ColOriented},L}
+        _validate_compute_shape(Val(M), Val(N), Val(D))
+        L == _register_line_width(Val(M), Val(N), o) ||
+            throw(ArgumentError("register line width does not match shape and orientation"))
+        @boundscheck begin
+            mask == _register_group_mask(Val(D), base) ||
+                throw(ArgumentError("register mask must cover exactly its lane group"))
+            1i32 <= d <= Int32(D) || throw(ArgumentError("invalid within-group lane index"))
+        end
+        return new{T,M,N,D,O,L}(mv, base, mask, d)
+    end
+end
+
+@propagate_inbounds @inline function RegisterMatrix{T}(
+    ::Val{M}, ::Val{N}, ::Val{D}, o::Union{RowOriented,ColOriented}, base::Int32, d::Int32
+) where {T,M,N,D}
+    _validate_compute_shape(Val(M), Val(N), Val(D))
+    # StaticArrays/ntuple require Int lengths, even when device dims are Val{Int32}.
+    width = Int(_register_line_width(Val(M), Val(N), o))
+    mv = MVector{width,T}(ntuple(_ -> zero(T), Val(width)))
+    return RegisterMatrix(
+        mv, Val(M), Val(N), Val(D), o, base, _register_group_mask(Val(D), base), d
+    )
+end
+
+@inline Base.size(::RegisterMatrix{T,M,N}) where {T,M,N} = (Int(M), Int(N))
+@inline Base.IndexStyle(::Type{<:RegisterMatrix}) = IndexCartesian()
+@inline orientation(::Type{<:RegisterMatrix{T,M,N,D,O}}) where {T,M,N,D,O} = O()
+@inline orientation(A::Union{SingleAccessMatrix,DualAccessMatrix,RegisterMatrix}) =
+    orientation(typeof(A))
+
+# This shared-memory transfer reads a different logical line in each lane. Use
+# indexed loads: `theirs` promises group-uniform indices, even for shared sources.
+@inline function single_to_register!(
+    dest::RegisterMatrix{T,M,N,D,RowOriented}, source::SingleAccessMatrix{T,M,N,D}
+) where {T,M,N,D}
+    @unroll for k in 1i32:Int32(M)
+        @inbounds dest.mv[k] = dest.d <= Int32(N) ? source[k, dest.d] : zero(T)
+    end
+    return dest
+end
+@inline function single_to_register!(
+    dest::RegisterMatrix{T,M,N,D,ColOriented}, source::SingleAccessMatrix{T,M,N,D}
+) where {T,M,N,D}
+    @unroll for k in 1i32:Int32(N)
+        @inbounds dest.mv[k] = dest.d <= Int32(M) ? source[dest.d, k] : zero(T)
+    end
+    return dest
+end
+
+"""
+    register_to_single!(dest, source, d)
+
+Materialize a logical source view into an oriented single-access tile. A source
+with the matching effective orientation uses direct owned-line accesses, retaining
+audited wrapper semantics; an opposite orientation uses uniform full-group
+broadcasts. The caller invokes this only for complete active matrix groups.
+"""
+@inline function register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,RowOriented}, source, d::Int32
+) where {T,M,N,D}
+    return _register_to_single!(dest, source, d, orientation(source))
+end
+@inline function register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,ColOriented}, source, d::Int32
+) where {T,M,N,D}
+    return _register_to_single!(dest, source, d, orientation(source))
+end
+
+# Oriented logical wrappers retain the direct line copy whenever their effective
+# orientation matches the staging tile. `ours` supplies their triangular and
+# transpose semantics. The opposite-orientation methods below materialize through
+# uniform broadcasts.
+@inline function _register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,RowOriented}, source, d::Int32, ::RowOriented
+) where {T,M,N,D}
+    if d <= Int32(N)
+        @unroll for k in 1i32:Int32(M)
+            ours_write!(dest, k, d, ours(source, k, d, RowAccess()), RowAccess())
+        end
+    end
+    return dest
+end
+@inline function _register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,ColOriented}, source, d::Int32, ::ColOriented
+) where {T,M,N,D}
+    if d <= Int32(M)
+        @unroll for k in 1i32:Int32(N)
+            ours_write!(dest, k, d, ours(source, k, d, ColAccess()), ColAccess())
+        end
+    end
+    return dest
+end
+
+@inline function _register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,RowOriented}, source, d::Int32, ::Orientation
+) where {T,M,N,D}
+    @unroll for j in 1i32:Int32(N)
+        @unroll for i in 1i32:Int32(M)
+            value = theirs(source, i, j)
+            if d == j
+                ours_write!(dest, i, d, value, RowAccess())
+            end
+        end
+    end
+    return dest
+end
+@inline function _register_to_single!(
+    dest::SingleAccessMatrix{T,M,N,D,ColOriented}, source, d::Int32, ::Orientation
+) where {T,M,N,D}
+    @unroll for i in 1i32:Int32(M)
+        @unroll for j in 1i32:Int32(N)
+            value = theirs(source, i, j)
+            if d == i
+                ours_write!(dest, j, d, value, ColAccess())
+            end
+        end
+    end
+    return dest
+end
+
+# Traits describe wrapper ownership only; logical wrapper accessors are separate.
+@inline orientation(::Type{<:Adjoint{T,P}}) where {T,P} = flip(orientation(P))
+@inline orientation(::Type{<:Transpose{T,P}}) where {T,P} = flip(orientation(P))
+@inline orientation(
+    ::Type{
+        <:Union{
+            LowerTriangular{T,P},
+            UpperTriangular{T,P},
+            UnitLowerTriangular{T,P},
+            UnitUpperTriangular{T,P},
+        },
+    },
+) where {T,P} = orientation(P)
+@inline orientation(
+    A::Union{
+        Adjoint,
+        Transpose,
+        LowerTriangular,
+        UpperTriangular,
+        UnitLowerTriangular,
+        UnitUpperTriangular,
+    },
+) = orientation(typeof(A))
 
 #######################
 #### SHARED MATRIX ####
@@ -467,6 +781,9 @@ function SharedMatrix(
     pad_interval = div(32i32, D1 & -D1) * D1
     return SharedMatrix{T,D1,D2,pad_interval}(shmem)
 end
+
+@inline orientation(::Type{<:SharedMatrix}) = BothOriented()
+@inline orientation(A::SharedMatrix) = orientation(typeof(A))
 
 Base.@propagate_inbounds @inline function Base.getindex(
     A::SharedMatrix{T,D1,D2,pad_interval}, i::Int32, j::Int32
@@ -497,6 +814,9 @@ end
 Abstract DualAccessMatrix wrapper type
 """
 abstract type DualAccessMatrixWrapper{T,D} <: AbstractMatrix{T} end
+
+@inline orientation(::Type{<:DualAccessMatrixWrapper}) = BothOriented()
+@inline orientation(A::DualAccessMatrixWrapper) = orientation(typeof(A))
 
 Base.parent(A::DualAccessMatrixWrapper{T,D}) where {T,D} = A.parent
 Base.size(A::DualAccessMatrixWrapper{T,D}) where {T,D} = size(parent(A))
@@ -531,10 +851,36 @@ end
 """
 Wrapper op for I - A
 """
-struct IAddSubGetterMatrix{T,D} <: DualAccessMatrixWrapper{T,D}
-    parent::DualAccessMatrix{T,D}
+struct IAddSubGetterMatrix{T,D,P<:AbstractMatrix{T}} <: AbstractMatrix{T}
+    parent::P
     a::T
     b::T
+end
+
+@inline function IAddSubGetterMatrix(A::DualAccessMatrix{T,D}, a::T, b::T) where {T,D}
+    return IAddSubGetterMatrix{T,D,typeof(A)}(A, a, b)
+end
+@inline function IAddSubGetterMatrix(A::AbstractMatrix{T}, a::T, b::T) where {T}
+    return IAddSubGetterMatrix{T,size(A, 1),typeof(A)}(A, a, b)
+end
+@inline Base.parent(A::IAddSubGetterMatrix) = A.parent
+@inline Base.size(A::IAddSubGetterMatrix) = size(parent(A))
+@inline Base.IndexStyle(::Type{<:IAddSubGetterMatrix}) = IndexCartesian()
+@inline orientation(::Type{<:IAddSubGetterMatrix{T,D,P}}) where {T,D,P} = orientation(P)
+@inline orientation(A::IAddSubGetterMatrix) = orientation(typeof(A))
+
+@propagate_inbounds @inline function Base.getindex(
+    A::IAddSubGetterMatrix, i::Integer, j::Integer
+)
+    return wrapper_get(A, parent(A)[i, j], Int32(i), Int32(j))
+end
+
+# Preserve the old dual-backed getter's raw write behavior only. New generalized
+# getter wrappers are read-only through the explicit compute-accessor interface.
+@propagate_inbounds @inline function Base.setindex!(
+    A::IAddSubGetterMatrix{T,D,P}, v::T, i::Int32, j::Int32
+) where {T,D,P<:DualAccessMatrix}
+    return parent(A)[i, j] = v
 end
 
 Base.@propagate_inbounds @inline function wrapper_get(
@@ -543,10 +889,34 @@ Base.@propagate_inbounds @inline function wrapper_get(
     return (i == j) * one(T) * A.a + A.b * v
 end
 
-struct IAddSubSetterMatrix{T,D} <: DualAccessMatrixWrapper{T,D}
-    parent::DualAccessMatrix{T,D}
+"""Write-transform wrapper: store `(i == j)*a + b*v`, read the parent unchanged."""
+struct IAddSubSetterMatrix{T,D,P<:AbstractMatrix{T}} <: AbstractMatrix{T}
+    parent::P
     a::T
     b::T
+end
+
+@inline function IAddSubSetterMatrix(A::DualAccessMatrix{T,D}, a::T, b::T) where {T,D}
+    return IAddSubSetterMatrix{T,D,typeof(A)}(A, a, b)
+end
+@inline function IAddSubSetterMatrix(A::AbstractMatrix{T}, a::T, b::T) where {T}
+    return IAddSubSetterMatrix{T,size(A, 1),typeof(A)}(A, a, b)
+end
+@inline Base.parent(A::IAddSubSetterMatrix) = A.parent
+@inline Base.size(A::IAddSubSetterMatrix) = size(parent(A))
+@inline Base.IndexStyle(::Type{<:IAddSubSetterMatrix}) = IndexCartesian()
+@inline orientation(::Type{<:IAddSubSetterMatrix{T,D,P}}) where {T,D,P} = orientation(P)
+@inline orientation(A::IAddSubSetterMatrix) = orientation(typeof(A))
+
+@propagate_inbounds @inline function Base.getindex(
+    A::IAddSubSetterMatrix, i::Integer, j::Integer
+)
+    return parent(A)[i, j]
+end
+@propagate_inbounds @inline function Base.setindex!(
+    A::IAddSubSetterMatrix{T}, v::T, i::Integer, j::Integer
+) where {T}
+    return parent(A)[i, j] = wrapper_set(A, v, Int32(i), Int32(j))
 end
 
 Base.@propagate_inbounds @inline function wrapper_set(
@@ -1439,4 +1809,177 @@ end
     if tid <= n_mats_per_block && (base + tid) <= N
         @inbounds global_arr[base + tid] = shmem[tid]
     end
+end
+
+##########################################
+#### PADDED SINGLE COMPUTE TRANSFERS ######
+##########################################
+
+"""
+    intermediate_layout_load!(single, global, Val(M), Val(N), Val(D), Val(nthreads), count, orientation)
+
+Cooperatively load column-major logical M×N matrices into new padded D×D single
+compute tiles. Each warp pass reads consecutive valid global elements, then scatters
+by logical coordinates. Both orientations preserve global coalescing; shared scatter
+bank costs depend on shape and orientation. Only valid logical entries are written.
+
+All new orientation-taking transfers require the launch block size to equal
+`nthreads`, with complete warps. They contain no barriers: callers must synchronize
+the full warp after cooperative production and before readers, and before reusing
+storage still read by another lane. Single/dual conversion buffers must not overlap.
+Call cooperative global transfers outside per-matrix active guards; internal guards
+handle batch tails and unused lanes.
+"""
+@inline function intermediate_layout_load!(
+    shmem,
+    global_arr,
+    ::Val{M},
+    ::Val{N},
+    ::Val{D},
+    ::Val{nthreads},
+    count::Int32,
+    o::Union{RowOriented,ColOriented},
+) where {M,N,D,nthreads}
+    _validate_compute_shape(Val(M), Val(N), Val(D))
+    _validate_layout_threads(Val(nthreads))
+    tid = threadIdx().x
+    wid = (tid - 1i32) ÷ 32i32 + 1i32
+    # Masking exposes the nonnegative lane range to transfer-index simplification.
+    lid = ((tid - 1i32) & 31i32) + 1i32
+    nmat = 32i32 ÷ Int32(D)
+    block_mats = (Int32(nthreads) ÷ 32i32) * nmat
+    first_mat = (blockIdx().x - 1i32) * block_mats + (wid - 1i32) * nmat
+    matrix_elems = Int32(M) * Int32(N)
+    warp_elems = nmat * matrix_elems
+    @inbounds @unroll for pass in (1i32):cld(warp_elems, 32i32)
+        r = (pass - 1i32) * 32i32 + lid - 1i32
+        mid = r ÷ matrix_elems + 1i32
+        if r < warp_elems && first_mat + mid <= count
+            elem = r % matrix_elems
+            i = elem % Int32(M) + 1i32
+            j = elem ÷ Int32(M) + 1i32
+            dest = _single_transfer_address(Val(D), o, wid, mid, i, j)
+            shmem[dest] = global_arr[first_mat * matrix_elems + r + 1i32]
+        end
+    end
+    return nothing
+end
+
+"""Inverse of the orientation-taking cooperative load; the same synchronization contract applies."""
+@inline function intermediate_layout_write!(
+    global_arr,
+    shmem,
+    ::Val{M},
+    ::Val{N},
+    ::Val{D},
+    ::Val{nthreads},
+    count::Int32,
+    o::Union{RowOriented,ColOriented},
+) where {M,N,D,nthreads}
+    _validate_compute_shape(Val(M), Val(N), Val(D))
+    _validate_layout_threads(Val(nthreads))
+    tid = threadIdx().x
+    wid = (tid - 1i32) ÷ 32i32 + 1i32
+    # Masking exposes the nonnegative lane range to transfer-index simplification.
+    lid = ((tid - 1i32) & 31i32) + 1i32
+    nmat = 32i32 ÷ Int32(D)
+    block_mats = (Int32(nthreads) ÷ 32i32) * nmat
+    first_mat = (blockIdx().x - 1i32) * block_mats + (wid - 1i32) * nmat
+    matrix_elems = Int32(M) * Int32(N)
+    warp_elems = nmat * matrix_elems
+    @inbounds @unroll for pass in (1i32):cld(warp_elems, 32i32)
+        r = (pass - 1i32) * 32i32 + lid - 1i32
+        mid = r ÷ matrix_elems + 1i32
+        if r < warp_elems && first_mat + mid <= count
+            elem = r % matrix_elems
+            i = elem % Int32(M) + 1i32
+            j = elem ÷ Int32(M) + 1i32
+            src = _single_transfer_address(Val(D), o, wid, mid, i, j)
+            global_arr[first_mat * matrix_elems + r + 1i32] = shmem[src]
+        end
+    end
+    return nothing
+end
+
+@inline _owned_coords(k::Int32, d::Int32, ::RowOriented) = (k, d)
+@inline _owned_coords(k::Int32, d::Int32, ::ColOriented) = (d, k)
+@inline _owned_line_count(::Val{M}, ::Val{N}, ::RowOriented) where {M,N} = Int32(N)
+@inline _owned_line_count(::Val{M}, ::Val{N}, ::ColOriented) where {M,N} = Int32(M)
+
+"""
+Copy new single compute storage into disjoint raw dual storage. Each lane copies its
+owned line according to the single orientation. Only valid logical entries are
+written; caller warp synchronization is required before consumers or storage reuse.
+"""
+@inline function interm_to_dual_transfer!(
+    shmem_dual,
+    shmem_single,
+    ::Val{M},
+    ::Val{N},
+    ::Val{D},
+    ::Val{nthreads},
+    count::Int32,
+    o::Union{RowOriented,ColOriented},
+) where {M,N,D,nthreads}
+    _validate_compute_shape(Val(M), Val(N), Val(D))
+    _validate_layout_threads(Val(nthreads))
+    tid = threadIdx().x
+    wid = (tid - 1i32) ÷ 32i32 + 1i32
+    lid = mod1(tid, 32i32)
+    nmat = 32i32 ÷ Int32(D)
+    mid = (lid - 1i32) ÷ Int32(D) + 1i32
+    d = mod1(lid, Int32(D))
+    block_mats = (Int32(nthreads) ÷ 32i32) * nmat
+    global_mat = (blockIdx().x - 1i32) * block_mats + (wid - 1i32) * nmat + mid
+    if mid <= nmat && global_mat <= count && d <= _owned_line_count(Val(M), Val(N), o)
+        dual_outer = (wid - 1i32) * _dual_warp_stride(Val(D))
+        @inbounds @unroll for k in (1i32):Int32(_register_line_width(Val(M), Val(N), o))
+            i, j = _owned_coords(k, d, o)
+            src = _single_transfer_address(Val(D), o, wid, mid, i, j)
+            dest =
+                dual_outer +
+                mid +
+                (j - 1i32) * Int32(_compute_stride(Val(D))) +
+                (i - 1i32) * nmat
+            shmem_dual[dest] = shmem_single[src]
+        end
+    end
+    return nothing
+end
+
+"""
+Copy a logical dual matrix view into disjoint new single compute storage. `M_dual`
+must denote the calling lane group's matrix and support logical two-index reads;
+wrappers are read through their indexing semantics to materialize structural zeros
+or transposes. Logical M,N refer to the wrapped view's output shape. Caller warp
+synchronization is required before this copy and before cooperative output reads.
+"""
+@inline function dual_to_interm_transfer!(
+    shmem_single,
+    M_dual,
+    ::Val{M},
+    ::Val{N},
+    ::Val{D},
+    ::Val{nthreads},
+    count::Int32,
+    o::Union{RowOriented,ColOriented},
+) where {M,N,D,nthreads}
+    _validate_compute_shape(Val(M), Val(N), Val(D))
+    _validate_layout_threads(Val(nthreads))
+    tid = threadIdx().x
+    wid = (tid - 1i32) ÷ 32i32 + 1i32
+    lid = mod1(tid, 32i32)
+    nmat = 32i32 ÷ Int32(D)
+    mid = (lid - 1i32) ÷ Int32(D) + 1i32
+    d = mod1(lid, Int32(D))
+    block_mats = (Int32(nthreads) ÷ 32i32) * nmat
+    global_mat = (blockIdx().x - 1i32) * block_mats + (wid - 1i32) * nmat + mid
+    if mid <= nmat && global_mat <= count && d <= _owned_line_count(Val(M), Val(N), o)
+        @inbounds @unroll for k in (1i32):Int32(_register_line_width(Val(M), Val(N), o))
+            i, j = _owned_coords(k, d, o)
+            dest = _single_transfer_address(Val(D), o, wid, mid, i, j)
+            shmem_single[dest] = M_dual[i, j]
+        end
+    end
+    return nothing
 end

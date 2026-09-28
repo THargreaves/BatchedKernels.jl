@@ -84,7 +84,7 @@ function main(force)
         Val(:cublas) => "cuBLAS",
     )
 
-    path = "studies/benchmarks/bench_trig_backsolve"
+    path = "benchmarks/bench_trig_backsolve"
 
     generate_plots(2, 32, methods, Float32, path, force)
 end

@@ -80,7 +80,7 @@ function main(force)
         Val(:cublas) => "cuBLAS",
     )
 
-    path = "studies/benchmarks/bench_qr_r"
+    path = "benchmarks/bench_qr_r"
 
     generate_plots(2, 32, methods, Float32, path, force)
 end

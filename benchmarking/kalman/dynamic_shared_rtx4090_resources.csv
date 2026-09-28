@@ -1,0 +1,7 @@
+precision,D,batch,threads,policy,registers,local_bytes,shared_bytes,active_blocks,theoretical_occupancy,planner_live_elements,planner_live_32bit_words,relative_error,compile_seconds,status,median_us,p25_us,p75_us
+Float64,32,5,64,register,255,832,42240,2,0.08333333333333333,160,320,3.3995951416265057e-16,40.668600575,local_memory,,,
+Float64,32,5,64,shared_H_predicted,255,216,59136,1,0.041666666666666664,96,192,3.3995951416265057e-16,21.103009049,local_memory,,,
+Float64,32,5,128,register,255,832,59104,1,0.08333333333333333,160,320,3.493888855138555e-16,38.792809144,local_memory,,,
+Float64,32,5,128,shared_H_predicted,255,152,92864,1,0.08333333333333333,96,192,3.493888855138555e-16,18.363064741,local_memory,,,
+Float64,32,5,128,register_row_stage,255,712,59104,1,0.08333333333333333,160,320,3.3995951416265057e-16,54.984638084,local_memory,,,
+Float64,32,5,128,shared_H_predicted_row_stage,255,96,92864,1,0.08333333333333333,96,192,3.3995951416265057e-16,32.176297918,local_memory,,,

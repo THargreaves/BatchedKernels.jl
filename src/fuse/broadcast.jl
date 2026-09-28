@@ -4,7 +4,8 @@
 #
 # The user-facing entry point is `f.(args...)` where `args` are batched
 # containers. `Base.copy(::Broadcasted{BatchedStyle})` traces, plans, compiles,
-# caches, and launches; the kernel cache key is `(f, input_cache_key(specs))`.
+# caches, and launches; the cache key includes the function, input specialization,
+# storage policy, launch geometry, shared allocation mode and CUDA device.
 #
 # Type stability is obtained via `Core.Compiler.return_type` on the scalar
 # function with trace-time argument types, mapped to the runtime output type
@@ -15,6 +16,7 @@
 struct BatchedStyle <: Broadcast.BroadcastStyle end
 Base.BroadcastStyle(::Type{<:BatchedCuMatrix}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:BatchedCuVector}) = BatchedStyle()
+Base.BroadcastStyle(::Type{<:BatchedCuScalar}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:SharedCuMatrix}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:SharedCuVector}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:SharedValue}) = BatchedStyle()
@@ -47,8 +49,8 @@ end
 
 function _infer_D_MAX_T_from_spec!(D_ref::Ref, T_ref::Ref, spec::LeafInput)
     TT = spec.trace_type
-    (TT <: TraceMatrix || TT <: TraceVector) || return nothing
-    leaf_max = maximum(shape(TT))
+    (TT <: Union{TraceMatrix,TraceVector,TraceScalar}) || return nothing
+    leaf_max = TT <: TraceScalar ? 1 : maximum(shape(TT))
     t_param = eltype(TT)
     if D_ref[] === nothing
         D_ref[] = leaf_max
@@ -82,7 +84,10 @@ function _collect_runtime_inputs!(
     return nothing
 end
 function _collect_runtime_inputs!(
-    batched_args::Vector, shared_args::Vector, N_ref::Ref, x::BatchedCuVector
+    batched_args::Vector,
+    shared_args::Vector,
+    N_ref::Ref,
+    x::Union{BatchedCuVector,BatchedCuScalar},
 )
     _set_or_check_batch_n!(N_ref, batch_size(x))
     push!(batched_args, x.data)
@@ -91,19 +96,19 @@ end
 function _collect_runtime_inputs!(
     batched_args::Vector, shared_args::Vector, N_ref::Ref, x::SharedCuMatrix
 )
-    N_ref[] !== nothing && _set_or_check_batch_n!(N_ref, batch_size(x))
+    _set_or_check_batch_n!(N_ref, batch_size(x))
     push!(shared_args, x.data)
     return nothing
 end
 function _collect_runtime_inputs!(
     batched_args::Vector, shared_args::Vector, N_ref::Ref, x::SharedCuVector
 )
-    N_ref[] !== nothing && _set_or_check_batch_n!(N_ref, batch_size(x))
+    _set_or_check_batch_n!(N_ref, batch_size(x))
     push!(shared_args, x.data)
     return nothing
 end
 function _collect_runtime_inputs!(::Vector, ::Vector, N_ref::Ref, x::SharedValue)
-    N_ref[] !== nothing && _set_or_check_batch_n!(N_ref, batch_size(x))
+    _set_or_check_batch_n!(N_ref, batch_size(x))
     return nothing
 end
 function _collect_runtime_inputs!(
@@ -118,10 +123,41 @@ function _collect_runtime_inputs!(::Vector, ::Vector, ::Ref, x)
     return error("Unsupported batched broadcast input component of type $(typeof(x))")
 end
 
-function _ensure_compiled!(f, args::Tuple)
+function _ensure_compiled!(
+    f,
+    args::Tuple;
+    assignment=nothing,
+    policy::Symbol=:auto,
+    nthreads::Int=128,
+    shared_memory::Symbol=:static,
+)
+    policy in (:auto, :legacy) || throw(ArgumentError("policy must be :auto or :legacy"))
+    assignment !== nothing &&
+        policy === :legacy &&
+        throw(ArgumentError("explicit assignment cannot be combined with policy=:legacy"))
+    shared_memory in (:static, :dynamic) ||
+        throw(ArgumentError("shared_memory must be :static or :dynamic"))
+    shared_memory === :dynamic &&
+        assignment === nothing &&
+        policy === :legacy &&
+        throw(
+            ArgumentError(
+                "dynamic shared memory requires an automatic or explicit hybrid assignment"
+            ),
+        )
+    32 <= nthreads <= 1024 && nthreads % 32 == 0 ||
+        throw(ArgumentError("nthreads must be a multiple of 32 in 32:1024"))
+    assignment === nothing ||
+        nthreads == assignment.nthreads ||
+        throw(ArgumentError("nthreads must match the forced assignment"))
     input_specs = InputSpec[input_spec(arg) for arg in args]
     input_types = Type[input_trace_type(spec) for spec in input_specs]
-    key = (f, Tuple(input_cache_key(spec) for spec in input_specs))
+    cache_policy = if assignment === nothing
+        (policy, nthreads, shared_memory, CUDA.device())
+    else
+        (:forced_hybrid, assignment_key(assignment), shared_memory, CUDA.device())
+    end
+    key = (f, Tuple(input_cache_key(spec) for spec in input_specs), cache_policy)
 
     if haskey(KERNEL_CACHE, key)
         cached = KERNEL_CACHE[key]
@@ -138,11 +174,43 @@ function _ensure_compiled!(f, args::Tuple)
     T = T_ref[]
     D_MAX === nothing && error("Could not infer matrix dimension from inputs")
     T === nothing && error("Could not infer element type from inputs")
-    nthreads = 256
+    T in (Float32, Float64) ||
+        throw(ArgumentError("fused kernels support Float32 and Float64 inputs, got $T"))
+    1 <= D_MAX <= 32 || throw(ArgumentError("matrix group dimension must be in 1:32"))
 
     tape = trace(f, input_specs)
-    order = schedule(tape)
-    planner = plan_memory(tape; order=order)
+    # Geometry must cover intermediate extents as well as input extents.
+    for meta in tape.metas
+        if meta.type <: Union{TraceMatrix,TraceVector}
+            D_MAX = max(D_MAX, maximum(shape(meta.type)))
+        end
+    end
+    1 <= D_MAX <= 32 ||
+        throw(ArgumentError("intermediate matrix group dimension must be in 1:32"))
+    if assignment === nothing && policy === :auto
+        assignment = automatic_assignment(tape; nthreads)
+    end
+    if assignment === nothing
+        order = schedule(tape)
+        planner = plan_memory(tape; order=order)
+    else
+        tape = hybrid_tape(tape)
+        order = assignment.order
+        planner = plan_memory(tape, assignment; D_MAX, T)
+        limit = CUDA.attribute(
+            CUDA.device(),
+            if shared_memory === :dynamic
+                CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
+            else
+                CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK
+            end,
+        )
+        planner.shared_bytes <= limit || throw(
+            ArgumentError(
+                "forced assignment needs $(planner.shared_bytes) shared bytes per block; device $shared_memory limit is $limit",
+            ),
+        )
+    end
     output_spec = extract_output_spec(tape, planner)
     leaves = flatten_leaves(output_spec)
     fn_expr, sig = codegen(
@@ -154,6 +222,7 @@ function _ensure_compiled!(f, args::Tuple)
         T=T,
         fn_name=gensym(:fused_kernel),
         order=order,
+        shared_memory,
     )
     compiled_fn = Core.eval(@__MODULE__, fn_expr)
     entry = CompiledKernel(
@@ -161,6 +230,28 @@ function _ensure_compiled!(f, args::Tuple)
     )
     KERNEL_CACHE[key] = entry
     return entry
+end
+
+# The function attribute is context-local and must be set before occupancy queries
+# or launches above the default shared limit. Include any compiler static storage.
+function _configure_dynamic_shared!(kernel, entry::CompiledKernel)
+    bytes = entry.sig.dynamic_shared_bytes
+    if bytes > 0
+        limit = CUDA.attribute(
+            CUDA.device(), CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
+        )
+        total = bytes + Int(CUDA.memory(kernel).shared)
+        total <= limit || throw(
+            ArgumentError(
+                "compiled kernel needs $total shared bytes; device opt-in limit is $limit",
+            ),
+        )
+        attrs = CUDA.attributes(kernel.fun)
+        if attrs[CUDA.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] < bytes
+            attrs[CUDA.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = bytes
+        end
+    end
+    return bytes
 end
 
 # `_elem_types(Args)` — compute the tuple-of-trace-element-types as a Type
@@ -193,11 +284,58 @@ function Base.copy(::Broadcasted{BatchedStyle,A,F,Args}) where {A,F,Args<:Tuple}
     )
 end
 
-function _broadcast_impl(bc::Broadcasted{BatchedStyle})
+export fuse, Assignment
+
+"""
+    fuse(f, args...; policy=:auto, assignment=nothing,
+         nthreads=assignment === nothing ? 128 : assignment.nthreads, shared_memory=:static)
+
+Execute the same scalar function and return the same inferred batched output type
+as `f.(args...)`. The default `policy=:auto` uses deterministic register-first
+planning with dual shared storage for conflicting orientations. `policy=:legacy`
+selects the original all-shared scheduler/planner, kept as an ablation baseline for
+benchmarks. Inputs must be Float32 or Float64. A host `Assignment` overrides automatic
+selection with validated storage and variant choices. Build assignments
+against `trace(f, InputSpec[input_spec(x) for x in args])`; staging normalization
+preserves node IDs. Dictionary/layout choices never enter the device kernel.
+
+With automatic or explicit hybrid planning, `shared_memory=:dynamic` uses an aligned dynamic
+shared arena and opts into the device per-block capacity. The default is `:static`.
+Allocation mode is part of the compilation cache key.
+
+Single, dual and register matrix storage are supported by the audited variants.
+Forced mutation uses shared storage. A forced choice is rejected if unsupported,
+without silently selecting another variant. Register placement does not guarantee
+that the device compiler avoids spills; inspect compiled resources before tuning.
+"""
+function fuse(
+    f::F,
+    args::Vararg{Any,N};
+    assignment::Union{Nothing,Assignment}=nothing,
+    nthreads::Int=assignment === nothing ? 128 : assignment.nthreads,
+    shared_memory::Symbol=:static,
+    policy::Symbol=:auto,
+) where {F<:Function,N}
+    isdefined(F, :instance) || error("fuse only supports singleton function objects")
+    elem_types = _elem_types(typeof(args))
+    R = Core.Compiler.return_type(F.instance, elem_types)
+    BR = batchify_type(R)
+    bc = Broadcasted{BatchedStyle}(f, args)
+    result = _broadcast_impl(bc; assignment, nthreads, shared_memory, policy)
+    return result::BR
+end
+
+function _broadcast_impl(
+    bc::Broadcasted{BatchedStyle};
+    assignment=nothing,
+    nthreads::Int=128,
+    shared_memory::Symbol=:static,
+    policy::Symbol=:auto,
+)
     f = bc.f
     args = bc.args
 
-    entry = _ensure_compiled!(f, args)
+    entry = _ensure_compiled!(f, args; assignment, nthreads, shared_memory, policy)
     compiled_fn = entry.fn
     D_MAX, nthreads, T = entry.D_MAX, entry.nthreads, entry.T
 
@@ -228,10 +366,13 @@ function _broadcast_impl(bc::Broadcasted{BatchedStyle})
     ]
 
     nblocks = cld(N, (nthreads ÷ 32) * (32 ÷ D_MAX))
-    Base.invokelatest() do
-        @cuda threads = nthreads blocks = nblocks compiled_fn(
-            leaf_arrays..., batched_args..., shared_args..., Int32(N)
-        )
+    if N > 0
+        Base.invokelatest() do
+            launch_args = (leaf_arrays..., batched_args..., shared_args..., Int32(N))
+            kernel = @cuda launch = false compiled_fn(launch_args...)
+            shmem = _configure_dynamic_shared!(kernel, entry)
+            return kernel(launch_args...; threads=nthreads, blocks=nblocks, shmem)
+        end
     end
 
     leaf_iter = Ref(0)
@@ -268,22 +409,10 @@ function _runtime_composite_type(::Type{T}, components::NamedTuple) where {T}
         elts = ntuple(i -> _component_element_type(components[i]), length(components))
         return Tuple{elts...}
     end
-    base = Base.typename(T).wrapper
-    new_params = Any[]
-    for p in T.parameters
-        replaced = false
-        for f in fieldnames(T)
-            if hasfield(T, f)
-                if fieldtype(T, f) === p
-                    push!(new_params, _component_element_type(components[f]))
-                    replaced = true
-                    break
-                end
-            end
-        end
-        replaced || push!(new_params, p)
-    end
-    return base{new_params...}
+    replacements = Dict(
+        name => _component_element_type(value) for (name, value) in pairs(components)
+    )
+    return _replace_composite_field_types(T, replacements)
 end
 
 _component_element_type(c::BatchedCuMatrix{T,D1,D2}) where {T,D1,D2} = AbstractMatrix{T}
@@ -323,24 +452,20 @@ end
     fnames = fieldnames(TT)
     isempty(fnames) && return :($TT)
     sfs = Type[scalar_form(fieldtype(TT, f)) for f in fnames]
-    base = Base.typename(TT).wrapper
-    new_params = Any[]
-    for p in TT.parameters
-        replaced = false
-        for (i, f) in enumerate(fnames)
-            if fieldtype(TT, f) === p
-                push!(new_params, sfs[i])
-                replaced = true
-                break
-            end
-        end
-        replaced || push!(new_params, p)
-    end
-    result = base{new_params...}
+    result = _replace_composite_field_types(TT, Dict(zip(fnames, sfs)))
     return :($result)
 end
 
 # Leaf batchify_type rules
+# A failed scalar trace inference should report an unsupported graph rather
+# than the ambiguous bottom-type dispatch among the output mapping methods.
+function batchify_type(::Type{Union{}})
+    return throw(
+        ArgumentError(
+            "Scalar function has no supported return type for these traced inputs"
+        ),
+    )
+end
 batchify_type(::Type{T}) where {T<:Union{Number,AbstractChar,Bool,Nothing}} = SharedValue{T}
 function batchify_type(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N}
     return BatchedCuMatrix{

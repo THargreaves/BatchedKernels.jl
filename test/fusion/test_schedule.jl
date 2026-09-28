@@ -1,4 +1,4 @@
-@testitem "Scheduler" begin
+@testitem "Scheduler" tags = [:cpu] begin
     # CPU-only scheduler unit tests. Operate on hand-built Tapes — no GPU /
     # trace pass needed. Verify the subset-DP scheduler finds the slot-optimal
     # ordering for a handful of canonical DAG shapes (linear chain, diamond,
@@ -60,16 +60,22 @@
         dag = _reduced_dag(tape, sched)
         leaves = _output_leaf_mask(tape, dag.bit_of)
         pool_of = [_sched_pool(tape, id) for id in sched]
-        pool_M = UInt64(0); pool_V = UInt64(0)
+        pool_M = UInt64(0)
+        pool_V = UInt64(0)
         for (i, p) in enumerate(pool_of)
             bit = UInt64(1) << (i - 1)
-            p === :M ? (pool_M |= bit) : p === :V ? (pool_V |= bit) : nothing
+            if p === :M
+                (pool_M |= bit)
+            elseif p === :V
+                (pool_V |= bit)
+            else
+                nothing
+            end
         end
         inplace = [_inplace_info(tape, sched[i], dag.bit_of) for i in 1:length(sched)]
         sched_order = filter(id -> id in Set(sched), order)
         return _evaluate_order(
-            sched_order, dag.bit_of, dag.consumers, leaves,
-            pool_of, pool_M, pool_V, inplace,
+            sched_order, dag.bit_of, dag.consumers, leaves, pool_of, pool_M, pool_V, inplace
         )
     end
 
@@ -108,7 +114,8 @@
         # the batched pool; D's compute forces 3 slots (B, C, D simultaneously).
         tape = Tape()
         MT = TraceMatrix{Float32,3,3}
-        A = add!(tape, InputNode(1), MT, SHARED); Base.push!(tape.inputs, A)
+        A = add!(tape, InputNode(1), MT, SHARED)
+        Base.push!(tape.inputs, A)
         f(args...) = nothing
         g(args...) = nothing
         h(args...) = nothing
@@ -130,14 +137,18 @@
         # intermediates.
         tape = Tape()
         MT = TraceMatrix{Float32,3,3}
-        A = add!(tape, InputNode(1), MT, SHARED); Base.push!(tape.inputs, A)
-        C = add!(tape, InputNode(2), MT, SHARED); Base.push!(tape.inputs, C)
-        f = (args...) -> nothing; g = (args...) -> nothing; h = (args...) -> nothing
+        A = add!(tape, InputNode(1), MT, SHARED)
+        Base.push!(tape.inputs, A)
+        C = add!(tape, InputNode(2), MT, SHARED)
+        Base.push!(tape.inputs, C)
+        f = (args...) -> nothing
+        g = (args...) -> nothing
+        h = (args...) -> nothing
         A2 = add!(tape, CallNode(f, NodeRef[A]), MT, BATCHED)
         C2 = add!(tape, CallNode(g, NodeRef[C]), MT, BATCHED)
-        B  = add!(tape, CallNode(f, NodeRef[A2]), MT, BATCHED)
-        D  = add!(tape, CallNode(g, NodeRef[C2]), MT, BATCHED)
-        E  = add!(tape, CallNode(h, NodeRef[B, D]), MT, BATCHED)
+        B = add!(tape, CallNode(f, NodeRef[A2]), MT, BATCHED)
+        D = add!(tape, CallNode(g, NodeRef[C2]), MT, BATCHED)
+        E = add!(tape, CallNode(h, NodeRef[B, D]), MT, BATCHED)
         Eout = add!(tape, CallNode(BK._dual_to_single, NodeRef[E]), MT, BATCHED)
         tape.output = Eout
 
@@ -157,13 +168,15 @@
         # whole-schedule peak and the per-step during-peak at `+`.
         tape = Tape()
         MT = TraceMatrix{Float32,3,3}
-        Ain = add!(tape, InputNode(1), MT, BATCHED); Base.push!(tape.inputs, Ain)
-        Bin = add!(tape, InputNode(2), MT, BATCHED); Base.push!(tape.inputs, Bin)
+        Ain = add!(tape, InputNode(1), MT, BATCHED)
+        Base.push!(tape.inputs, Ain)
+        Bin = add!(tape, InputNode(2), MT, BATCHED)
+        Base.push!(tape.inputs, Bin)
         AL = add!(tape, CallNode(BK._load_to_single, NodeRef[Ain]), MT, BATCHED)
         AT = add!(tape, CallNode(BK._single_to_dual, NodeRef[AL]), MT, BATCHED)
         BL = add!(tape, CallNode(BK._load_to_single, NodeRef[Bin]), MT, BATCHED)
         BT = add!(tape, CallNode(BK._single_to_dual, NodeRef[BL]), MT, BATCHED)
-        C  = add!(tape, CallNode(+, NodeRef[AT, BT]), MT, BATCHED)
+        C = add!(tape, CallNode(+, NodeRef[AT, BT]), MT, BATCHED)
         Cout = add!(tape, CallNode(BK._dual_to_single, NodeRef[C]), MT, BATCHED)
         tape.output = Cout
 
@@ -185,15 +198,21 @@
         dag = _reduced_dag(tape, sched_ids)
         leaves = _output_leaf_mask(tape, dag.bit_of)
         pool_of = [_sched_pool(tape, id) for id in sched_ids]
-        pool_M = UInt64(0); pool_V = UInt64(0)
+        pool_M = UInt64(0)
+        pool_V = UInt64(0)
         for (i, pp) in enumerate(pool_of)
             bit = UInt64(1) << (i - 1)
-            pp === :M ? (pool_M |= bit) : pp === :V ? (pool_V |= bit) : nothing
+            if pp === :M
+                (pool_M |= bit)
+            elseif pp === :V
+                (pool_V |= bit)
+            else
+                nothing
+            end
         end
         ip_C = _inplace_info(tape, C.id, dag.bit_of)
         d = BK._during_peak(
-            bit_idx[C.id], S, dag.consumers, leaves,
-            :M, pool_M, pool_V, ip_C, dag.bit_of,
+            bit_idx[C.id], S, dag.consumers, leaves, :M, pool_M, pool_V, ip_C, dag.bit_of
         )
         @test d.M == 2
     end
@@ -204,14 +223,16 @@
         # cannot safely overwrite an input.
         tape = Tape()
         MT = TraceMatrix{Float32,3,3}
-        Ain = add!(tape, InputNode(1), MT, BATCHED); Base.push!(tape.inputs, Ain)
-        Bin = add!(tape, InputNode(2), MT, BATCHED); Base.push!(tape.inputs, Bin)
+        Ain = add!(tape, InputNode(1), MT, BATCHED)
+        Base.push!(tape.inputs, Ain)
+        Bin = add!(tape, InputNode(2), MT, BATCHED)
+        Base.push!(tape.inputs, Bin)
         AL = add!(tape, CallNode(BK._load_to_single, NodeRef[Ain]), MT, BATCHED)
         AT = add!(tape, CallNode(BK._single_to_dual, NodeRef[AL]), MT, BATCHED)
         BL = add!(tape, CallNode(BK._load_to_single, NodeRef[Bin]), MT, BATCHED)
         BT = add!(tape, CallNode(BK._single_to_dual, NodeRef[BL]), MT, BATCHED)
         fake_matmul(a, b) = nothing
-        C  = add!(tape, CallNode(fake_matmul, NodeRef[AT, BT]), MT, BATCHED)
+        C = add!(tape, CallNode(fake_matmul, NodeRef[AT, BT]), MT, BATCHED)
         Cout = add!(tape, CallNode(BK._dual_to_single, NodeRef[C]), MT, BATCHED)
         tape.output = Cout
 
@@ -226,8 +247,11 @@
         # slot), and the scheduler's peak must be >= LB1.
         tape = Tape()
         MT = TraceMatrix{Float32,3,3}
-        A = add!(tape, InputNode(1), MT, SHARED); Base.push!(tape.inputs, A)
-        f = (args...) -> nothing; g = (args...) -> nothing; h = (args...) -> nothing
+        A = add!(tape, InputNode(1), MT, SHARED)
+        Base.push!(tape.inputs, A)
+        f = (args...) -> nothing
+        g = (args...) -> nothing
+        h = (args...) -> nothing
         B = add!(tape, CallNode(f, NodeRef[A]), MT, BATCHED)
         C = add!(tape, CallNode(g, NodeRef[A]), MT, BATCHED)
         D = add!(tape, CallNode(h, NodeRef[B, C]), MT, BATCHED)
@@ -237,10 +261,17 @@
         sched = _collect_schedulable(tape)
         dag = _reduced_dag(tape, sched)
         pool_of = [_sched_pool(tape, id) for id in sched]
-        pool_M = UInt64(0); pool_V = UInt64(0)
+        pool_M = UInt64(0)
+        pool_V = UInt64(0)
         for (i, pp) in enumerate(pool_of)
             bit = UInt64(1) << (i - 1)
-            pp === :M ? (pool_M |= bit) : pp === :V ? (pool_V |= bit) : nothing
+            if pp === :M
+                (pool_M |= bit)
+            elseif pp === :V
+                (pool_V |= bit)
+            else
+                nothing
+            end
         end
         inplace = [_inplace_info(tape, sched[i], dag.bit_of) for i in 1:length(sched)]
         lb = _compute_lb1(sched, pool_M, pool_V, pool_of, dag.preds, inplace, dag.bit_of)
@@ -261,9 +292,12 @@
         # reordering win — no aliasing involved.
         tape = Tape()
         MT = TraceMatrix{Float32,3,3}
-        Ain = add!(tape, InputNode(1), MT, BATCHED); Base.push!(tape.inputs, Ain)
-        Bin = add!(tape, InputNode(2), MT, BATCHED); Base.push!(tape.inputs, Bin)
-        Cin = add!(tape, InputNode(3), MT, BATCHED); Base.push!(tape.inputs, Cin)
+        Ain = add!(tape, InputNode(1), MT, BATCHED)
+        Base.push!(tape.inputs, Ain)
+        Bin = add!(tape, InputNode(2), MT, BATCHED)
+        Base.push!(tape.inputs, Bin)
+        Cin = add!(tape, InputNode(3), MT, BATCHED)
+        Base.push!(tape.inputs, Cin)
         AL = add!(tape, CallNode(BK._load_to_single, NodeRef[Ain]), MT, BATCHED)
         AT = add!(tape, CallNode(BK._single_to_dual, NodeRef[AL]), MT, BATCHED)
         BL = add!(tape, CallNode(BK._load_to_single, NodeRef[Bin]), MT, BATCHED)
@@ -295,9 +329,12 @@
         # (peak 3); the optimal schedule reduces eagerly to alias-merge (peak 2).
         tape = Tape()
         MT = TraceMatrix{Float32,3,3}
-        A = add!(tape, InputNode(1), MT, SHARED); Base.push!(tape.inputs, A)
-        B = add!(tape, InputNode(2), MT, SHARED); Base.push!(tape.inputs, B)
-        C = add!(tape, InputNode(3), MT, SHARED); Base.push!(tape.inputs, C)
+        A = add!(tape, InputNode(1), MT, SHARED)
+        Base.push!(tape.inputs, A)
+        B = add!(tape, InputNode(2), MT, SHARED)
+        Base.push!(tape.inputs, B)
+        C = add!(tape, InputNode(3), MT, SHARED)
+        Base.push!(tape.inputs, C)
         h = (x,) -> nothing
         M1 = add!(tape, CallNode(h, NodeRef[A]), MT, BATCHED)
         M2 = add!(tape, CallNode(h, NodeRef[B]), MT, BATCHED)
@@ -330,10 +367,9 @@
             return (I - KH) * P_pred
         end
 
-        D = 3; T = Float32
-        specs = BK.InputSpec[
-            BK.LeafInput(BK.TraceMatrix{T,D,D}, BATCHED) for _ in 1:5
-        ]
+        D = 3
+        T = Float32
+        specs = BK.InputSpec[BK.LeafInput(BK.TraceMatrix{T,D,D}, BATCHED) for _ in 1:5]
         tape = BK.trace(kalman_cov, specs)
 
         o = schedule(tape)
@@ -344,23 +380,32 @@
         dag = _reduced_dag(tape, sched_nodes)
         leaves = _output_leaf_mask(tape, dag.bit_of)
         pool_of = [_sched_pool(tape, id) for id in sched_nodes]
-        pool_M = UInt64(0); pool_V = UInt64(0)
+        pool_M = UInt64(0)
+        pool_V = UInt64(0)
         for (i, pp) in enumerate(pool_of)
             bit = UInt64(1) << (i - 1)
-            pp === :M ? (pool_M |= bit) : pp === :V ? (pool_V |= bit) : nothing
+            if pp === :M
+                (pool_M |= bit)
+            elseif pp === :V
+                (pool_V |= bit)
+            else
+                nothing
+            end
         end
-        inplace = [_inplace_info(tape, sched_nodes[i], dag.bit_of) for i in 1:length(sched_nodes)]
+        inplace = [
+            _inplace_info(tape, sched_nodes[i], dag.bit_of) for i in 1:length(sched_nodes)
+        ]
 
         sched_only = filter(id -> id in Set(sched_nodes), o)
         p_sched = BK._evaluate_order(
-            sched_only, dag.bit_of, dag.consumers, leaves,
-            pool_of, pool_M, pool_V, inplace,
+            sched_only, dag.bit_of, dag.consumers, leaves, pool_of, pool_M, pool_V, inplace
         )
         p_nat = BK._evaluate_order(
-            sched_nodes, dag.bit_of, dag.consumers, leaves,
-            pool_of, pool_M, pool_V, inplace,
+            sched_nodes, dag.bit_of, dag.consumers, leaves, pool_of, pool_M, pool_V, inplace
         )
-        lb = _compute_lb1(sched_nodes, pool_M, pool_V, pool_of, dag.preds, inplace, dag.bit_of)
+        lb = _compute_lb1(
+            sched_nodes, pool_M, pool_V, pool_of, dag.preds, inplace, dag.bit_of
+        )
 
         @test p_nat.M == 6
         @test p_sched.M == 5

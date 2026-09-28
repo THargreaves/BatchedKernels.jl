@@ -109,6 +109,72 @@ function _collect_underlying!(out::Set{Int}, tape::Tape, ref::NodeRef)
     return out
 end
 
+# Semantic mutation creates dependencies not present in the SSA argument graph:
+# an old alias read must finish before an overwrite, and later reads must observe
+# that overwrite even when they refer to the original value instead of its result.
+_mutation_target_refs(::Tape, ::TapeNode) = NodeRef[]
+function _mutation_target_refs(tape::Tape, node::CallNode)
+    k = _maybe_inplace_idx(tape, node)
+    refs = k === nothing ? NodeRef[] : NodeRef[node.args[k]]
+    # QR also writes its explicitly allocated tau vector argument.
+    node.fn === qr && length(node.args) == 2 && push!(refs, node.args[2])
+    return refs
+end
+
+function mutation_dependencies(tape::Tape; owners=nothing)
+    function canonical(id)
+        if owners !== nothing && haskey(owners, id)
+            return owners[id]
+        end
+        node = tape.nodes[id]
+        if node isa CallNode
+            k = _maybe_inplace_idx(tape, node)
+            k === nothing || return canonical(node.args[k].id)
+        elseif node isa NewNode
+            refs = [r for (_, r) in node.fields if !(tape.nodes[r.id] isa ConstNode)]
+            length(refs) == 1 && return canonical(only(refs).id)
+        end
+        return id
+    end
+    function collect_owners!(out, ref)
+        node = tape.nodes[ref.id]
+        if node isa NewNode
+            for (_, child) in node.fields
+                collect_owners!(out, child)
+            end
+        elseif !(node isa ConstNode) && tape.metas[ref.id].type <: AbstractArray
+            push!(out, canonical(ref.id))
+        end
+        return out
+    end
+    last_writer = Dict{Int,Int}()
+    readers = Dict{Int,Set{Int}}()
+    edges = Set{Tuple{Int,Int}}()
+    for (id, node) in enumerate(tape.nodes)
+        node isa CallNode || continue
+        reads, writes = Set{Int}(), Set{Int}()
+        for ref in node.args
+            collect_owners!(reads, ref)
+        end
+        for ref in _mutation_target_refs(tape, node)
+            collect_owners!(writes, ref)
+        end
+        for owner in reads
+            haskey(last_writer, owner) && push!(edges, (last_writer[owner], id))
+            push!(get!(readers, owner, Set{Int}()), id)
+        end
+        for owner in writes
+            haskey(last_writer, owner) && push!(edges, (last_writer[owner], id))
+            for reader in get(readers, owner, Set{Int}())
+                reader == id || push!(edges, (reader, id))
+            end
+            readers[owner] = Set{Int}()
+            last_writer[owner] = id
+        end
+    end
+    return sort!(collect(edges))
+end
+
 # For each schedulable node, the set of schedulable nodes that consume it
 # (transitively through NewNodes).
 function _reduced_dag(tape::Tape, schedulable::Vector{Int})
@@ -139,7 +205,15 @@ function _reduced_dag(tape::Tape, schedulable::Vector{Int})
         end
     end
 
-    return (; bit_of, preds, consumers)
+    data_preds = copy(preds)
+    # Control dependencies constrain order without pretending that they consume
+    # the predecessor's produced value in the memory-pressure model.
+    for (before, after) in mutation_dependencies(tape)
+        haskey(bit_of, before) && haskey(bit_of, after) || continue
+        preds[bit_of[after]] |= UInt64(1) << (bit_of[before] - 1)
+    end
+
+    return (; bit_of, preds, consumers, data_preds)
 end
 
 # Schedulable nodes that are reached as leaves of `tape.output` through
@@ -208,10 +282,52 @@ function _inplace_info(tape::Tape, i::Int, bit_of::Dict{Int,Int})
             # write. (Same rule as plan.jl::_maybe_auto_inplace_slot.)
             (arg_node isa CallNode || arg_node isa InputNode) || continue
             haskey(bit_of, ref.id) || continue
+            _legacy_alias_candidate_safe(tape, node, k) || continue
             push!(auto_candidates, ref.id)
         end
     end
     return _InplaceInfo(forced_owner, auto_candidates)
+end
+
+# Collapse forced SSA aliases only in the storage model; their operation bits
+# remain distinct in the dependency graph. The owner is live through every alias.
+function _canonical_schedule_storage(tape, ids, dag, outputs, pool_M, pool_V, inplace)
+    owners = canonical_storage_owners(tape)
+    rootbit(id) = get(dag.bit_of, get(owners, id, id), dag.bit_of[id])
+    consumers = copy(dag.consumers)
+    normalized_outputs = UInt64(0)
+    for (i, id) in enumerate(ids)
+        j = rootbit(id)
+        bit = UInt64(1) << (i - 1)
+        (outputs & bit) != 0 && (normalized_outputs |= UInt64(1) << (j - 1))
+        if j != i
+            consumers[j] |= consumers[i]
+            consumers[i] = 0
+            pool_M &= ~bit
+            pool_V &= ~bit
+        end
+    end
+    # Lower bounds count data inputs by owner, excluding mutation ordering edges.
+    lb_preds = UInt64[]
+    for mask in dag.data_preds
+        normalized = UInt64(0)
+        for (i, id) in enumerate(ids)
+            mask & (UInt64(1) << (i - 1)) == 0 && continue
+            normalized |= UInt64(1) << (rootbit(id) - 1)
+        end
+        push!(lb_preds, normalized)
+    end
+    normalized_inplace = [
+        _InplaceInfo(
+            if info.forced_owner === nothing
+                nothing
+            else
+                get(owners, info.forced_owner, info.forced_owner)
+            end,
+            unique([get(owners, id, id) for id in info.auto_candidates]),
+        ) for info in inplace
+    ]
+    return consumers, normalized_outputs, pool_M, pool_V, normalized_inplace, lb_preds
 end
 
 # -----------------------------------------------------------------------------
@@ -405,6 +521,7 @@ end
 const _SCHEDULE_MAX_NODES = 60
 
 function schedule(tape::Tape)::Vector{Int}
+    _require_single_result_calls(tape)
     schedulable = _collect_schedulable(tape)
     k = length(schedulable)
     if k == 0
@@ -434,7 +551,10 @@ function schedule(tape::Tape)::Vector{Int}
 
     inplace = [_inplace_info(tape, schedulable[i], bit_of) for i in 1:k]
 
-    lb = _compute_lb1(schedulable, pool_M, pool_V, pool_of, preds, inplace, bit_of)
+    consumers, output_leaves, pool_M, pool_V, inplace, lb_preds = _canonical_schedule_storage(
+        tape, schedulable, dag, output_leaves, pool_M, pool_V, inplace
+    )
+    lb = _compute_lb1(schedulable, pool_M, pool_V, pool_of, lb_preds, inplace, bit_of)
 
     # Initial UB from the natural order; that's a valid schedule by construction.
     ub = _evaluate_order(
@@ -541,51 +661,32 @@ function schedule(tape::Tape)::Vector{Int}
     return _interleave_non_schedulable(tape, order)
 end
 
-# Splice non-schedulable nodes into the reordered schedulable sequence.
-# Strategy: walk tape.nodes in natural order, accumulating non-schedulable
-# nodes; whenever we hit a schedulable node, emit *all* pending non-
-# schedulable nodes followed by that schedulable node — *but* indexed by the
-# new schedule, not the natural one. Concretely: produce a permutation that
-# places non-schedulable nodes immediately *before* the schedulable node they
-# originally preceded in natural order. (Their position is cosmetic — plan
-# and codegen skip them in their main per-node loop.)
+# Emit structural dependencies before their first scheduled consumer. Although
+# wrappers generate no compute, keeping the full order topological also makes it
+# valid input to the forced-assignment validator.
 function _interleave_non_schedulable(tape::Tape, sched_order::Vector{Int})
-    n = length(tape.nodes)
-    sched_set = Set(sched_order)
-    # Map each schedulable node to its index in sched_order.
-    sched_pos = Dict{Int,Int}()
-    for (i, id) in enumerate(sched_order)
-        sched_pos[id] = i
-    end
-
-    # For each non-schedulable node, find the first schedulable node that
-    # follows it in natural order. We then attach the non-schedulable node
-    # to that schedulable node's new position.
-    attached = [Int[] for _ in 1:length(sched_order)]
-    trailing = Int[]  # non-schedulable nodes after the last natural schedulable
-    pending = Int[]
-    # Walk natural order, accumulating non-schedulable nodes; on hitting a
-    # schedulable, flush the buffer to that schedulable's new position.
-    for id in 1:n
-        if id in sched_set
-            target = sched_pos[id]
-            append!(attached[target], pending)
-            empty!(pending)
-        else
-            push!(pending, id)
-        end
-    end
-    # Any leftover non-schedulable nodes after the last natural schedulable
-    # go to the end.
-    append!(trailing, pending)
-
+    scheduled = Set(sched_order)
+    emitted = Set{Int}()
     out = Int[]
-    sizehint!(out, n)
-    for (i, sched_id) in enumerate(sched_order)
-        append!(out, attached[i])
-        push!(out, sched_id)
+    function emit_structural(id)
+        id in emitted && return nothing
+        id in scheduled && error("schedule: producer %$id has not executed")
+        for ref in node_refs(tape.nodes[id])
+            emit_structural(ref.id)
+        end
+        push!(out, id)
+        push!(emitted, id)
+        return nothing
     end
-    append!(out, trailing)
-    @assert length(out) == n
+    for id in sched_order
+        for ref in node_refs(tape.nodes[id])
+            emit_structural(ref.id)
+        end
+        push!(out, id)
+        push!(emitted, id)
+    end
+    for id in eachindex(tape.nodes)
+        emit_structural(id)
+    end
     return out
 end

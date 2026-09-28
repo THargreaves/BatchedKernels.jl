@@ -32,6 +32,24 @@ function _load_to_single end
 function _single_to_dual end
 function _dual_to_single end
 
+# The forced hybrid pipeline preserves tape IDs while giving staging its own
+# residence-independent meaning. The legacy tape and packed transfers stay intact.
+function _place_input end
+function _stage_output end
+
+function hybrid_tape(tape::Tape)
+    nodes = TapeNode[
+        if node isa CallNode && node.fn === _single_to_dual
+            CallNode(_place_input, copy(node.args))
+        elseif node isa CallNode && node.fn === _dual_to_single
+            CallNode(_stage_output, copy(node.args))
+        else
+            node
+        end for node in tape.nodes
+    ]
+    return Tape(nodes, copy(tape.metas), copy(tape.inputs), tape.output)
+end
+
 struct TraceMatrix{T,D_M,D_N} <: AbstractMatrix{T}
     tape::Tape
     ref::NodeRef
@@ -130,20 +148,7 @@ trace_element_type(::Type{SharedValue{T}}) where {T} = T
         traced_by_field[name] = trace_element_type(ct)
     end
 
-    base = Base.typename(T).wrapper
-    new_params = Any[]
-    for param in T.parameters
-        replaced = false
-        for f in fnames
-            if fieldtype(T, f) === param && haskey(traced_by_field, f)
-                push!(new_params, traced_by_field[f])
-                replaced = true
-                break
-            end
-        end
-        replaced || push!(new_params, param)
-    end
-    result = base{new_params...}
+    result = _replace_composite_field_types(T, traced_by_field)
     return :($result)
 end
 
@@ -186,6 +191,16 @@ function register_wrapped!(tape::Tape, A::Adjoint{T,S}) where {T,S}
     return emit_new!(tape, Adjoint{T,S}, :parent, inner)
 end
 
+function register_wrapped!(tape::Tape, A::Transpose{T,S}) where {T,S}
+    inner = register_wrapped!(tape, parent(A))
+    return emit_new!(tape, Transpose{T,S}, :parent, inner)
+end
+
+function register_wrapped!(tape::Tape, A::Union{UnitUpperTriangular,UnitLowerTriangular})
+    inner = register_wrapped!(tape, parent(A))
+    return emit_new!(tape, typeof(A), :data, inner)
+end
+
 function register_wrapped!(tape::Tape, U::UpperTriangular{T,S}) where {T,S}
     inner = register_wrapped!(tape, U.data)
     return emit_new!(tape, UpperTriangular{T,S}, :data, inner)
@@ -198,7 +213,12 @@ end
 
 function register_wrapped!(tape::Tape, S::Symmetric{T,M}) where {T,M}
     inner = register_wrapped!(tape, S.data)
-    return emit_new!(tape, Symmetric{T,M}, :data, inner)
+    uplo = emit_const!(tape, S.uplo)
+    return push_node!(
+        tape,
+        NewNode(Symmetric{T,M}, [:data => inner, :uplo => uplo]),
+        NodeMeta(Symmetric{T,M}, meta_at(tape, inner).lifecycle),
+    )
 end
 
 # -----------------------------------------------------------------------------
@@ -308,6 +328,9 @@ end
 function input_spec(x::SharedCuMatrix)
     return LeafInput(trace_element_type(typeof(x)), SHARED)
 end
+function input_spec(x::BatchedCuScalar)
+    return LeafInput(trace_element_type(typeof(x)), BATCHED)
+end
 function input_spec(x::BatchedCuVector)
     return LeafInput(trace_element_type(typeof(x)), BATCHED)
 end
@@ -359,7 +382,7 @@ function _reconstruct_trace_arg!(tape::Tape, spec::LeafInput)
         tape, InputNode(length(tape.inputs) + 1), NodeMeta(spec.trace_type, spec.lifecycle)
     )
     push!(tape.inputs, ref)
-    (spec.trace_type <: TraceMatrix || spec.trace_type <: TraceVector) ||
+    (spec.trace_type <: Union{TraceMatrix,TraceVector,TraceScalar}) ||
         error("trace: leaf input type $(spec.trace_type) not supported")
     # Batched matrix inputs are loaded via LoadNode (global → single layout)
     # and TransferNode (single → dual layout). The downstream user code

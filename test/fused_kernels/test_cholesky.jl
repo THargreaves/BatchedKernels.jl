@@ -165,3 +165,55 @@ end
     got = Array(result.data)
     @test maximum(abs.(got .- ref)) / maximum(abs.(ref)) < 1e-3
 end
+
+@testitem "Cholesky matrix solve delegates to factor solves" begin
+    using BatchedKernels, CUDA, LinearAlgebra, Random
+    const BK = BatchedKernels
+    direct(A, B) = cholesky(Symmetric(A)) \ B
+    factors(A, B) = begin
+        C = cholesky(Symmetric(A))
+        C.U \ (C.L \ B)
+    end
+    specs = BK.InputSpec[
+        BK.LeafInput(BK.TraceMatrix{Float32,3,3}, BK.BATCHED),
+        BK.LeafInput(BK.TraceMatrix{Float32,3,5}, BK.BATCHED),
+    ]
+    # Identical tapes ensure this convenience dispatch changes no device operations.
+    tape = BK.trace(direct, specs)
+    @test sprint(show, tape) == sprint(show, BK.trace(factors, specs))
+    solves = [n for n in tape.nodes if n isa BK.CallNode && n.fn === (\)]
+    @test length(solves) == 2
+    @test tape.metas[solves[1].args[1].id].type <: LowerTriangular
+    @test tape.metas[solves[2].args[1].id].type <: UpperTriangular
+    mismatch = copy(specs)
+    mismatch[2] = BK.LeafInput(BK.TraceMatrix{Float32,2,5}, BK.BATCHED)
+    @test_throws DimensionMismatch BK.trace(direct, mismatch)
+    lower(A, B) = Cholesky(A, 'L', 0) \ B
+    @test_throws ArgumentError BK.trace(lower, specs)
+
+    rng = MersenneTwister(681)
+    for T in (Float32, Float64)
+        N = 19
+        A = Array{T}(undef, 3, 3, N)
+        for k in 1:N
+            X = randn(rng, T, 3, 3)
+            A[:, :, k] = X * X' + I
+        end
+        B = randn(rng, T, 3, 5, N)
+        args = (BatchedCuMatrix(CuArray(A)), BatchedCuMatrix(CuArray(B)))
+        reference = cat((A[:, :, k] \ B[:, :, k] for k in 1:N)...; dims=3)
+        custom = automatic_assignment(
+            BK.trace(direct, BK.InputSpec[BK.input_spec(x) for x in args]); nthreads=64
+        )
+        for options in ((; policy=:auto, nthreads=64), (; assignment=custom))
+            result = @inferred fuse(direct, args...; options...)
+            @test Array(result.data) ≈ reference rtol = (T === Float32 ? 2e-5 : 1e-12)
+        end
+        if T === Float32 # Legacy masked Cholesky is Float32-only.
+            result = @inferred fuse(direct, args...; policy=:legacy, nthreads=64)
+            @test Array(result.data) ≈ reference rtol = 2e-5
+        end
+        @test Array(args[1].data) == A
+        @test Array(args[2].data) == B
+    end
+end

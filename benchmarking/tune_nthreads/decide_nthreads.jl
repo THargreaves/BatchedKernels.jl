@@ -23,9 +23,9 @@ using Statistics
 
 const TUNE_DIR    = @__DIR__
 const RESULTS_DIR = joinpath(TUNE_DIR, "results")
-# the schedule is written to studies/config/ -- the single source of
+# the schedule is written to benchmarking/config/ -- the single source of
 # truth read by roofline, benchmarks, and any other study via
-# config/Schedule.jl. tune_nthreads/ is studies/tune_nthreads/, so
+# config/Schedule.jl. tune_nthreads/ is benchmarking/tune_nthreads/, so
 # config/ is one level up.
 const CONFIG_DIR  = abspath(joinpath(TUNE_DIR, "..", "config"))
 const BENCH_CSV   = joinpath(RESULTS_DIR, "nthreads_benchmarks.csv")
@@ -360,7 +360,7 @@ function main()
     end
 
     # ---- nthreads_schedule.csv : the deliverable --------------------
-    # Written to studies/config/ -- the canonical location every other
+    # Written to benchmarking/config/ -- the canonical location every other
     # study reads via config/Schedule.jl. Single copy, no drift.
     mkpath(CONFIG_DIR)
     sched_csv = joinpath(CONFIG_DIR, "nthreads_schedule.csv")

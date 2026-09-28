@@ -53,7 +53,7 @@
         zs = CUDA.zeros(Float32, D, N)
 
         CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_vec_add!(
-            zs, xs, ys, Val(Int32(D)), Val(Int32(nthreads)), Int32(N),
+            zs, xs, ys, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
         )
 
         # CPU comparison
@@ -105,7 +105,7 @@ end
             # Perform operation
             batch_op!(-, z, x, y, d, Val(D))
         end
-        
+
         # Store z
         vector_write!(zs, shmem_3, Val(D), Val(nthreads), N)
 
@@ -122,7 +122,7 @@ end
         zs = CUDA.zeros(Float32, D, N)
 
         CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_vec_sub!(
-            zs, xs, ys, Val(Int32(D)), Val(Int32(nthreads)), Int32(N),
+            zs, xs, ys, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
         )
 
         # CPU comparison
@@ -209,7 +209,7 @@ end
             ys = CUDA.zeros(Float32, D, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matvec!(
-                ys, As, xs, A_adj, Val(Int32(D)), Val(Int32(nthreads)), Int32(N),
+                ys, As, xs, A_adj, Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
             )
 
             # CPU comparison
@@ -284,7 +284,7 @@ end
             zs = CUDA.zeros(Float32, D1, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_vec_add!(
-                zs, xs, ys, Val(Int32(D1)), Val(Int32(D)), Val(Int32(nthreads)), Int32(N),
+                zs, xs, ys, Val(Int32(D1)), Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
             )
 
             # CPU comparison
@@ -331,7 +331,9 @@ end
 
         # Load A
         intermediate_layout_load!(shmem_2, As, Val(D1), Val(D2), Val(D), Val(nthreads), N)
-        interm_to_dual_transfer!(shmem_1, shmem_2, Val(D1), Val(D2), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(
+            shmem_1, shmem_2, Val(D1), Val(D2), Val(D), Val(nthreads), N
+        )
 
         # Load x
         vector_load!(shmem_3, xs, Val(D2), Val(D), Val(nthreads), N)
@@ -366,7 +368,7 @@ end
             ys = CUDA.zeros(Float32, D1, N)
 
             CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matvec!(
-                ys, As, xs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N),
+                ys, As, xs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
             )
             ys_result = Array(ys)
 

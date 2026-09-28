@@ -80,7 +80,7 @@ function main(force::Bool)
         Val(:cusolver) => "cuSOLVER",
     )
 
-    path = "studies/benchmarks/bench_cholesky"
+    path = "benchmarks/bench_cholesky"
 
     generate_plots(2, 32, methods, Float32, path, force)
 end

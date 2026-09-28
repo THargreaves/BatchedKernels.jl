@@ -14,7 +14,7 @@
         ::Val{B_D2},
         ::Val{D},
         ::Val{nthreads},
-        N::Int32
+        N::Int32,
     ) where {D1,D2,B_D1,B_D2,D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
@@ -27,7 +27,10 @@
         wid = div(tid - 1i32, 32i32) + 1i32
         warp_matrix_id = div(lid - 1i32, D) + 1i32
         d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+        grid_mtrx_id =
+            warp_matrix_id +
+            (wid - 1i32) * n_mats_per_warp +
+            (bid - 1i32) * n_mats_per_block
 
         warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
         shmem_elems = warp_shmem_size * n_warps
@@ -39,11 +42,17 @@
 
         # Load A
         intermediate_layout_load!(shmem_3, As, Val(D1), Val(D2), Val(D), Val(nthreads), N)
-        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(
+            shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N
+        )
 
         # Load B
-        intermediate_layout_load!(shmem_3, Bs, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N)
-        interm_to_dual_transfer!(shmem_2, shmem_3, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N)
+        intermediate_layout_load!(
+            shmem_3, Bs, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N
+        )
+        interm_to_dual_transfer!(
+            shmem_2, shmem_3, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N
+        )
 
         A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
         R = A
@@ -53,12 +62,28 @@
 
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             batch_op!(qr, R, tau, A, d, Val(D1), Val(D2), Val(D), warp_matrix_id)
-            batch_op!(Val(:qr_Q_multiply), Val(false), C, R, B, d, tau, Val(D1), Val(D2), Val(B_D1), Val(B_D2), Val(D), warp_matrix_id)
+            batch_op!(
+                Val(:qr_Q_multiply),
+                Val(false),
+                C,
+                R,
+                B,
+                d,
+                tau,
+                Val(D1),
+                Val(D2),
+                Val(B_D1),
+                Val(B_D2),
+                Val(D),
+                warp_matrix_id,
+            )
         end
 
         # Store C
         dual_to_interm_transfer!(shmem_1, C, Val(D1), Val(B_D2), Val(D), Val(nthreads), N)
-        intermediate_layout_write!(Cs, shmem_1, Val(D1), Val(B_D2), Val(D), Val(nthreads), N)
+        intermediate_layout_write!(
+            Cs, shmem_1, Val(D1), Val(B_D2), Val(D), Val(nthreads), N
+        )
 
         return nothing
     end
@@ -109,14 +134,18 @@
 
                         max_error = maximum(abs.(Cs_real - Cs_cpu))
                         if max_error >= 1e-4
-                            error("ERROR: [$count/2106]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error")
+                            error(
+                                "ERROR: [$count/2106]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
+                            )
                             break
                         end
 
                         @test max_error < 1e-4
 
                         count += 1
-                        println("[$count/2106]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error")
+                        println(
+                            "[$count/2106]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
+                        )
                     end
                 end
             end
@@ -140,7 +169,7 @@ end
         ::Val{B_D2},
         ::Val{D},
         ::Val{nthreads},
-        N::Int32
+        N::Int32,
     ) where {D1,D2,B_D1,B_D2,D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
@@ -153,7 +182,10 @@ end
         wid = div(tid - 1i32, 32i32) + 1i32
         warp_matrix_id = div(lid - 1i32, D) + 1i32
         d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+        grid_mtrx_id =
+            warp_matrix_id +
+            (wid - 1i32) * n_mats_per_warp +
+            (bid - 1i32) * n_mats_per_block
 
         warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
         shmem_elems = warp_shmem_size * n_warps
@@ -165,11 +197,17 @@ end
 
         # Load A
         intermediate_layout_load!(shmem_3, As, Val(D1), Val(D2), Val(D), Val(nthreads), N)
-        interm_to_dual_transfer!(shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N)
+        interm_to_dual_transfer!(
+            shmem_1, shmem_3, Val(D1), Val(D2), Val(D), Val(nthreads), N
+        )
 
         # Load B
-        intermediate_layout_load!(shmem_3, Bs, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N)
-        interm_to_dual_transfer!(shmem_2, shmem_3, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N)
+        intermediate_layout_load!(
+            shmem_3, Bs, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N
+        )
+        interm_to_dual_transfer!(
+            shmem_2, shmem_3, Val(B_D1), Val(B_D2), Val(D), Val(nthreads), N
+        )
 
         A = DualAccessMatrix(shmem_1, Val(D), warp_matrix_id)
         R = A
@@ -179,12 +217,28 @@ end
 
         if warp_matrix_id <= n_mats_per_warp && grid_mtrx_id <= N
             batch_op!(qr, R, tau, A, d, Val(D1), Val(D2), Val(D), warp_matrix_id)
-            batch_op!(Val(:qr_Q_multiply), Val(true), C, R, B, d, tau, Val(D1), Val(D2), Val(B_D1), Val(B_D2), Val(D), warp_matrix_id)
+            batch_op!(
+                Val(:qr_Q_multiply),
+                Val(true),
+                C,
+                R,
+                B,
+                d,
+                tau,
+                Val(D1),
+                Val(D2),
+                Val(B_D1),
+                Val(B_D2),
+                Val(D),
+                warp_matrix_id,
+            )
         end
 
         # Store C
         dual_to_interm_transfer!(shmem_1, C, Val(D1), Val(B_D2), Val(D), Val(nthreads), N)
-        intermediate_layout_write!(Cs, shmem_1, Val(D1), Val(B_D2), Val(D), Val(nthreads), N)
+        intermediate_layout_write!(
+            Cs, shmem_1, Val(D1), Val(B_D2), Val(D), Val(nthreads), N
+        )
 
         return nothing
     end
@@ -235,14 +289,18 @@ end
 
                     max_error = maximum(abs.(Cs_real - Cs_cpu))
                     if max_error >= 1e-4
-                        error("ERROR: [$count/1458]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error")
+                        error(
+                            "ERROR: [$count/1458]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
+                        )
                         break
                     end
 
                     @test max_error < 1e-4
 
                     count += 1
-                    println("[$count/1458]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error")
+                    println(
+                        "[$count/1458]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
+                    )
                 end
             end
         end
@@ -254,14 +312,7 @@ end
     using CUDA: i32
     using LinearAlgebra
 
-    function qr_kernel!(
-        Rs,
-        As,
-        Bs,
-        ::Val{D},
-        ::Val{nthreads},
-        N::Int32,
-    ) where {D,nthreads}
+    function qr_kernel!(Rs, As, Bs, ::Val{D}, ::Val{nthreads}, N::Int32) where {D,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
         n_mats_per_block = n_warps * n_mats_per_warp
@@ -273,7 +324,10 @@ end
         wid = div(tid - 1i32, 32i32) + 1i32
         warp_matrix_id = div(lid - 1i32, D) + 1i32
         d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+        grid_mtrx_id =
+            warp_matrix_id +
+            (wid - 1i32) * n_mats_per_warp +
+            (bid - 1i32) * n_mats_per_block
 
         warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
         shmem_elems = warp_shmem_size * n_warps
@@ -303,7 +357,9 @@ end
         sync_warp()
 
         # Store R
-        dual_to_interm_transfer!(shmem_1, UpperTriangular(R), Val(D), Val(D), Val(D), Val(nthreads), N)
+        dual_to_interm_transfer!(
+            shmem_1, UpperTriangular(R), Val(D), Val(D), Val(D), Val(nthreads), N
+        )
         intermediate_layout_write!(Rs, shmem_1, Val(D), Val(D), Val(D), Val(nthreads), N)
 
         return nothing
@@ -327,17 +383,12 @@ end
         Rs_real = Array(Rs)
 
         CUDA.@sync @cuda threads = nthreads blocks = nblocks qr_kernel!(
-            Rs,
-            As,
-            Bs,
-            Val(Int32(D)),
-            Val(nthreads),
-            Int32(N),
+            Rs, As, Bs, Val(Int32(D)), Val(nthreads), Int32(N)
         )
 
         # CPU comparison
         Rs_res = Array(Rs)
-        
+
         max_error = 0.0
         for i in 1:N
             M = vcat(As_cpu[:, :, i]', Bs_cpu[:, :, i]')
@@ -362,14 +413,7 @@ end
     using LinearAlgebra
 
     function qr_kernel!(
-        Rs,
-        As,
-        Bs,
-        Cs,
-        ::Val{D},
-        ::Val{THRESH},
-        ::Val{nthreads},
-        N::Int32,
+        Rs, As, Bs, Cs, ::Val{D}, ::Val{THRESH}, ::Val{nthreads}, N::Int32
     ) where {D,THRESH,nthreads}
         n_mats_per_warp = 32i32 ÷ D
         n_warps = nthreads ÷ 32i32
@@ -382,7 +426,10 @@ end
         wid = div(tid - 1i32, 32i32) + 1i32
         warp_matrix_id = div(lid - 1i32, D) + 1i32
         d = mod1(lid, D)
-        grid_mtrx_id = warp_matrix_id + (wid - 1i32) * n_mats_per_warp + (bid - 1i32) * n_mats_per_block
+        grid_mtrx_id =
+            warp_matrix_id +
+            (wid - 1i32) * n_mats_per_warp +
+            (bid - 1i32) * n_mats_per_block
 
         warp_shmem_size = n_mats_per_warp * D * D + dual_padding * (D - 1i32)
         shmem_elems = warp_shmem_size * n_warps
@@ -417,7 +464,9 @@ end
         sync_warp()
 
         # Store R
-        dual_to_interm_transfer!(shmem_1, UpperTriangular(R), Val(D), Val(D), Val(D), Val(nthreads), N)
+        dual_to_interm_transfer!(
+            shmem_1, UpperTriangular(R), Val(D), Val(D), Val(D), Val(nthreads), N
+        )
         intermediate_layout_write!(Rs, shmem_1, Val(D), Val(D), Val(D), Val(nthreads), N)
 
         return nothing
@@ -444,19 +493,12 @@ end
         Rs_real = Array(Rs)
 
         CUDA.@sync @cuda threads = nthreads blocks = nblocks qr_kernel!(
-            Rs,
-            As,
-            Bs,
-            Cs,
-            Val(Int32(D)),
-            Val(Int32(THRESH)),
-            Val(nthreads),
-            Int32(N),
+            Rs, As, Bs, Cs, Val(Int32(D)), Val(Int32(THRESH)), Val(nthreads), Int32(N)
         )
 
         # CPU comparison
         Rs_res = Array(Rs)
-        
+
         max_error = 0.0
         for i in 1:N
             M = [
@@ -464,7 +506,7 @@ end
                 Bs_cpu[:, :, i]' Cs_cpu[:, :, i]
             ]
             R_full = qr(M).R
-            R_expected = R_full[D+1:2D, D+1:2D]
+            R_expected = R_full[(D + 1):2D, (D + 1):2D]
 
             err = maximum(abs.(R_expected .- Rs_res[:, :, i]))
             max_error = max(max_error, err)

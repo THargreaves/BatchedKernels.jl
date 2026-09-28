@@ -78,6 +78,36 @@ function emit_primitive(::typeof(+), dest::Symbol, args::Vector, types::Vector, 
     end
 end
 
+function emit_primitive(::typeof(/), dest::Symbol, args::Vector, types::Vector, D_MAX::Int)
+    _is_scalar_op(types) && return _emit_scalar_assign(/, dest, args)
+    m, n = shape(types[1])
+    return :(variant_op!(
+        Val(:divide_row),
+        $dest,
+        $(args[1]),
+        $(args[2]),
+        d,
+        Val(Int32($m)),
+        Val(Int32($n)),
+        Val(Int32($D_MAX)),
+    ))
+end
+
+function emit_primitive(
+    ::typeof(one), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
+    m, n = shape(types[1])
+    return :(variant_op!(
+        Val(:identity_row),
+        $dest,
+        $(args[1]),
+        d,
+        Val(Int32($m)),
+        Val(Int32($n)),
+        Val(Int32($D_MAX)),
+    ))
+end
+
 function emit_primitive(::typeof(-), dest::Symbol, args::Vector, types::Vector, D_MAX::Int)
     if length(args) == 1
         # Unary scalar negation.
@@ -172,6 +202,9 @@ shape(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N} = (D_M, D_N)
 shape(::Type{TraceVector{T,D_M}}) where {T,D_M} = (D_M,)
 shape(::Type{<:TraceScalar}) = ()
 shape(::Type{<:Adjoint{T,S}}) where {T,S} = reverse(shape(S))
+shape(::Type{<:Transpose{T,S}}) where {T,S} = reverse(shape(S))
+shape(::Type{<:UnitLowerTriangular{T,S}}) where {T,S} = shape(S)
+shape(::Type{<:UnitUpperTriangular{T,S}}) where {T,S} = shape(S)
 shape(::Type{<:LowerTriangular{T,S}}) where {T,S} = shape(S)
 shape(::Type{<:UpperTriangular{T,S}}) where {T,S} = shape(S)
 shape(::Type{<:Symmetric{T,S}}) where {T,S} = shape(S)
@@ -252,44 +285,16 @@ end
 # Scalar-producing reductions
 # =============================================================================
 #
-# Reductions go through a `batch_op!(Val(:…), …)` sub-kernel that uses
-# `warp_reduce_sum` internally, leaving the canonical value in the leader lane
-# of each warp-matrix group (other lanes hold partial garbage). We then
-# `shfl_sync` the leader's value to all D lanes so the TraceScalar local is
-# uniformly correct — downstream scalar arithmetic on `(dest)` then produces
-# the right value on every lane.
-
-# Emit the boilerplate: call `reduction_call`, build the per-warp-matrix mask
-# from (D_op, D_MAX), shuffle the leader's value, assign to `dest`.
-function _emit_warp_reduction_broadcast(
-    reduction_call::Expr, dest::Symbol, D_op::Int, D_MAX::Int
-)
-    val_sym = gensym(:val)
-    base_sym = gensym(:base)
-    mask_sym = gensym(:mask)
-    return quote
-        $val_sym = $reduction_call
-        $base_sym = (warp_matrix_id - 1i32) * $(Int32(D_MAX))
-        $mask_sym =
-            ((UInt32(1) << ($(Int32(D_op)) % UInt32)) - UInt32(1)) << ($base_sym % UInt32)
-        $dest = shfl_sync($mask_sym, $val_sym, ($base_sym + 1i32) % UInt32)
-    end
-end
+# Both backends use reductions over the complete D_MAX-wide matrix group.
+# Logical padding contributes zero; the leader result is broadcast to every lane.
+# This also handles full-warp groups without shifting UInt32 by 32 bits.
 
 function emit_primitive(
     ::typeof(logdet), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
 )
     M, = args
-    D_M = shape(types[1])[1]
-    reduction = :(batch_op!(
-        Val(:log_det),
-        UpperTriangular($M),
-        d,
-        Val(Int32($D_M)),
-        Val(Int32($D_MAX)),
-        warp_matrix_id,
-    ))
-    return _emit_warp_reduction_broadcast(reduction, dest, D_M, D_MAX)
+    n = shape(types[1])[1]
+    return :($dest = variant_logdet($M, d, Val(Int32($n)), Val(Int32($D_MAX))))
 end
 
 function emit_primitive(
@@ -297,8 +302,37 @@ function emit_primitive(
 )
     v, = args
     D_M, = shape(types[1])
-    reduction = :(batch_op!(
-        Val(:mahal_dist), $v, d, Val(Int32($D_M)), Val(Int32($D_MAX)), warp_matrix_id
+    return :($dest = variant_norm_sq($v, d, Val(Int32($D_M)), Val(Int32($D_MAX))))
+end
+
+function emit_primitive(
+    ::typeof(dot), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
+    n, = shape(types[1])
+    return :(
+        $dest = variant_dot($(args[1]), $(args[2]), d, Val(Int32($n)), Val(Int32($D_MAX)))
+    )
+end
+
+function emit_primitive(
+    ::typeof(symmetric_part), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
+    n = shape(types[1])[1]
+    return :(variant_op!(
+        Val(:symmetric_row), $dest, $(args[1]), d, Val(Int32($n)), Val(Int32($D_MAX))
     ))
-    return _emit_warp_reduction_broadcast(reduction, dest, D_M, D_MAX)
+end
+
+# The standalone stack also works with legacy dual storage. Multi-result block
+# QR uses the hybrid planner because all result lifetimes start at its producer.
+function emit_primitive(
+    ::typeof(qr_upper_stack), dest::Symbol, args::Vector, types::Vector, D_MAX::Int
+)
+    candidates = orientation_variants(qr_upper_stack, types...)
+    isempty(candidates) &&
+        throw(ArgumentError("Unsupported QR stack shapes or element types"))
+    # Legacy storage keeps the established row-owned body, `:qr_stack_col` (named for
+    # its ColAccess contract: each lane owns a row). The column-owned body is hybrid-only.
+    variant = only(v for v in candidates if v.id === :qr_stack_col)
+    return emit_variant(variant, dest, args, types, D_MAX)
 end

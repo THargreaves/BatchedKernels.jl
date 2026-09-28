@@ -56,7 +56,7 @@ mkdir -p logs
 # Check that the nthreads schedule exists, if not, fail early
 if [[ "$PROFILE" == "tuned" && ! -f "../config/nthreads_schedule.csv" ]]; then
     echo "run_pipeline.sh: profile 'tuned' requires ../config/nthreads_schedule.csv" >&2
-    echo "  -> run studies/tune_nthreads/run_tuning.sh first," >&2
+    echo "  -> run tune_nthreads/run_tuning.sh first," >&2
     echo "     or pass 'baseline' as the 4th argument for the naive run." >&2
     exit 1
 fi

@@ -94,7 +94,7 @@ function main(force)
         Val(:defrag) => "Defragmentation",
     )
 
-    path = "studies/comparison_repeated_mul_mask_vs_defrag"
+    path = "comparison_repeated_mul_mask_vs_defrag"
 
     generate_plots(4, 8, 20, methods, Float32, path, force)
 end

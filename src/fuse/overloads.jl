@@ -40,11 +40,93 @@ function Base.:*(
     return TraceMatrix{T,D_M,D_P}(tape, out)
 end
 
+# Triangular state roots must retain their logical mask when multiplied. These
+# methods record ordinary matmul nodes; the existing accessor/variant contracts
+# handle the wrapper and its orientation without materializing a dense copy.
+const TraceTriangularMatrix{T} = Union{
+    UpperTriangular{T,<:TraceMatrix{T}},
+    LowerTriangular{T,<:TraceMatrix{T}},
+    UpperTriangular{T,<:Adjoint{T,<:TraceMatrix{T}}},
+    LowerTriangular{T,<:Adjoint{T,<:TraceMatrix{T}}},
+    UpperTriangular{T,<:Transpose{T,<:TraceMatrix{T}}},
+    LowerTriangular{T,<:Transpose{T,<:TraceMatrix{T}}},
+}
+_trace_tape(A::TraceMatrix) = A.tape
+_trace_tape(A) = _trace_tape(parent(A))
+function _trace_wrapped_product(A::AbstractMatrix{T}, B::AbstractMatrix{T}) where {T}
+    m, k = size(A)
+    kb, n = size(B)
+    k == kb || throw(DimensionMismatch("Matrix product inner dimensions differ"))
+    tape = _trace_tape(A)
+    tape === _trace_tape(B) ||
+        throw(ArgumentError("Product operands belong to different tapes"))
+    refs = NodeRef[register_wrapped!(tape, A), register_wrapped!(tape, B)]
+    ref = emit_call!(tape, *, refs, TraceMatrix{T,m,n})
+    return TraceMatrix{T,m,n}(tape, ref)
+end
+function Base.:*(A::TraceTriangularMatrix{T}, B::TraceMatrix{T}) where {T}
+    return _trace_wrapped_product(A, B)
+end
+function Base.:*(A::TraceMatrix{T}, B::TraceTriangularMatrix{T}) where {T}
+    return _trace_wrapped_product(A, B)
+end
+function Base.:*(A::TraceTriangularMatrix{T}, B::Adjoint{T,<:TraceMatrix{T}}) where {T}
+    return _trace_wrapped_product(A, B)
+end
+function Base.:*(A::TraceTriangularMatrix{T}, B::Transpose{T,<:TraceMatrix{T}}) where {T}
+    return _trace_wrapped_product(A, B)
+end
+
 # --- Matrix + Matrix --------------------------------------------------------
 
 function Base.:+(A::TraceMatrix{T,D_M,D_N}, B::TraceMatrix{T,D_M,D_N}) where {T,D_M,D_N}
     out = emit_call!(A.tape, +, NodeRef[A.ref, B.ref], TraceMatrix{T,D_M,D_N})
     return TraceMatrix{T,D_M,D_N}(A.tape, out)
+end
+
+# Preserve ordinary wrapped addition, including the unmodified expression
+# `(A + A') / 2`. The planner sees the adjoint and can reject unsafe aliasing.
+for Wrapper in (Adjoint, Transpose)
+    @eval begin
+        function Base.:+(
+            A::TraceMatrix{T,M,N}, B::$Wrapper{T,TraceMatrix{T,N,M}}
+        ) where {T,M,N}
+            A.tape === parent(B).tape ||
+                throw(ArgumentError("Sum operands belong to different tapes"))
+            ref = register_wrapped!(A.tape, B)
+            out = emit_call!(A.tape, +, NodeRef[A.ref, ref], TraceMatrix{T,M,N})
+            return TraceMatrix{T,M,N}(A.tape, out)
+        end
+        function Base.:+(
+            A::$Wrapper{T,TraceMatrix{T,N,M}}, B::TraceMatrix{T,M,N}
+        ) where {T,M,N}
+            return B + A
+        end
+    end
+end
+
+# A genuine identity operation: the emitted body does not inspect A's values.
+# In particular, NaN or Inf inputs must not contaminate off-diagonal zeros.
+function Base.one(A::TraceMatrix{T,M,N}) where {T,M,N}
+    M == N || throw(DimensionMismatch("multiplicative identity requires a square matrix"))
+    out = emit_call!(A.tape, one, NodeRef[A.ref], TraceMatrix{T,M,N})
+    return TraceMatrix{T,M,N}(A.tape, out)
+end
+
+function Base.:/(A::TraceMatrix{T,M,N}, b::Number) where {T,M,N}
+    ref = emit_const!(A.tape, T(b))
+    out = emit_call!(A.tape, /, NodeRef[A.ref, ref], TraceMatrix{T,M,N})
+    return TraceMatrix{T,M,N}(A.tape, out)
+end
+function Base.:/(A::TraceMatrix{T,M,N}, b::TraceScalar{T}) where {T,M,N}
+    A.tape === b.tape || throw(ArgumentError("Division operands belong to different tapes"))
+    out = emit_call!(A.tape, /, NodeRef[A.ref, b.ref], TraceMatrix{T,M,N})
+    return TraceMatrix{T,M,N}(A.tape, out)
+end
+
+function symmetric_part(A::TraceMatrix{T,D,D}) where {T<:Real,D}
+    out = emit_call!(A.tape, symmetric_part, NodeRef[A.ref], TraceMatrix{T,D,D})
+    return TraceMatrix{T,D,D}(A.tape, out)
 end
 
 # --- aI + bM as a zero-cost wrapper -----------------------------------------
@@ -90,6 +172,15 @@ function LinearAlgebra.cholesky!(A::TraceMatrix{T,D_M,D_M}) where {T,D_M}
     return Cholesky(factor, 'U', 0)
 end
 
+# A factorization solve is a scalar composition of the existing triangular
+# primitives. No separate device body or storage/orientation contract is needed.
+function Base.:\(C::Cholesky{T,<:TraceMatrix{T,D,D}}, B::TraceMatrix{T,M,N}) where {T,D,M,N}
+    D == M || throw(DimensionMismatch("Cholesky factor and RHS row dimensions differ"))
+    C.uplo == 'U' ||
+        throw(ArgumentError("Trace-backed Cholesky solves require upper-stored factors"))
+    return C.U \ (C.L \ B)
+end
+
 # --- Triangular solves ------------------------------------------------------
 
 function Base.:\(
@@ -108,6 +199,14 @@ function Base.:\(
     Uref = register_wrapped!(tape, U)
     out = emit_call!(tape, \, NodeRef[Uref, M.ref], TraceMatrix{T,D_M,D_N})
     return TraceMatrix{T,D_M,D_N}(tape, out)
+end
+
+function Base.:\(
+    A::Union{UnitLowerTriangular{T,S},UnitUpperTriangular{T,S}}, M::TraceMatrix{T,D_M,D_N}
+) where {T,D_M,D_N,S<:AbstractMatrix{T}}
+    ref = register_wrapped!(M.tape, A)
+    out = emit_call!(M.tape, \, NodeRef[ref, M.ref], TraceMatrix{T,D_M,D_N})
+    return TraceMatrix{T,D_M,D_N}(M.tape, out)
 end
 
 function LinearAlgebra.ldiv!(
@@ -287,10 +386,12 @@ function Base.sum(::typeof(abs2), v::TraceVector{T,D_M}) where {T,D_M}
 end
 
 function LinearAlgebra.dot(v::TraceVector{T,D_M}, w::TraceVector{T,D_M}) where {T,D_M}
-    v.ref == w.ref || error(
-        "BatchedKernels: dot(u, v) with distinct tape values is not supported; use sum(abs2, v) / dot(v, v)",
-    )
-    out = emit_call!(v.tape, _norm_sq, NodeRef[v.ref], TraceScalar{T})
+    v.tape === w.tape || throw(ArgumentError("Dot operands belong to different tapes"))
+    out = if v.ref == w.ref
+        emit_call!(v.tape, _norm_sq, NodeRef[v.ref], TraceScalar{T})
+    else
+        emit_call!(v.tape, dot, NodeRef[v.ref, w.ref], TraceScalar{T})
+    end
     return TraceScalar{T}(v.tape, out)
 end
 
@@ -314,7 +415,7 @@ end
 # Number literals get folded as `ConstNode(T(x))` so they bake into the
 # generated kernel at the trace eltype.
 
-for _op in (:+, :-, :*)
+for _op in (:+, :-, :*, :/)
     @eval begin
         function Base.$_op(a::TraceScalar{T}, b::TraceScalar{T}) where {T}
             out = emit_call!(a.tape, $_op, NodeRef[a.ref, b.ref], TraceScalar{T})
@@ -331,6 +432,12 @@ for _op in (:+, :-, :*)
             return TraceScalar{T}(b.tape, out)
         end
     end
+end
+
+# Matching-type operands use the specific method above. Reject mixed traced
+# precision explicitly rather than leaving the two Number overloads ambiguous.
+function Base.:/(::TraceScalar, ::TraceScalar)
+    return throw(ArgumentError("Traced scalar division requires matching element types"))
 end
 
 function Base.:-(s::TraceScalar{T}) where {T}

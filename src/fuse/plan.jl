@@ -67,6 +67,7 @@ function pool_kind(meta::NodeMeta)
 end
 
 function plan_memory(tape::Tape; order::AbstractVector{Int}=1:length(tape.nodes))
+    _require_single_result_calls(tape)
     N = length(tape.nodes)
     length(order) == N ||
         error("plan_memory: order length $(length(order)) ≠ tape length $N")
@@ -104,6 +105,16 @@ function plan_memory(tape::Tape; order::AbstractVector{Int}=1:length(tape.nodes)
                 end
             end
         end
+    end
+
+    canonical = canonical_storage_owners(tape)
+    owner_last = Dict{Int,Int}()
+    for i in 1:N
+        root = canonical[i]
+        owner_last[root] = max(get(owner_last, root, 0), get(last_use, i, 0))
+    end
+    for i in 1:N
+        last_use[i] = owner_last[canonical[i]]
     end
 
     shared_slots = Dict{Int,SlotAssignment}()
@@ -242,6 +253,7 @@ end
 node_refs(::InputNode) = NodeRef[]
 node_refs(::ConstNode) = NodeRef[]
 node_refs(n::CallNode) = n.args
+node_refs(n::ResultNode) = NodeRef[n.producer]
 node_refs(n::NewNode) = NodeRef[p.second for p in n.fields]
 
 function resolve_slot_owner(tape::Tape, ref::NodeRef)
@@ -294,6 +306,8 @@ function _free_dead_arg!(
         owner_slot.kind === dest_slot.kind
         return nothing
     end
+    any(j -> slots[j] == owner_slot && get(last_use, j, 0) > pos, keys(slots)) &&
+        return nothing
     key = (owner_slot.kind, owner_slot.idx)
     key in freed_here && return nothing
     push!(freed_here, key)
@@ -347,7 +361,43 @@ function _maybe_auto_inplace_slot(
         slot = slots[ref.id]
         slot.kind === dest_kind || continue
         get(last_use, ref.id, 0) == i || continue
+        _legacy_alias_candidate_safe(tape, node, k) || continue
+        any(node.args) do other
+            tape.nodes[other.id] isa NewNode || return false
+            root = resolve_slot_owner(tape, other)
+            return haskey(slots, root) && slots[root] == slot
+        end && continue
+        any(j -> slots[j] == slot && get(last_use, j, 0) > i, keys(slots)) && continue
         return slot
     end
     return nothing
+end
+
+# Identity of mutable storage, distinct from SSA names and logical wrappers.
+function canonical_storage_owners(tape::Tape)
+    owners = Dict{Int,Int}()
+    for (i, node) in enumerate(tape.nodes)
+        owner = i
+        if node isa NewNode
+            refs = [r for r in node_refs(node) if tape.metas[r.id].lifecycle != LITERAL]
+            length(refs) == 1 && (owner = get(owners, only(refs).id, only(refs).id))
+        else
+            target = _maybe_inplace_idx(tape, node)
+            target === nothing || (owner = owners[node.args[target].id])
+        end
+        owners[i] = owner
+    end
+    return owners
+end
+
+# An overlapping remapped view cannot share the destination of a pointwise op.
+function _legacy_alias_candidate_safe(tape::Tape, node::CallNode, k::Int)
+    owners = canonical_storage_owners(tape)
+    target = node.args[k].id
+    tape.nodes[target] isa NewNode && return false
+    for ref in node.args
+        owners[ref.id] == owners[target] || continue
+        tape.nodes[ref.id] isa NewNode && return false
+    end
+    return true
 end

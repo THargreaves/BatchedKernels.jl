@@ -24,10 +24,12 @@ struct LiteralOutput <: OutputSpec
     val::Any
 end
 
-function extract_output_spec(tape::Tape, planner::PlannerOutput)
+function extract_output_spec(tape::Tape, planner::Union{PlannerOutput,HybridPlannerOutput})
     return _extract_spec(tape, planner, tape.output)
 end
-function _extract_spec(tape::Tape, planner::PlannerOutput, ref::NodeRef)
+function _extract_spec(
+    tape::Tape, planner::Union{PlannerOutput,HybridPlannerOutput}, ref::NodeRef
+)
     node = tape.nodes[ref.id]
     if node isa NewNode
         fields = Pair{Symbol,OutputSpec}[
