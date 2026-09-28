@@ -61,11 +61,10 @@ algorithms. GeneralisedFilters continues to own model resolution, particle
 weights, resampling, trajectory storage, covariance repair, and differentiation.
 BatchedKernels has no dependency on GeneralisedFilters.
 
-The [readiness report](benchmarking/kalman/SMALL_KALMAN_READINESS.md) records the
-implementation history. Current measurements are in the
-[SRKF](benchmarking/kalman/SRKF_PERFORMANCE.md) and
-[backward](benchmarking/kalman/BACKWARD_PERFORMANCE.md) reports. Benchmark scripts
-and experimental variants are development tools, not required by an application.
+Measurements and the scripts that reproduce them are summarised in
+[benchmarking/kalman](benchmarking/kalman/README.md) and
+[benchmarking/matmul](benchmarking/matmul/README.md). Benchmark scripts are
+development tools, not required by an application.
 
 ## Testing
 

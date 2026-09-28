@@ -1,5 +1,5 @@
 # CPU-only, exact topological-order audit; no CuArray allocation or GPU launch.
-# The subset DP is shared in methodology with pressure_audit/kalman_liveness.jl.
+# The subset DP follows the same methodology as the Kalman liveness audit.
 include("intermediate_storage.jl")
 function min_register_order(tape, assignment; D=32)
     probe = BK.plan_memory(tape, assignment; D_MAX=D)
