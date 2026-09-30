@@ -4,6 +4,8 @@
 
 ### Fusion and numerical operations
 
+- Compile large QR problems in groups of four reflectors, retaining full
+  unrolling for small problems and register storage for working fragments.
 - Add `BatchedRNG(seed)` and fused uniform/normal sampling for Float32/Float64
   scalars, vectors and matrices. Streams advance automatically per sampling
   launch, support reseeding/copying, and preserve draws across scheduling,

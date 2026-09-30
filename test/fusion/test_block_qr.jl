@@ -166,7 +166,9 @@ end
         randn(T, n, m, N)
         randn(T, n, n, N)
     end
-    check_block_qr_cases(((Float32, 16, 20, 3), (Float64, 2, 32, 2)))
+    check_block_qr_cases(
+        ((Float32, 16, 20, 3), (Float64, 2, 32, 2), (Float32, 32, 32, 2))
+    )
 end
 
 @testitem "Automatic SRKF step and likelihood" tags = [:gpu] begin
