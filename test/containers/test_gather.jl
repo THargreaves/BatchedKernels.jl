@@ -69,10 +69,16 @@
     @test literal.value === 'L'
     @test length(literal) == length(idxs)
 
+    # Ordinary vector components are gathered by their own indexing.
+    plain = BatchedStruct(Belief, (; mean=collect(1:n), covariance=L))[idxs]
+    @test plain.components.mean == idxs
+    @test eltype(plain) === Belief{Int,eltype(L)}
+
     # Declared field types that the gathered leaves still satisfy are retained.
     Abstract = Belief{AbstractVector{Float32},AbstractMatrix{Float32}}
     @test eltype(BatchedStruct(Abstract, (; mean=μ, covariance=Σ))[idxs]) === Abstract
 
+    @test length(particles[Int[]]) == 0
     @test_throws BoundsError particles[[0]]
     @test_throws BoundsError particles[[n + 1]]
     @test_throws ArgumentError particles[trues(n)]
@@ -126,6 +132,10 @@ end
     @test Array(c.ancestor.data) == ancestry[idxs]
     @test c.state.components.z.components.mean.data === μ.data
     @test length(c.state.components.z.components.mean) == n
+
+    raw = BatchedStruct(Belief, (; mean=CuArray(ancestry), covariance=Σ))[device_idxs]
+    @test Array(raw.components.mean) == ancestry[idxs]
+    @test eltype(raw) === Belief{Int64,eltype(Σ)}
 
     c.state.components.z.components.covariance.data .= -1
     @test Array(Σ.data) == Σ_host

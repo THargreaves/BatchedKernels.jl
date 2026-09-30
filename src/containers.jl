@@ -28,9 +28,15 @@ struct BatchedCuMatrix{T,D1,D2,A<:AbstractArray{T,3},V} <: AbstractVector{V}
 end
 function BatchedCuMatrix(data::A) where {T,A<:AbstractArray{T,3}}
     D1, D2 = size(data, 1), size(data, 2)
-    # Only the view type is needed; permit an empty batch without dereferencing it.
-    V = typeof(@inbounds view(data, :, :, 1))
-    return BatchedCuMatrix{T,D1,D2,A,V}(data)
+    return BatchedCuMatrix{T,D1,D2,A,_entry_view_type(A)}(data)
+end
+# Derive an entry's view type from the storage type, as Base does for the element
+# type of an empty `map`, so empty batches need no (out-of-bounds) view.
+function _entry_view_type(::Type{A}) where {A<:AbstractArray{<:Any,3}}
+    return Base.promote_op(view, A, Colon, Colon, Int)
+end
+function _entry_view_type(::Type{A}) where {A<:AbstractArray{<:Any,2}}
+    return Base.promote_op(view, A, Colon, Int)
 end
 inner_shape(::Type{<:BatchedCuMatrix{T,D1,D2}}) where {T,D1,D2} = (D1, D2)
 inner_shape(x::BatchedCuMatrix) = inner_shape(typeof(x))
@@ -48,8 +54,7 @@ struct BatchedCuVector{T,D,A<:AbstractArray{T,2},V} <: AbstractVector{V}
 end
 function BatchedCuVector(data::A) where {T,A<:AbstractArray{T,2}}
     D = size(data, 1)
-    V = typeof(@inbounds view(data, :, 1))
-    return BatchedCuVector{T,D,A,V}(data)
+    return BatchedCuVector{T,D,A,_entry_view_type(A)}(data)
 end
 inner_shape(::Type{<:BatchedCuVector{T,D}}) where {T,D} = (D,)
 inner_shape(x::BatchedCuVector) = inner_shape(typeof(x))
@@ -112,12 +117,8 @@ Base.IndexStyle(::Type{<:SharedCuVector}) = IndexLinear()
 Base.getindex(x::SharedCuVector, ::Integer) = x.data
 
 # -----------------------------------------------------------------------------
-# Shared union and helpers
+# Shared helpers
 # -----------------------------------------------------------------------------
-
-const BatchedOrShared = Union{
-    BatchedCuMatrix,BatchedCuVector,BatchedCuScalar,SharedCuMatrix,SharedCuVector
-}
 
 is_shared_type(::Type{<:BatchedCuMatrix}) = false
 is_shared_type(::Type{<:BatchedCuVector}) = false
@@ -288,7 +289,15 @@ end
 # Batch gathering
 # -----------------------------------------------------------------------------
 
-const _GatherableBatch = Union{BatchedOrShared,SharedValue,BatchedStruct}
+const BatchedOrShared = Union{
+    BatchedCuMatrix,
+    BatchedCuVector,
+    BatchedCuScalar,
+    SharedCuMatrix,
+    SharedCuVector,
+    SharedValue,
+    BatchedStruct,
+}
 
 """
     batch[idxs::AbstractVector{<:Integer}]
@@ -307,7 +316,7 @@ type the gathered field still satisfies is kept, and the type parameters used
 directly as the other field types are substituted. Composites whose types cannot be
 relabelled this way, and logical indexing, raise an `ArgumentError`.
 """
-function Base.getindex(x::_GatherableBatch, idxs::AbstractVector{<:Integer})
+function Base.getindex(x::BatchedOrShared, idxs::AbstractVector{<:Integer})
     eltype(idxs) === Bool &&
         throw(ArgumentError("logical indexing of batches is not supported"))
     # Check once for the whole composite: each device-index check is a reduction
@@ -320,13 +329,11 @@ end
 # input's static dimensions so gathering stays inferable.
 function _gather(x::BatchedCuMatrix{T,D1,D2}, idxs) where {T,D1,D2}
     data = @inbounds x.data[:, :, idxs]
-    V = typeof(@inbounds view(data, :, :, 1))
-    return BatchedCuMatrix{T,D1,D2,typeof(data),V}(data)
+    return BatchedCuMatrix{T,D1,D2,typeof(data),_entry_view_type(typeof(data))}(data)
 end
 function _gather(x::BatchedCuVector{T,D}, idxs) where {T,D}
     data = @inbounds x.data[:, idxs]
-    V = typeof(@inbounds view(data, :, 1))
-    return BatchedCuVector{T,D,typeof(data),V}(data)
+    return BatchedCuVector{T,D,typeof(data),_entry_view_type(typeof(data))}(data)
 end
 _gather(x::BatchedCuScalar, idxs) = BatchedCuScalar(@inbounds x.data[idxs])
 function _gather(x::SharedCuMatrix{T,D1,D2,A}, idxs) where {T,D1,D2,A}
@@ -336,6 +343,8 @@ function _gather(x::SharedCuVector{T,D,A}, idxs) where {T,D,A}
     return SharedCuVector{T,D,A}(x.data, length(idxs))
 end
 _gather(x::SharedValue, idxs) = SharedValue(x.value, length(idxs))
+# Composites may also hold ordinary host or device vectors.
+_gather(x::AbstractVector, idxs) = x[idxs]
 function _gather(x::BatchedStruct{T}, idxs) where {T}
     components = map(c -> _gather(c, idxs), getfield(x, :components))
     R = _composite_eltype(T, typeof(components))
