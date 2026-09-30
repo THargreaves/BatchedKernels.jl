@@ -1,4 +1,4 @@
-@testitem "Vector Addition" begin
+@testitem "Vector Addition" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -44,7 +44,7 @@
         return nothing
     end
 
-    for D in 2:16
+    for D in SubKernelShapes.square(16)
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
         CUDA.seed!(1234)
 
@@ -66,7 +66,7 @@
     end
 end
 
-@testitem "Vector Subtraction" begin
+@testitem "Vector Subtraction" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -112,7 +112,7 @@ end
         return nothing
     end
 
-    for D in 2:16
+    for D in SubKernelShapes.square(16)
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
         CUDA.seed!(1234)
@@ -135,7 +135,7 @@ end
     end
 end
 
-@testitem "Matrix-Vector Multiplication" begin
+@testitem "Matrix-Vector Multiplication" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -195,7 +195,7 @@ end
     # Test both A * x and A' * x
     test_cases = [false, true]
 
-    for D in 2:16
+    for D in SubKernelShapes.square(16)
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
         CUDA.seed!(1234)
@@ -228,7 +228,7 @@ end
     end
 end
 
-@testitem "Vector Addition (non-square)" begin
+@testitem "Vector Addition (non-square)" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -274,31 +274,29 @@ end
         return nothing
     end
 
-    for D1 in 2:16
-        for D in D1:16
-            nblocks = cld(N, nthreads//32 * (32 ÷ D))
-            CUDA.seed!(1234)
+    for (D1, D) in SubKernelShapes.padded(16)
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
+        CUDA.seed!(1234)
 
-            xs = CUDA.rand(Float32, D1, N)
-            ys = CUDA.rand(Float32, D1, N)
-            zs = CUDA.zeros(Float32, D1, N)
+        xs = CUDA.rand(Float32, D1, N)
+        ys = CUDA.rand(Float32, D1, N)
+        zs = CUDA.zeros(Float32, D1, N)
 
-            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_vec_add!(
-                zs, xs, ys, Val(Int32(D1)), Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
-            )
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_vec_add!(
+            zs, xs, ys, Val(Int32(D1)), Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
+        )
 
-            # CPU comparison
-            xs_cpu = Array(xs)
-            ys_cpu = Array(ys)
-            zs_cpu = xs_cpu .+ ys_cpu
+        # CPU comparison
+        xs_cpu = Array(xs)
+        ys_cpu = Array(ys)
+        zs_cpu = xs_cpu .+ ys_cpu
 
-            max_error = maximum(abs.(Array(zs) .- zs_cpu))
-            @test max_error < 1e-5
-        end
+        max_error = maximum(abs.(Array(zs) .- zs_cpu))
+        @test max_error < 1e-5
     end
 end
 
-@testitem "Matrix-Vector Multiplication (non-square)" begin
+@testitem "Matrix-Vector Multiplication (non-square)" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -353,33 +351,31 @@ end
         return nothing
     end
 
-    for D1 in 2:16
-        for D2 in 2:16
-            D = max(D1, D2)
-            nblocks = cld(N, nthreads//32 * (32 ÷ D))
+    for (D1, D2) in SubKernelShapes.rectangular(16)
+        D = max(D1, D2)
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
-            CUDA.seed!(1234)
+        CUDA.seed!(1234)
 
-            As = CUDA.rand(Float32, D1, D2, N)
-            xs = CUDA.rand(Float32, D2, N)
-            As_cpu = Array(As)
-            xs_cpu = Array(xs)
+        As = CUDA.rand(Float32, D1, D2, N)
+        xs = CUDA.rand(Float32, D2, N)
+        As_cpu = Array(As)
+        xs_cpu = Array(xs)
 
-            ys = CUDA.zeros(Float32, D1, N)
+        ys = CUDA.zeros(Float32, D1, N)
 
-            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matvec!(
-                ys, As, xs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
-            )
-            ys_result = Array(ys)
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matvec!(
+            ys, As, xs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
+        )
+        ys_result = Array(ys)
 
-            # CPU comparison
-            ys_cpu = similar(ys_result)
-            for i in 1:N
-                ys_cpu[:, i] = As_cpu[:, :, i] * xs_cpu[:, i]
-            end
-
-            max_error = maximum(abs.(ys_result .- ys_cpu))
-            @test max_error < 1e-5
+        # CPU comparison
+        ys_cpu = similar(ys_result)
+        for i in 1:N
+            ys_cpu[:, i] = As_cpu[:, :, i] * xs_cpu[:, i]
         end
+
+        max_error = maximum(abs.(ys_result .- ys_cpu))
+        @test max_error < 1e-5
     end
 end

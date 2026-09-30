@@ -1,4 +1,4 @@
-@testitem "Cholesky Decomposition (in-place) (small)" begin
+@testitem "Cholesky Decomposition (in-place) (small)" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -13,7 +13,7 @@
     # Test both modes
     modes = (Val(:indep), Val(:conseq))
 
-    for D in 2:10
+    for D in SubKernelShapes.square(10)
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
         for mode in modes
@@ -49,7 +49,7 @@
     end
 end
 
-@testitem "Cholesky Decomposition (out-of-place) (small)" begin
+@testitem "Cholesky Decomposition (out-of-place) (small)" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -64,7 +64,7 @@ end
     # Test both modes
     modes = (Val(:indep), Val(:conseq))
 
-    for D in 2:15
+    for D in SubKernelShapes.square(15)
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
         for mode in modes

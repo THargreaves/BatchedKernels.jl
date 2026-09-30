@@ -51,6 +51,10 @@
 
 ### Packaging and validation
 
+- Test sub-kernels on representative shapes instead of exhaustive size sweeps,
+  reducing the full GPU suite from about 45 to 5 minutes. Run GPU tests with
+  `--check-bounds=auto`: `Pkg.test()` otherwise forces bounds checks that make
+  every kernel use local memory and fail the register-residency checks.
 - Restrict test discovery to `test/`, excluding nested checkouts, and print live
   test names and timings. Large block-QR storage cases remain in the default
   suite and can be skipped with `BATCHEDKERNELS_TEST_EXTENDED=false`.

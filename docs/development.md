@@ -65,12 +65,19 @@ include output allocation; kernel-only timings measure a different cost. Existin
 Run from the repository root:
 
 ```sh
-julia --project -e 'using Pkg; Pkg.test()'
+julia --project -e 'using Pkg; Pkg.test(; julia_args=`--check-bounds=auto`)'
 BATCHEDKERNELS_TEST_CPU_ONLY=true julia --project -e 'using Pkg; Pkg.test()'
 ```
 
+`Pkg.test()` otherwise forces `--check-bounds=yes`, including in device code.
+Bounds checks add local memory to every kernel, so the GPU tests asserting
+register-resident kernels would fail; `--check-bounds=auto` honours `@inbounds`
+as in normal use. The CPU selection has no such checks.
+
 Each test item prints its name and elapsed time. With CUDA available, the first
-command runs all items, including extensive shape/layout sweeps. Without CUDA,
+command runs all items. Sub-kernel tests use the representative shapes in
+[`test/sub_kernels/shapes.jl`](../test/sub_kernels/shapes.jl) rather than
+exhaustive sweeps, since every shape compiles a separate kernel. Without CUDA,
 or with the environment variable above, only `:cpu` items run. Hosted CI uses
 Julia 1.11 and 1.12 and runs the CPU selection.
 
