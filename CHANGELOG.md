@@ -30,6 +30,14 @@
 
 ### Integration fixes
 
+- Label fused composite outputs from their leaf element types, e.g.
+  `GaussianState{CuArray{T,1},CuArray{T,2}}` rather than
+  `GaussianState{AbstractVector{T},AbstractMatrix{T}}`. Fused and hand-built
+  batches with the same storage now have the same element type.
+- Gather batches with `batch[idxs]`, including nested composites and host or
+  device integer indices. Batched leaves receive independent storage with exact
+  scalar types, shared leaves stay shared, and composite element types follow the
+  gathered leaves, changing only when a view-backed leaf is copied.
 - Trace triangular-root matrix products through the existing masked accessors,
   including adjoint/transpose orientations.
 - Reconstruct composite types from declared field/type-parameter relationships;
@@ -43,6 +51,10 @@
 
 ### Packaging and validation
 
+- Test sub-kernels on representative shapes instead of exhaustive size sweeps,
+  reducing the full GPU suite from about 45 to 5 minutes. Run GPU tests with
+  `--check-bounds=auto`: `Pkg.test()` otherwise forces bounds checks that make
+  every kernel use local memory and fail the register-residency checks.
 - Restrict test discovery to `test/`, excluding nested checkouts, and print live
   test names and timings. Large block-QR storage cases remain in the default
   suite and can be skipped with `BATCHEDKERNELS_TEST_EXTENDED=false`.

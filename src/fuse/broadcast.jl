@@ -439,62 +439,21 @@ function _assemble_output(spec::CompositeOutput, leaf_arrays::Vector, idx::Ref{I
     field_names = Symbol[p.first for p in spec.fields]
     field_vals = Any[_assemble_output(p.second, leaf_arrays, idx, N) for p in spec.fields]
     components = NamedTuple{Tuple(field_names)}(Tuple(field_vals))
-    runtime_T = _runtime_composite_type(spec.T, components)
     C = typeof(components)
-    return BatchedStruct{runtime_T,C}(components, N)
+    return BatchedStruct{_composite_eltype(spec.T, C),C}(components, N)
 end
 
-function _runtime_composite_type(::Type{T}, components::NamedTuple) where {T}
-    if T <: Tuple
-        elts = ntuple(i -> _component_element_type(components[i]), length(components))
-        return Tuple{elts...}
-    end
-    replacements = Dict(
-        name => _component_element_type(value) for (name, value) in pairs(components)
-    )
-    return _replace_composite_field_types(T, replacements)
-end
-
-_component_element_type(c::BatchedCuMatrix{T,D1,D2}) where {T,D1,D2} = AbstractMatrix{T}
-_component_element_type(c::BatchedCuVector{T,D}) where {T,D} = AbstractVector{T}
-_component_element_type(c::BatchedCuScalar{T}) where {T} = T
-_component_element_type(c::BatchedStruct{T}) where {T} = T
-_component_element_type(c::SharedValue{T}) where {T} = T
-_component_element_type(c) = typeof(c)
-
 # =============================================================================
-# scalar_form and batchify_type — scalar→batched type maps
+# batchify_type — scalar→batched type map
 # =============================================================================
-#
-# `scalar_form(T)` — the per-batch-element scalar type. Mirrors the runtime
-# `_component_element_type` so that BatchedStruct's `T` parameter computed at
-# trace time matches the type the runtime actually assembles.
 #
 # `batchify_type(T)` — the user-visible Julia type of the batched output.
-# Both are `@generated` for the composite cases so the resulting names/types
-# fold at inference time (otherwise the NamedTuple names become free type
-# variables and the `result::BR` assertion in Base.copy fires).
-
-# Leaf scalar_form rules
-scalar_form(::Type{T}) where {T<:Union{Number,AbstractChar,Bool,Nothing}} = T
-scalar_form(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N} = AbstractMatrix{T}
-scalar_form(::Type{TraceVector{T,D_M}}) where {T,D_M} = AbstractVector{T}
-scalar_form(::Type{TraceScalar{T}}) where {T} = T
-
-@generated function scalar_form(::Type{TT}) where {TT<:Tuple}
-    sfs = Type[scalar_form(p) for p in TT.parameters]
-    result = Tuple{sfs...}
-    return :($result)
-end
-
-# Generic composite: rebuild with each field replaced by its scalar_form.
-@generated function scalar_form(::Type{TT}) where {TT}
-    fnames = fieldnames(TT)
-    isempty(fnames) && return :($TT)
-    sfs = Type[scalar_form(fieldtype(TT, f)) for f in fnames]
-    result = _replace_composite_field_types(TT, Dict(zip(fnames, sfs)))
-    return :($result)
-end
+# Composite element types are labelled from the leaf element types by
+# `_leaf_composite_type`, the rule `_assemble_output` applies at runtime, so
+# fused and hand-built batches with the same storage have the same element type.
+# The composite cases are `@generated` so the resulting names/types fold at
+# inference time (otherwise the NamedTuple names become free type variables and
+# the `result::BR` assertion in Base.copy fires).
 
 # Leaf batchify_type rules
 # A failed scalar trace inference should report an unsupported graph rather
@@ -526,9 +485,9 @@ end
 
 @generated function batchify_type(::Type{TT}) where {TT<:Tuple}
     bts = Type[batchify_type(p) for p in TT.parameters]
-    scalar_T = scalar_form(TT)
     names = Tuple(Symbol("_", i) for i in 1:length(TT.parameters))
-    result = BatchedStruct{scalar_T,NamedTuple{names,Tuple{bts...}}}
+    C = NamedTuple{names,Tuple{bts...}}
+    result = BatchedStruct{_leaf_composite_type(TT, C),C}
     return :($result)
 end
 
@@ -536,8 +495,7 @@ end
     fnames = fieldnames(TT)
     isempty(fnames) && return :($TT)
     bts = Type[batchify_type(fieldtype(TT, f)) for f in fnames]
-    scalar_T = scalar_form(TT)
-    nt_names = Tuple(fnames)
-    result = BatchedStruct{scalar_T,NamedTuple{nt_names,Tuple{bts...}}}
+    C = NamedTuple{Tuple(fnames),Tuple{bts...}}
+    result = BatchedStruct{_leaf_composite_type(TT, C),C}
     return :($result)
 end

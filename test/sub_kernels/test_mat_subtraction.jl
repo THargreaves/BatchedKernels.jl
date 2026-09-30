@@ -1,4 +1,4 @@
-@testitem "Matrix Subtraction" begin
+@testitem "Matrix Subtraction" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -61,7 +61,7 @@
         return nothing
     end
 
-    for D in 2:15
+    for D in SubKernelShapes.square(15)
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
         for mode in modes
@@ -86,7 +86,7 @@
     end
 end
 
-@testitem "Matrix Subtraction (non-square)" begin
+@testitem "Matrix Subtraction (non-square)" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -151,32 +151,30 @@ end
         return nothing
     end
 
-    for D1 in 2:15
-        for D2 in 2:15
-            D = max(D1, D2)
-            nblocks = cld(N, nthreads//32 * (32 ÷ D))
+    for (D1, D2) in SubKernelShapes.rectangular(15)
+        D = max(D1, D2)
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
-            CUDA.seed!(1234)
+        CUDA.seed!(1234)
 
-            As = CUDA.rand(Float32, D1, D2, N)
-            Bs = CUDA.rand(Float32, D1, D2, N)
-            Cs = CUDA.zeros(Float32, D1, D2, N)
+        As = CUDA.rand(Float32, D1, D2, N)
+        Bs = CUDA.rand(Float32, D1, D2, N)
+        Cs = CUDA.zeros(Float32, D1, D2, N)
 
-            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_sub!(
-                Cs, As, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
-            )
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_sub!(
+            Cs, As, Bs, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
+        )
 
-            # CPU comparison
-            As_cpu = Array(As)
-            Bs_cpu = Array(Bs)
-            Cs_cpu = As_cpu .- Bs_cpu
+        # CPU comparison
+        As_cpu = Array(As)
+        Bs_cpu = Array(Bs)
+        Cs_cpu = As_cpu .- Bs_cpu
 
-            max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
+        max_error = maximum(abs.(Array(Cs) .- Cs_cpu))
 
-            if max_error > 1e-5
-                println("D1=$D1, D2=$D2")
-            end
-            @test max_error < 1e-5
+        if max_error > 1e-5
+            println("D1=$D1, D2=$D2")
         end
+        @test max_error < 1e-5
     end
 end

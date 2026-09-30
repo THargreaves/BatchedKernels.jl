@@ -1,4 +1,4 @@
-@testitem "Matrix Multiplication" begin
+@testitem "Matrix Multiplication" setup = [SubKernelShapes] begin
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -17,7 +17,7 @@
     test_cases = [(false, false), (true, false), (false, true), (true, true)]
 
     # Accuracy tests
-    for D in 2:15
+    for D in SubKernelShapes.square(15)
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
         for mode in modes
@@ -64,7 +64,7 @@
     end
 end
 
-@testitem "Matrix Multiplication (non_square)" begin
+@testitem "Matrix Multiplication (non_square)" setup = [SubKernelShapes] begin
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -77,49 +77,47 @@ end
     nthreads = 2^8
 
     # Accuracy tests
-    for D1 in 2:15
-        for D2 in 2:15
-            D = max(D1, D2)
-            nblocks = cld(N, nthreads//32 * (32 ÷ D))
+    for (D1, D2) in SubKernelShapes.rectangular(15)
+        D = max(D1, D2)
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
-            CUDA.seed!(1234)
+        CUDA.seed!(1234)
 
-            As_cpu = rand(Float32, D1, D2, N)
-            Bs_cpu = rand(Float32, D2, D1, N)
+        As_cpu = rand(Float32, D1, D2, N)
+        Bs_cpu = rand(Float32, D2, D1, N)
 
-            As = cu(As_cpu)
-            Bs = cu(Bs_cpu)
+        As = cu(As_cpu)
+        Bs = cu(Bs_cpu)
 
-            Cs = CUDA.zeros(Float32, D1, D1, N)
+        Cs = CUDA.zeros(Float32, D1, D1, N)
 
-            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matmul!(
-                Cs,
-                As,
-                Bs,
-                Val(Int32(D1)),
-                Val(Int32(D2)),
-                Val(Int32(D)),
-                Val(Int32(nthreads)),
-                Int32(N),
-            )
-            Cs_result = Array(Cs)
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_matmul!(
+            Cs,
+            As,
+            Bs,
+            Val(Int32(D1)),
+            Val(Int32(D2)),
+            Val(Int32(D)),
+            Val(Int32(nthreads)),
+            Int32(N),
+        )
+        Cs_result = Array(Cs)
 
-            # CPU comparison
-            Cs_cpu = zeros(Float32, D1, D1, N)
-            for i in 1:N
-                Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]
-            end
-
-            # Cs_cpu_resized = zeros(Float32, D, D, N)
-            # Cs_cpu_resized[1:D1, 1:D1, :] .= Cs_cpu
-
-            max_error = maximum(abs.(Cs_result .- Cs_cpu))
-            @test max_error < 1e-5
+        # CPU comparison
+        Cs_cpu = zeros(Float32, D1, D1, N)
+        for i in 1:N
+            Cs_cpu[:, :, i] = As_cpu[:, :, i] * Bs_cpu[:, :, i]
         end
+
+        # Cs_cpu_resized = zeros(Float32, D, D, N)
+        # Cs_cpu_resized[1:D1, 1:D1, :] .= Cs_cpu
+
+        max_error = maximum(abs.(Cs_result .- Cs_cpu))
+        @test max_error < 1e-5
     end
 end
 
-@testitem "Triangular matrix multiplication (non_square)" begin
+@testitem "Triangular matrix multiplication (non_square)" setup = [SubKernelShapes] begin
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -132,46 +130,44 @@ end
     nthreads = 2^8
 
     # Accuracy tests
-    for D1 in 2:15
-        for D2 in 2:15
-            D = max(D1, D2)
-            nblocks = cld(N, nthreads//32 * (32 ÷ D))
+    for (D1, D2) in SubKernelShapes.rectangular(15)
+        D = max(D1, D2)
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
-            CUDA.seed!(1234)
+        CUDA.seed!(1234)
 
-            As_cpu = rand(Float32, D1, D2, N)
-            Ls_cpu = rand(Float32, D2, D2, N)
+        As_cpu = rand(Float32, D1, D2, N)
+        Ls_cpu = rand(Float32, D2, D2, N)
 
-            As = cu(As_cpu)
-            Ls = cu(Ls_cpu)
+        As = cu(As_cpu)
+        Ls = cu(Ls_cpu)
 
-            Cs = CUDA.zeros(Float32, D1, D2, N)
+        Cs = CUDA.zeros(Float32, D1, D2, N)
 
-            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_trig_matmul!(
-                Cs,
-                As,
-                Ls,
-                Val(Int32(D1)),
-                Val(Int32(D2)),
-                Val(Int32(D)),
-                Val(Int32(nthreads)),
-                Int32(N),
-            )
-            Cs_result = Array(Cs)
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_trig_matmul!(
+            Cs,
+            As,
+            Ls,
+            Val(Int32(D1)),
+            Val(Int32(D2)),
+            Val(Int32(D)),
+            Val(Int32(nthreads)),
+            Int32(N),
+        )
+        Cs_result = Array(Cs)
 
-            # CPU comparison
-            Cs_cpu = zeros(Float32, D1, D2, N)
-            for i in 1:N
-                Cs_cpu[:, :, i] = As_cpu[:, :, i] * LowerTriangular(Ls_cpu[:, :, i])
-            end
-
-            max_error = maximum(abs.(Cs_result .- Cs_cpu))
-            @test max_error < 1e-5
+        # CPU comparison
+        Cs_cpu = zeros(Float32, D1, D2, N)
+        for i in 1:N
+            Cs_cpu[:, :, i] = As_cpu[:, :, i] * LowerTriangular(Ls_cpu[:, :, i])
         end
+
+        max_error = maximum(abs.(Cs_result .- Cs_cpu))
+        @test max_error < 1e-5
     end
 end
 
-@testitem "Gram matrix (non-square)" begin
+@testitem "Gram matrix (non-square)" setup = [SubKernelShapes] begin
     using CUDA
     using CUDA: i32
     using LinearAlgebra
@@ -184,40 +180,38 @@ end
     nthreads = 2^8
 
     # Accuracy tests
-    for D1 in 2:15
-        for D2 in 2:15
-            for extra in 0:1
-                D = max(D1, D2) + extra
-                nblocks = cld(N, nthreads//32 * (32 ÷ D))
+    for (D1, D2) in SubKernelShapes.rectangular(15)
+        for extra in 0:1
+            D = max(D1, D2) + extra
+            nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
-                CUDA.seed!(1234)
+            CUDA.seed!(1234)
 
-                As_cpu = rand(Float32, D1, D2, N)
+            As_cpu = rand(Float32, D1, D2, N)
 
-                As = cu(As_cpu)
+            As = cu(As_cpu)
 
-                Gs = CUDA.zeros(Float32, D2, D2, N)
+            Gs = CUDA.zeros(Float32, D2, D2, N)
 
-                CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_gram!(
-                    Gs,
-                    As,
-                    Val(Int32(D1)),
-                    Val(Int32(D2)),
-                    Val(Int32(D)),
-                    Val(Int32(nthreads)),
-                    Int32(N),
-                )
-                Gs_result = Array(Gs)
+            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_gram!(
+                Gs,
+                As,
+                Val(Int32(D1)),
+                Val(Int32(D2)),
+                Val(Int32(D)),
+                Val(Int32(nthreads)),
+                Int32(N),
+            )
+            Gs_result = Array(Gs)
 
-                # CPU comparison
-                Gs_cpu = zeros(Float32, D2, D2, N)
-                for i in 1:N
-                    Gs_cpu[:, :, i] = As_cpu[:, :, i]' * As_cpu[:, :, i]
-                end
-
-                max_error = maximum(abs.(Gs_result .- Gs_cpu))
-                @test max_error < 1e-5
+            # CPU comparison
+            Gs_cpu = zeros(Float32, D2, D2, N)
+            for i in 1:N
+                Gs_cpu[:, :, i] = As_cpu[:, :, i]' * As_cpu[:, :, i]
             end
+
+            max_error = maximum(abs.(Gs_result .- Gs_cpu))
+            @test max_error < 1e-5
         end
     end
 end

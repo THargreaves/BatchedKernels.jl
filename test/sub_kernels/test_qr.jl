@@ -93,63 +93,66 @@
     N = 2^9
 
     count = 0
-    for D1 in 2:10
-        for D2 in 2:10
-            for B_D1 in unique((D1, min(D1, D2)))
-                for B_D2 in 2:10
-                    for extra in 0:1
-                        global count
-                        D = max(D1, D2, B_D1, B_D2) + extra
-                        nblocks = cld(N, nthreads//32 * (32 ÷ D))
+    # (D1, D2, B_D1, B_D2, extra): square, tall and wide factors, full and thin Q
+    # rows for B, and padded layouts, spanning padded sizes D from 2 to 11.
+    cases = (
+        (2, 2, 2, 2, 0),
+        (3, 2, 3, 5, 0),
+        (3, 2, 2, 5, 1),
+        (2, 7, 2, 3, 0),
+        (8, 8, 8, 8, 0),
+        (10, 4, 4, 9, 1),
+        (10, 10, 10, 2, 1),
+    )
+    for (D1, D2, B_D1, B_D2, extra) in cases
+        global count
+        D = max(D1, D2, B_D1, B_D2) + extra
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
-                        CUDA.seed!(1234)
+        CUDA.seed!(1234)
 
-                        As = CUDA.rand(Float32, D1, D2, N)
-                        Bs = CUDA.rand(Float32, B_D1, B_D2, N)
-                        Cs = CUDA.zeros(Float32, D1, B_D2, N)
+        As = CUDA.rand(Float32, D1, D2, N)
+        Bs = CUDA.rand(Float32, B_D1, B_D2, N)
+        Cs = CUDA.zeros(Float32, D1, B_D2, N)
 
-                        CUDA.@sync @cuda threads = nthreads blocks = nblocks qr_and_multiply_kernel!(
-                            Cs,
-                            Bs,
-                            As,
-                            Val(Int32(D1)),
-                            Val(Int32(D2)),
-                            Val(Int32(B_D1)),
-                            Val(Int32(B_D2)),
-                            Val(Int32(D)),
-                            Val(nthreads),
-                            Int32(N),
-                        )
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks qr_and_multiply_kernel!(
+            Cs,
+            Bs,
+            As,
+            Val(Int32(D1)),
+            Val(Int32(D2)),
+            Val(Int32(B_D1)),
+            Val(Int32(B_D2)),
+            Val(Int32(D)),
+            Val(nthreads),
+            Int32(N),
+        )
 
-                        # CPU comparison
-                        As_cpu = Array(As)
-                        Bs_cpu = Array(Bs)
-                        Cs_cpu = Array(Cs)
+        # CPU comparison
+        As_cpu = Array(As)
+        Bs_cpu = Array(Bs)
+        Cs_cpu = Array(Cs)
 
-                        Cs_real = zeros(Float32, D1, B_D2, N)
+        Cs_real = zeros(Float32, D1, B_D2, N)
 
-                        for i in 1:N
-                            Cs_real[:, :, i] = qr(As_cpu[:, :, i]).Q * Bs_cpu[:, :, i]
-                        end
-
-                        max_error = maximum(abs.(Cs_real - Cs_cpu))
-                        if max_error >= 1e-4
-                            error(
-                                "ERROR: [$count/2106]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
-                            )
-                            break
-                        end
-
-                        @test max_error < 1e-4
-
-                        count += 1
-                        println(
-                            "[$count/2106]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
-                        )
-                    end
-                end
-            end
+        for i in 1:N
+            Cs_real[:, :, i] = qr(As_cpu[:, :, i]).Q * Bs_cpu[:, :, i]
         end
+
+        max_error = maximum(abs.(Cs_real - Cs_cpu))
+        if max_error >= 1e-4
+            error(
+                "ERROR: [$count/$(length(cases))]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
+            )
+            break
+        end
+
+        @test max_error < 1e-4
+
+        count += 1
+        println(
+            "[$count/$(length(cases))]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
+        )
     end
 end
 
@@ -248,65 +251,70 @@ end
     N = 2^9
 
     count = 0
-    for D1 in 2:10
-        for D2 in 2:10
-            B_D1 = D1
-            for B_D2 in 2:10
-                for extra in 0:1
-                    global count
-                    D = max(D1, D2, B_D1, B_D2) + extra
-                    nblocks = cld(N, nthreads//32 * (32 ÷ D))
+    # (D1, D2, B_D2, extra): square, tall and wide factors and padded layouts,
+    # spanning padded sizes D from 2 to 11.
+    cases = (
+        (2, 2, 2, 0),
+        (3, 2, 5, 0),
+        (2, 7, 3, 1),
+        (5, 9, 10, 0),
+        (8, 8, 8, 0),
+        (10, 4, 9, 1),
+        (10, 10, 2, 1),
+    )
+    for (D1, D2, B_D2, extra) in cases
+        B_D1 = D1
+        global count
+        D = max(D1, D2, B_D1, B_D2) + extra
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
-                    CUDA.seed!(1234)
+        CUDA.seed!(1234)
 
-                    As = CUDA.rand(Float32, D1, D2, N)
-                    Bs = CUDA.rand(Float32, B_D1, B_D2, N)
-                    Cs = CUDA.zeros(Float32, D1, B_D2, N)
+        As = CUDA.rand(Float32, D1, D2, N)
+        Bs = CUDA.rand(Float32, B_D1, B_D2, N)
+        Cs = CUDA.zeros(Float32, D1, B_D2, N)
 
-                    CUDA.@sync @cuda threads = nthreads blocks = nblocks qr_trans_and_multiply_kernel!(
-                        Cs,
-                        Bs,
-                        As,
-                        Val(Int32(D1)),
-                        Val(Int32(D2)),
-                        Val(Int32(B_D1)),
-                        Val(Int32(B_D2)),
-                        Val(Int32(D)),
-                        Val(nthreads),
-                        Int32(N),
-                    )
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks qr_trans_and_multiply_kernel!(
+            Cs,
+            Bs,
+            As,
+            Val(Int32(D1)),
+            Val(Int32(D2)),
+            Val(Int32(B_D1)),
+            Val(Int32(B_D2)),
+            Val(Int32(D)),
+            Val(nthreads),
+            Int32(N),
+        )
 
-                    # CPU comparison
-                    As_cpu = Array(As)
-                    Bs_cpu = Array(Bs)
-                    Cs_cpu = Array(Cs)
+        # CPU comparison
+        As_cpu = Array(As)
+        Bs_cpu = Array(Bs)
+        Cs_cpu = Array(Cs)
 
-                    Cs_real = zeros(Float32, D1, B_D2, N)
+        Cs_real = zeros(Float32, D1, B_D2, N)
 
-                    for i in 1:N
-                        Cs_real[:, :, i] = qr(As_cpu[:, :, i]).Q' * Bs_cpu[:, :, i]
-                    end
-
-                    max_error = maximum(abs.(Cs_real - Cs_cpu))
-                    if max_error >= 1e-4
-                        error(
-                            "ERROR: [$count/1458]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
-                        )
-                        break
-                    end
-
-                    @test max_error < 1e-4
-
-                    count += 1
-                    println(
-                        "[$count/1458]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
-                    )
-                end
-            end
+        for i in 1:N
+            Cs_real[:, :, i] = qr(As_cpu[:, :, i]).Q' * Bs_cpu[:, :, i]
         end
+
+        max_error = maximum(abs.(Cs_real - Cs_cpu))
+        if max_error >= 1e-4
+            error(
+                "ERROR: [$count/$(length(cases))]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
+            )
+            break
+        end
+
+        @test max_error < 1e-4
+
+        count += 1
+        println(
+            "[$count/$(length(cases))]: D1=$D1, D2=$D2, B_D1=$B_D1, B_D2=$B_D2, extra=$extra, max_error=$max_error",
+        )
     end
 end
-@testitem "QR decomposition 2x1 blocks (outofplace)" begin
+@testitem "QR decomposition 2x1 blocks (outofplace)" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -369,7 +377,7 @@ end
     nthreads = 2^8
     N = 2^12
 
-    for D in 2:10
+    for D in SubKernelShapes.square(10)
         nblocks = cld(N, nthreads ÷ 32 * (32 ÷ D))
 
         CUDA.seed!(1234)
@@ -406,7 +414,7 @@ end
     end
 end
 
-@testitem "QR decomposition 2x2 blocks" begin
+@testitem "QR decomposition 2x2 blocks" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -477,7 +485,7 @@ end
     N = 2^12
     THRESH = 3
 
-    for D in 2:10
+    for D in SubKernelShapes.square(10)
         nblocks = cld(N, nthreads ÷ 32 * (32 ÷ D))
 
         CUDA.seed!(1234)

@@ -1,4 +1,4 @@
-@testitem "Transpose (out-of-place)" begin
+@testitem "Transpose (out-of-place)" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -53,7 +53,7 @@
         return nothing
     end
 
-    for D in 2:15
+    for D in SubKernelShapes.square(15)
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
         CUDA.seed!(1234)
@@ -73,7 +73,7 @@
     end
 end
 
-@testitem "Transpose (in-place)" begin
+@testitem "Transpose (in-place)" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -130,7 +130,7 @@ end
         return nothing
     end
 
-    for D in 2:15
+    for D in SubKernelShapes.square(15)
         nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
         CUDA.seed!(1234)
@@ -150,7 +150,7 @@ end
     end
 end
 
-@testitem "Transpose (out-of-place, non-square)" begin
+@testitem "Transpose (out-of-place, non-square)" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -208,30 +208,28 @@ end
         return nothing
     end
 
-    for D1 in 2:15
-        for D2 in 2:15
-            D = max(D1, D2)
-            nblocks = cld(N, nthreads//32 * (32 ÷ D))
+    for (D1, D2) in SubKernelShapes.rectangular(15)
+        D = max(D1, D2)
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
-            CUDA.seed!(1234)
+        CUDA.seed!(1234)
 
-            As = CUDA.rand(Float32, D1, D2, N)
-            Bs = CUDA.zeros(Float32, D2, D1, N)
-            As_cpu = Array(As)
-            Bs_cpu = permutedims(As_cpu, (2, 1, 3))
+        As = CUDA.rand(Float32, D1, D2, N)
+        Bs = CUDA.zeros(Float32, D2, D1, N)
+        As_cpu = Array(As)
+        Bs_cpu = permutedims(As_cpu, (2, 1, 3))
 
-            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_transpose!(
-                Bs, As, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
-            )
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_transpose!(
+            Bs, As, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
+        )
 
-            # CPU comparison
-            max_error = maximum(abs.(Array(Bs) .- Bs_cpu))
-            @test max_error < 1e-5
-        end
+        # CPU comparison
+        max_error = maximum(abs.(Array(Bs) .- Bs_cpu))
+        @test max_error < 1e-5
     end
 end
 
-@testitem "Transpose (in-place, non-square)" begin
+@testitem "Transpose (in-place, non-square)" setup = [SubKernelShapes] begin
     using BatchedKernels
     using CUDA
     using CUDA: i32
@@ -287,25 +285,23 @@ end
         return nothing
     end
 
-    for D1 in 2:15
-        for D2 in 2:15
-            D = max(D1, D2)
-            nblocks = cld(N, nthreads//32 * (32 ÷ D))
+    for (D1, D2) in SubKernelShapes.rectangular(15)
+        D = max(D1, D2)
+        nblocks = cld(N, nthreads//32 * (32 ÷ D))
 
-            CUDA.seed!(1234)
+        CUDA.seed!(1234)
 
-            As = CUDA.rand(Float32, D1, D2, N)
-            Bs = CUDA.zeros(Float32, D2, D1, N)
-            As_cpu = Array(As)
-            Bs_cpu = permutedims(As_cpu, (2, 1, 3))
+        As = CUDA.rand(Float32, D1, D2, N)
+        Bs = CUDA.zeros(Float32, D2, D1, N)
+        As_cpu = Array(As)
+        Bs_cpu = permutedims(As_cpu, (2, 1, 3))
 
-            CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_transpose!(
-                Bs, As, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
-            )
+        CUDA.@sync @cuda threads = nthreads blocks = nblocks kernel_transpose!(
+            Bs, As, Val(Int32(D1)), Val(Int32(D2)), Val(Int32(nthreads)), Int32(N)
+        )
 
-            # CPU comparison
-            max_error = maximum(abs.(Array(Bs) .- Bs_cpu))
-            @test max_error < 1e-5
-        end
+        # CPU comparison
+        max_error = maximum(abs.(Array(Bs) .- Bs_cpu))
+        @test max_error < 1e-5
     end
 end
