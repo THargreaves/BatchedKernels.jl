@@ -69,10 +69,18 @@ julia --project -e 'using Pkg; Pkg.test()'
 BATCHEDKERNELS_TEST_CPU_ONLY=true julia --project -e 'using Pkg; Pkg.test()'
 ```
 
-With CUDA available, the first command discovers all test items, including
-extensive shape/layout sweeps. Compilation can make a full GPU run slow.
-Without CUDA, or with the environment variable above, only `:cpu` items run.
-Hosted CI uses Julia 1.11 and 1.12 and runs the CPU selection.
+Each test item prints its name and elapsed time. With CUDA available, the first
+command runs all items, including extensive shape/layout sweeps. Without CUDA,
+or with the environment variable above, only `:cpu` items run. Hosted CI uses
+Julia 1.11 and 1.12 and runs the CPU selection.
+
+To skip the largest block-QR storage cases during local development:
+
+```sh
+BATCHEDKERNELS_TEST_EXTENDED=false julia --project -e 'using Pkg; Pkg.test()'
+```
+
+Other shape sweeps still run. The default full selection retains all cases.
 
 For generated-code changes, run the relevant GPU tests as well as CPU checks.
 The [fusion tests](../test/fusion/README.md) describe focused selections; the

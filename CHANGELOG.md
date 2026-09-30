@@ -41,6 +41,9 @@
 
 ### Packaging and validation
 
+- Restrict test discovery to `test/`, excluding nested checkouts, and print live
+  test names and timings. Large block-QR storage cases remain in the default
+  suite and can be skipped with `BATCHEDKERNELS_TEST_EXTENDED=false`.
 - Add a package API guide and an isolated integration harness against real
   GeneralisedFilters states and CPU methods. The adapter shares the scalar examples
   and preserves GeneralisedFilters' ownership of algorithms and orchestration.
