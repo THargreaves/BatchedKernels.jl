@@ -140,3 +140,18 @@ wrapped state recursion and likelihood conventions against GeneralisedFilters.
 
 The package test entry point discovers all test items. CPU-only environments run
 `:cpu` tests; `BATCHEDKERNELS_TEST_CPU_ONLY=true` selects that path explicitly.
+
+## Fused random sampling
+
+`test_random.jl` covers host stream copying/reseeding, concurrent reservations,
+Philox known answers, trace inference, runtime seeds, unused RNG arguments,
+empty batches and validation failures. GPU checks exercise scalar lane agreement,
+rectangular random matrices in register/single/dual storage and both orientations,
+legacy scheduling, dynamic shared memory, partial batches, Float32/Float64,
+Gaussian transitions, and distribution smoke checks. Counter-address references
+are evaluated on CPU; normal transforms are compared with a numerical tolerance.
+
+```julia
+TestItemRunner.run_tests("test/fusion";
+    filter=ti -> occursin("test_random.jl", ti.filename), verbose=true)
+```

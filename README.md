@@ -1,85 +1,119 @@
 # BatchedKernels.jl
 
-Generate a CUDA kernel from a scalar Julia function over small matrices, vectors,
-and scalars. The same scalar code can run on CPU arrays or StaticArrays. Fused
-kernels support Float32 and Float64 only (other element types are rejected);
-individual matrix extents
-are currently bounded by a 32-lane group. QR can operate on implicit stacks larger
-than that group.
+BatchedKernels is a Julia package designed to automatically produce fused CUDA kernels
+for performing sequences of linear algebra operations on large batches of small ($D<32$)
+matrices/vectors. It's behaviour is somewhat similar to JAX's `vmap` combined with `jit`, 
+but typically results in much faster kernels, especially when general linear algebra 
+operations beyond multipliaction or element-wise operations are included.
+
+The package is under development. It requires Julia 1.11 or newer and a
+CUDA-capable GPU for fused execution. From a checkout, install dependencies with:
+
+```sh
+julia --project -e 'using Pkg; Pkg.instantiate()'
+```
+
+## A Simple Example
+
+BatchedKernels takes a generic Julia function that performs a sequence of linear algebra
+operations on a singleton input of matrices, vectors, or scalars, and automatically converts
+it into a single batched CUDA kernel, fusing the operations to reduce memory traffic and kernel 
+launch overhead.
 
 ```julia
 using BatchedKernels, CUDA
 
-product(A, B) = A * B
-A = BatchedCuMatrix(CUDA.rand(Float32, 3, 3, 1000))
-B = SharedCuMatrix(CUDA.rand(Float32, 3, 3), 1000)
-C = fuse(product, A, B)  # C.data is a 3×3×1000 CuArray
-# product.(A, B) uses the same default fusion path.
+update(A, x, b) = A * x + b
+
+N = 1000
+A = SharedCuMatrix(CUDA.rand(Float32, 3, 3), N)
+xs = BatchedCuVector(CUDA.rand(Float32, 3, N))
+b = SharedCuVector(CUDA.rand(Float32, 3), N)
+
+ys = fuse(update, A, xs, b)
+size(ys.data)  # (3, 1000)
+# update.(A, xs, b) uses the same default fusion path.
 ```
 
-Use named singleton functions at the fusion boundary. Closures, callable structs,
-arbitrary scalar indexing, and mutation inside the traced function are not
-supported, apart from explicit in-place `cholesky!` and `ldiv!`, which keep their
-shared-memory implementation. This is a compiler for a defined set of array operations, rather than
-a general Julia-to-GPU transformation.
+Here each entry has its own `x`, while all entries use the same `A` and `b`.
+The wrappers reference existing arrays. `fuse` allocates the output and launches
+the kernel.
 
-## Public integration surface
+| Container | Backing array | Meaning |
+| --- | --- | --- |
+| `BatchedCuMatrix(data)` | `m × n × N` | One matrix per entry |
+| `BatchedCuVector(data)` | `d × N` | One vector per entry |
+| `BatchedCuScalar(data)` | Length `N` | One scalar per entry |
+| `SharedCuMatrix(data, N)` | `m × n` | One matrix used by every entry |
+| `SharedCuVector(data, N)` | Length `d` | One vector used by every entry |
 
-| API | Role |
-| --- | --- |
-| `BatchedCuMatrix`, `BatchedCuVector`, `BatchedCuScalar` | Wrap device arrays with particle index on the last axis |
-| `SharedCuMatrix`, `SharedCuVector` | Reuse one device array across a batch |
-| `BatchedStruct`, `SharedValue` | Composite states and literal fields |
-| `fuse(f, args...; ...)` | Allocate results and launch a generated kernel |
-| `Assignment`, `automatic_assignment` | Explicit storage/orientation choices for an advanced caller |
-| `symmetric_part`, `covariance_pushforward` | Scalar matrix operations with supported tracing |
-| `qr_upper_stack`, `qr_upper_blocks` | Implicit stacked/block R-only QR |
-| `qr_identity_plus`, `qr_compress_residual` | Gaussian residual propagation and compression |
-| `covariance_root_logdet` | Log determinant of a covariance represented by an upper root |
+Input containers must agree on `N`. `BatchedStruct(T, components)` groups named
+component batches into a batch of structs; `SharedValue(value, N)` supplies a
+shared literal field. A function returning a tuple produces a `BatchedStruct`;
+use `values(result.components)` to unpack its batched outputs. Outputs can feed
+subsequent `fuse` calls directly.
 
-`fuse` defaults to `policy=:auto`, which prefers register intermediates and uses
-shared memory for staging and incompatible access orientations. `policy=:legacy`
-retains the earlier all-shared scheduler and planner as an ablation baseline for
-benchmarks; it is not intended for applications. An explicit
-`assignment` selects the custom hybrid path. QR with multiple results requires
-automatic or custom assignment. `nthreads` and `shared_memory=:static/:dynamic`
-control launch geometry and shared allocation; device resource limits still apply.
-The planner, tape, accessors, cache, and `_ensure_compiled!` are implementation
-details; application integrations should use `fuse`.
+## Random sampling
 
-## Kalman and GeneralisedFilters
+Pass a `BatchedRNG` explicitly. Sampling then runs inside the fused kernel:
 
-[Scalar examples and contracts](examples/README.md) cover Joseph and square-root
-forward steps (including log-likelihood increments), normalized backward
-likelihoods, and ancestor/backward-simulation candidate weights. These are
-application reference functions, not an exported filtering framework.
+```julia
+using BatchedKernels, CUDA, Random
 
-[GeneralisedFilters integration](integration/generalised_filters/README.md)
-provides a thin reference adapter and an isolated test environment that loads the
-real package. It checks CPU StaticArrays and GPU results against its existing
-algorithms. GeneralisedFilters continues to own model resolution, particle
-weights, resampling, trajectory storage, covariance repair, and differentiation.
-BatchedKernels has no dependency on GeneralisedFilters.
+perturb(rng, x) = x + randn(rng, eltype(x), size(x, 1))
 
-Measurements and the scripts that reproduce them are summarised in
-[benchmarking/kalman](benchmarking/kalman/README.md) and
-[benchmarking/matmul](benchmarking/matmul/README.md). Benchmark scripts are
-development tools, not required by an application.
-
-## Testing
-
-Julia 1.11 or newer is required by the package dependency bounds. The separate
-GeneralisedFilters harness follows that package's stricter version requirements.
-
-```sh
-julia --project -e 'using Pkg; Pkg.test()'
-BATCHEDKERNELS_TEST_CPU_ONLY=true julia --project -e 'using Pkg; Pkg.test()'
+rng = BatchedRNG(123)
+xs = BatchedCuVector(CUDA.zeros(Float32, 3, 1000))
+ys = fuse(perturb, rng, xs)
+zs = fuse(perturb, rng, xs)  # fresh samples
 ```
 
-With a functional CUDA GPU, the first command discovers all test items, including
-sub-kernel, layout, compiler, and generated-kernel tests. The standalone legacy QR
-tests include exhaustive shape sweeps and can take substantially longer than the
-fusion suites. Without a GPU, the command runs the
-explicitly tagged CPU tests. Hosted CI runs on Julia 1.11 and 1.12; a passing CPU
-job does not establish GPU correctness. Use the GPU suite and the sanitizer
-drivers under `benchmarking/kalman` for changes to generated device code.
+`rand(rng, T, dims...)` and `randn(rng, T, dims...)` support Float32/Float64
+scalars, vectors and matrices. Dimensions must be known during tracing and lie
+in `1:32`. Omitting `T` selects Float64. The same function can use an ordinary
+Julia RNG when called directly on CPU arrays.
+
+The RNG advances automatically once per nonempty sampling launch. Tracing,
+compilation, validation failures, empty batches and unused RNG arguments do not
+advance it. Use `copy(rng)` to preserve its current position in an independent
+RNG, or `Random.seed!(rng, 123)` to restart. Batch size comes from the input
+containers; for sampling-only functions, supply `fuse(sample, rng; batch_size=N)`.
+
+The same seed and sequence of calls reproduce samples within a package version.
+Changing thread count, scheduling or storage layout preserves samples; splitting
+one batch across several calls changes them. CPU RNG sequences and bitwise normal
+samples across devices or versions are not guaranteed. Concurrent callers reserve
+distinct stream positions, but their order is not fixed.
+
+Always pass the RNG to sampling calls. Implicit `rand()` or `randn()` executes
+during host tracing and can become a cached constant. Distribution objects,
+`rand!`/`randn!`, and random-dependent control flow are unsupported.
+
+## Supported code and limits
+
+- Fused numerical inputs and intermediates use one matching type: Float32 or
+  Float64 (mixed precision is not supported). 
+- Supported operations include matrix products and addition, matrix-vector
+  products, vector addition/subtraction, triangular solves, Cholesky, QR,
+  `dot`, `sum(abs2, x)`, and scalar arithmetic. Support is specific to operand
+  types: for example, triangular matrix solves accept upper or lower factors,
+  while triangular vector solves currently accept lower factors.
+- Use named functions with supported array operations. Capturing closures,
+  callable structs, arbitrary scalar indexing, elementwise array broadcasts,
+  and branches on computed values are unsupported.
+- General mutation is unsupported. Explicit `cholesky!` and matrix `ldiv!`
+  have dedicated implementations with shared storage and narrower shape limits.
+  Ordinary out-of-place calculations preserve input arrays.
+
+The default storage policy prefers registers and uses shared memory where needed.
+The first call for a new function or input shape includes compilation; later
+calls reuse the kernel. Changing only batch size or RNG seed does not require a
+new kernel. See the [developer notes](docs/development.md) for the compiler path,
+launch options and tests.
+
+## Further reading
+
+- [Kalman examples](examples/README.md): forward/backward steps, covariance and
+  QR helper contracts, and particle-weight calculations.
+- [Kalman benchmarks](benchmarking/kalman/README.md) and
+  [matrix multiplication benchmarks](benchmarking/matmul/README.md).

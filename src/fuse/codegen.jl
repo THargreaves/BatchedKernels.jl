@@ -20,6 +20,10 @@ struct KernelSignature
     n_batched_inputs::Int
     n_shared_inputs::Int
     dynamic_shared_bytes::Int
+    rng_used::Vector{Bool}
+end
+function KernelSignature(name, outputs, batched, shared, bytes)
+    return KernelSignature(name, outputs, batched, shared, bytes, Bool[])
 end
 
 # Both planners share the kernel skeleton; only layouts and operation lowering differ.
@@ -112,6 +116,14 @@ function _codegen(
     shared_input_ids = filter(
         id -> tape.metas[id].lifecycle == SHARED && tape.nodes[id] isa InputNode, input_ids
     )
+
+    rng_input_ids = filter(id -> tape.metas[id].type === TraceRNG, input_ids)
+    rng_syms = [Symbol(:_rng, i) for i in eachindex(rng_input_ids)]
+    rng_used = Bool[
+        any(
+            n -> n isa CallNode && n.fn === _sample_random && n.args[1].id == id, tape.nodes
+        ) for id in rng_input_ids
+    ]
 
     out_syms = [Symbol(:_out, i) for i in 1:length(leaves)]
     b_in_syms = [Symbol(:_bin, i) for i in 1:length(batched_input_ids)]
@@ -297,6 +309,9 @@ function _codegen(
     end
 
     node_view_sym = copy(scalar_node_sym)
+    for (id, sym) in zip(rng_input_ids, rng_syms)
+        node_view_sym[id] = sym
+    end
     for id in shared_input_ids
         node_view_sym[id] = shared_input_view_syms[id]
     end
@@ -760,7 +775,7 @@ function _codegen(
 
     push!(stmts, :(return nothing))
 
-    args = [out_syms..., b_in_syms..., s_in_syms..., :(N::Int32)]
+    args = [out_syms..., b_in_syms..., s_in_syms..., rng_syms..., :(N::Int32)]
     fn_expr = Expr(:function, Expr(:call, fn_name, args...), Expr(:block, stmts...))
 
     if shared_memory === :dynamic
@@ -774,6 +789,7 @@ function _codegen(
         length(batched_input_ids),
         length(shared_input_ids),
         dynamic_bytes[],
+        rng_used,
     )
 end
 

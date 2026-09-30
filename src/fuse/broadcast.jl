@@ -14,6 +14,7 @@
 # surface explicitly rejects closures and callable structs.
 
 struct BatchedStyle <: Broadcast.BroadcastStyle end
+Base.BroadcastStyle(::Type{BatchedRNG}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:BatchedCuMatrix}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:BatchedCuVector}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:BatchedCuScalar}) = BatchedStyle()
@@ -35,6 +36,7 @@ struct CompiledKernel
 end
 
 const KERNEL_CACHE = Dict{Any,CompiledKernel}()
+const KERNEL_CACHE_LOCK = ReentrantLock()
 
 # `D_MAX` is the max over every per-input row/col extent across all leaf
 # trace-matrix inputs. It drives slot allocation and the warp→matrix mapping.
@@ -62,6 +64,7 @@ function _infer_D_MAX_T_from_spec!(D_ref::Ref, T_ref::Ref, spec::LeafInput)
     return nothing
 end
 _infer_D_MAX_T_from_spec!(::Ref, ::Ref, ::LiteralInput) = nothing
+_infer_D_MAX_T_from_spec!(::Ref, ::Ref, ::RNGInput) = nothing
 function _infer_D_MAX_T_from_spec!(D_ref::Ref, T_ref::Ref, spec::CompositeInput)
     _infer_D_MAX_T_from_specs!(D_ref, T_ref, (child for (_, child) in spec.fields))
     return nothing
@@ -123,7 +126,22 @@ function _collect_runtime_inputs!(::Vector, ::Vector, ::Ref, x)
     return error("Unsupported batched broadcast input component of type $(typeof(x))")
 end
 
-function _ensure_compiled!(
+_collect_runtime_inputs!(::Vector, ::Vector, ::Ref, ::BatchedRNG) = nothing
+_collect_rng_inputs!(rngs, ::Any) = nothing
+_collect_rng_inputs!(rngs, rng::BatchedRNG) = push!(rngs, rng)
+function _collect_rng_inputs!(rngs, x::BatchedStruct)
+    for component in values(getfield(x, :components))
+        _collect_rng_inputs!(rngs, component)
+    end
+end
+
+function _ensure_compiled!(f, args::Tuple; kwargs...)
+    return lock(KERNEL_CACHE_LOCK) do
+        return _ensure_compiled_unlocked!(f, args; kwargs...)
+    end
+end
+
+function _ensure_compiled_unlocked!(
     f,
     args::Tuple;
     assignment=nothing,
@@ -170,21 +188,20 @@ function _ensure_compiled!(
     D_ref = Ref{Any}(nothing)
     T_ref = Ref{Any}(nothing)
     _infer_D_MAX_T_from_specs!(D_ref, T_ref, input_specs)
-    D_MAX = D_ref[]
-    T = T_ref[]
-    D_MAX === nothing && error("Could not infer matrix dimension from inputs")
-    T === nothing && error("Could not infer element type from inputs")
-    T in (Float32, Float64) ||
-        throw(ArgumentError("fused kernels support Float32 and Float64 inputs, got $T"))
-    1 <= D_MAX <= 32 || throw(ArgumentError("matrix group dimension must be in 1:32"))
-
     tape = trace(f, input_specs)
-    # Geometry must cover intermediate extents as well as input extents.
+    # Sampling-only functions infer geometry and numerical type from their tape.
+    # Also reject mixed precision in intermediates: output allocation and shared
+    # storage currently use one numerical type for the whole kernel.
     for meta in tape.metas
-        if meta.type <: Union{TraceMatrix,TraceVector}
-            D_MAX = max(D_MAX, maximum(shape(meta.type)))
+        if meta.type <: Union{TraceMatrix,TraceVector,TraceScalar}
+            _infer_D_MAX_T_from_spec!(D_ref, T_ref, LeafInput(meta.type, meta.lifecycle))
         end
     end
+    D_MAX, T = D_ref[], T_ref[]
+    D_MAX === nothing &&
+        error("Could not infer numerical dimensions from inputs or traced results")
+    T in (Float32, Float64) ||
+        throw(ArgumentError("fused kernels support Float32 and Float64, got $T"))
     1 <= D_MAX <= 32 ||
         throw(ArgumentError("intermediate matrix group dimension must be in 1:32"))
     if assignment === nothing && policy === :auto
@@ -288,7 +305,8 @@ export fuse, Assignment
 
 """
     fuse(f, args...; policy=:auto, assignment=nothing,
-         nthreads=assignment === nothing ? 128 : assignment.nthreads, shared_memory=:static)
+         nthreads=assignment === nothing ? 128 : assignment.nthreads, shared_memory=:static,
+         batch_size=nothing)
 
 Execute the same scalar function and return the same inferred batched output type
 as `f.(args...)`. The default `policy=:auto` uses deterministic register-first
@@ -303,6 +321,10 @@ With automatic or explicit hybrid planning, `shared_memory=:dynamic` uses an ali
 shared arena and opts into the device per-block capacity. The default is `:static`.
 Allocation mode is part of the compilation cache key.
 
+Pass a `BatchedRNG` argument for fused `rand`/`randn` sampling. It advances once
+per nonempty sampling launch. `batch_size` supplies the batch size when no input
+container carries one; if supplied alongside containers it must match them.
+
 Single, dual and register matrix storage are supported by the audited variants.
 Forced mutation uses shared storage. A forced choice is rejected if unsupported,
 without silently selecting another variant. Register placement does not guarantee
@@ -315,13 +337,14 @@ function fuse(
     nthreads::Int=assignment === nothing ? 128 : assignment.nthreads,
     shared_memory::Symbol=:static,
     policy::Symbol=:auto,
+    batch_size::Union{Nothing,Integer}=nothing,
 ) where {F<:Function,N}
     isdefined(F, :instance) || error("fuse only supports singleton function objects")
     elem_types = _elem_types(typeof(args))
     R = Core.Compiler.return_type(F.instance, elem_types)
     BR = batchify_type(R)
     bc = Broadcasted{BatchedStyle}(f, args)
-    result = _broadcast_impl(bc; assignment, nthreads, shared_memory, policy)
+    result = _broadcast_impl(bc; assignment, nthreads, shared_memory, policy, batch_size)
     return result::BR
 end
 
@@ -331,22 +354,30 @@ function _broadcast_impl(
     nthreads::Int=128,
     shared_memory::Symbol=:static,
     policy::Symbol=:auto,
+    batch_size::Union{Nothing,Integer}=nothing,
 )
     f = bc.f
     args = bc.args
-
+    N_ref = Ref{Union{Nothing,Int}}(nothing)
+    if batch_size !== nothing
+        0 <= batch_size <= typemax(Int32) ||
+            throw(ArgumentError("batch_size must be in 0:typemax(Int32)"))
+        N_ref[] = Int(batch_size)
+    end
+    batched_args = Any[]
+    shared_args = Any[]
+    rngs = BatchedRNG[]
+    for a in args
+        _collect_runtime_inputs!(batched_args, shared_args, N_ref, a)
+        _collect_rng_inputs!(rngs, a)
+    end
+    N = N_ref[]
+    N === nothing && throw(ArgumentError("Cannot infer batch size; provide batch_size=N"))
+    0 <= N <= typemax(Int32) ||
+        throw(ArgumentError("batch size must fit in nonnegative Int32"))
     entry = _ensure_compiled!(f, args; assignment, nthreads, shared_memory, policy)
     compiled_fn = entry.fn
     D_MAX, nthreads, T = entry.D_MAX, entry.nthreads, entry.T
-
-    N_ref = Ref{Union{Nothing,Int}}(nothing)
-    batched_args = Any[]
-    shared_args = Any[]
-    for a in args
-        _collect_runtime_inputs!(batched_args, shared_args, N_ref, a)
-    end
-    N = N_ref[]
-    N === nothing && error("At least one batched matrix input required")
 
     leaves = flatten_leaves(entry.output_spec)
     # Outputs are fully written by the kernel (every in-bounds element gets a
@@ -368,9 +399,18 @@ function _broadcast_impl(
     nblocks = cld(N, (nthreads ÷ 32) * (32 ÷ D_MAX))
     if N > 0
         Base.invokelatest() do
-            launch_args = (leaf_arrays..., batched_args..., shared_args..., Int32(N))
+            # Compile and validate resources using inert values. Reserve stream
+            # counters only once the kernel is ready to submit.
+            placeholders = [DeviceRNG(0, 0) for _ in rngs]
+            launch_args = (
+                leaf_arrays..., batched_args..., shared_args..., placeholders..., Int32(N)
+            )
             kernel = @cuda launch = false compiled_fn(launch_args...)
             shmem = _configure_dynamic_shared!(kernel, entry)
+            states = _reserve_rngs(rngs, entry.sig.rng_used)
+            launch_args = (
+                leaf_arrays..., batched_args..., shared_args..., states..., Int32(N)
+            )
             return kernel(launch_args...; threads=nthreads, blocks=nblocks, shmem)
         end
     end
@@ -465,6 +505,9 @@ function batchify_type(::Type{Union{}})
             "Scalar function has no supported return type for these traced inputs"
         ),
     )
+end
+function batchify_type(::Type{TraceRNG})
+    return throw(ArgumentError("An RNG cannot be returned from a fused function"))
 end
 batchify_type(::Type{T}) where {T<:Union{Number,AbstractChar,Bool,Nothing}} = SharedValue{T}
 function batchify_type(::Type{TraceMatrix{T,D_M,D_N}}) where {T,D_M,D_N}

@@ -6,6 +6,10 @@ using LinearAlgebra
 using StaticArrays: @MVector
 using Base.Broadcast: Broadcasted, BroadcastStyle
 import Base.Broadcast
+import Random
+import Random123
+
+include("random.jl")
 
 include("containers.jl")
 include("memory.jl")
@@ -28,6 +32,7 @@ include("fuse/block_qr.jl")
 include("fuse/backward_qr.jl")
 include("fuse/emit.jl")
 include("fuse/variants.jl")
+include("fuse/random.jl")
 include("fuse/plan.jl")
 include("fuse/assignment.jl")
 include("fuse/schedule.jl")
