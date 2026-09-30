@@ -44,3 +44,30 @@
     end
     @test maximum(abs.(got .- ref)) / maximum(abs.(ref)) < 1e-3
 end
+
+@testitem "Fused composite outputs are labelled like hand-built batches" begin
+    using BatchedKernels
+    using CUDA
+
+    struct Belief{M,C}
+        mean::M
+        covariance::C
+    end
+    doubled(b) = Belief(b.mean + b.mean, b.covariance + b.covariance)
+    sum_difference(a, b) = (a + b, a - b)
+
+    N = 33
+    μ = BatchedCuVector(CUDA.rand(Float32, 3, N))
+    Σ = BatchedCuMatrix(CUDA.rand(Float32, 3, 3, N))
+    built = BatchedStruct(Belief, (; mean=μ, covariance=Σ))
+
+    fused = @inferred fuse(doubled, built)
+    @test eltype(fused) === eltype(built)
+    @test eltype(@inferred fuse(doubled, fused)) === eltype(built)
+    @test eltype(@inferred fuse(sum_difference, μ, μ)) === Tuple{eltype(μ),eltype(μ)}
+
+    # A view-backed input still yields leaves in freshly allocated storage.
+    strided = BatchedCuMatrix(view(CUDA.rand(Float32, 3, 3, 2N), :, :, 1:2:(2N)))
+    @test eltype(fuse(doubled, BatchedStruct(Belief, (; mean=μ, covariance=strided)))) ===
+        eltype(built)
+end

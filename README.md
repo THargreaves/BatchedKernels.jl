@@ -53,6 +53,10 @@ shared literal field. A function returning a tuple produces a `BatchedStruct`;
 use `values(result.components)` to unpack its batched outputs. Outputs can feed
 subsequent `fuse` calls directly.
 
+`batch[idxs]` gathers entries into a new batch, applying the same integer indices
+(on the host or device) to every field of a `BatchedStruct`. Gathered batched
+fields get their own storage; shared fields stay shared.
+
 ## Random sampling
 
 Pass a `BatchedRNG` explicitly. Sampling then runs inside the fused kernel:

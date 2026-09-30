@@ -157,6 +157,7 @@ end
     # Stage 1: cholesky.(A) — fused kernel returns a batched Cholesky value.
     h1(A) = factorize.(A)
     C_gpu = @inferred h1(A_gpu)
+    @test eltype(C_gpu) === Cholesky{T,eltype(A_gpu)}
 
     # Stage 2: a second fused kernel consumes that Cholesky alongside B.
     h2(C, B) = solve_with.(C, B)
