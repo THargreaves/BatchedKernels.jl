@@ -470,11 +470,8 @@ end
             kernel = @cuda launch = false kernel_backsolve_vec!(
                 cs, Ls, bs, Val(Int32(D1)), Val(Int32(D)), Val(Int32(nthreads)), Int32(N)
             )
-            CUDA.cuFuncSetAttribute(
-                kernel.fun,
-                CUDA.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                shmem_bytes,
-            )
+            CUDA.attributes(kernel.fun)[CUDA.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] =
+                shmem_bytes
 
             CUDA.@sync kernel(
                 cs,
