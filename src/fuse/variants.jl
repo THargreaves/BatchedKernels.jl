@@ -213,6 +213,11 @@ function emit_variant(v::OrientationVariant, dest, args::Vector, types::Vector, 
     shapes = map(_variant_shape, matrix_types)
     all(s -> maximum(s) <= D_MAX, shapes) ||
         throw(ArgumentError("variant shape exceeds D_MAX"))
+    if v.shape_rule === :random
+        any(candidate -> candidate == v, orientation_variants(_sample_random, types...)) ||
+            throw(ArgumentError("unsupported random variant/type combination"))
+        return _emit_random(dest, args, types[2], D_MAX; orientation=v.output_access)
+    end
     fn = if v.shape_rule in (:matmul, :matvec)
         (*)
     elseif v.shape_rule === :matrix_divide

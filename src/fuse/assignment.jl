@@ -384,7 +384,9 @@ function plan_memory(
             found === nothing && throw(ArgumentError("Unsupported variant $variant at %$i"))
             v = candidates[found]
             inputshapes = [_assignment_shape(tape.metas[p].type) for p in matrixargs]
-            outputshape = if v.shape_rule === :matmul
+            outputshape = if v.shape_rule === :random
+                _random_shape(tape.metas[node.args[2].id].type)
+            elseif v.shape_rule === :matmul
                 (inputshapes[1][1], inputshapes[2][2])
             elseif v.shape_rule === :triangular_solve
                 inputshapes[2]

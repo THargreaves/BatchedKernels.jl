@@ -4,6 +4,12 @@
 
 ### Fusion and numerical operations
 
+- Add `BatchedRNG(seed)` and fused uniform/normal sampling for Float32/Float64
+  scalars, vectors and matrices. Streams advance automatically per sampling
+  launch, support reseeding/copying, and preserve draws across scheduling,
+  thread-count and storage choices. Sampling-only functions accept
+  `fuse(...; batch_size=N)`; ordinary calls infer the batch size from inputs.
+
 - Automatic register-first storage is the default fusion policy. Custom
   `Assignment`s remain available; `policy=:legacy` keeps the original all-shared
   planner as a benchmark ablation baseline. Hybrid kernels can use static or
