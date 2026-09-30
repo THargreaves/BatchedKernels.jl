@@ -18,48 +18,62 @@ end
     T = eltype(top)
     base = mod1(threadIdx().x, 32i32) - d
     mask = @inbounds _register_group_mask(Val(D), base)
-    @inbounds @unroll for j in (1i32):Int32(K)
-        xt = j <= d <= Int32(M) ? top[j] : zero(T)
-        xb = j <= d + Int32(M) && d <= Int32(N) ? bot[j] : zero(T)
-        scale = _qr_group_max(max(abs(xt), abs(xb)), d, Val(D))
-        # Scale before squaring; all-zero columns have the identity reflector.
-        divisor = scale == zero(T) ? one(T) : scale
-        xt /= divisor
-        xb /= divisor
-        magnitude = sqrt(_group_sum(xt * xt + xb * xb, d, Val(D)))
-        alpha = if j <= Int32(M)
-            shfl_sync(mask, xt, _shuffle_source(base + j))
-        else
-            shfl_sync(mask, xb, _shuffle_source(base + j - Int32(M)))
-        end
-        beta = -copysign(magnitude, alpha)
-        v1 = alpha - beta
-        tau = magnitude == zero(T) ? zero(T) : (beta - alpha) / beta
-        vd = magnitude == zero(T) ? one(T) : v1
-        vt = d == j && j <= Int32(M) ? one(T) : xt / vd
-        vb = d + Int32(M) == j ? one(T) : xb / vd
-        @unroll for k in (1i32):Int32(K)
-            if k > j
-                projection = _group_sum(vt * top[k] + vb * bot[k], d, Val(D))
-                update = tau * projection
-                top[k] -= vt * update
-                bot[k] -= vb * update
+    # Keep small problems fully unrolled; larger ones use chunks of four reflectors.
+    # Constant fragment indices preserve register storage with less code growth.
+    chunk_size = K <= 8 ? 1 : 4
+    @inbounds @unroll for chunk in 0:((K - 1) ÷ chunk_size)
+        for j in Int32(1 + chunk_size * chunk):Int32(min(K, chunk_size * (chunk + 1)))
+            xt, xb = zero(T), zero(T)
+            @unroll for k in (1i32):Int32(K)
+                if k == j
+                    xt = j <= d <= Int32(M) ? top[k] : zero(T)
+                    xb = j <= d + Int32(M) && d <= Int32(N) ? bot[k] : zero(T)
+                end
             end
-        end
-        diagonal = beta * scale
-        if d >= j
-            top[j] = d == j ? diagonal : zero(T)
-        end
-        if d + Int32(M) >= j
-            bot[j] = d + Int32(M) == j ? diagonal : zero(T)
-        end
-        # Normalize the entire completed row, including the cross block. Zero
-        # diagonals deliberately keep +1 so a nonzero trailing row is preserved.
-        sign = diagonal < zero(T) ? -one(T) : one(T)
-        @unroll for k in (1i32):Int32(K)
-            if k >= j
-                d == j && (top[k] *= sign)
-                d + Int32(M) == j && (bot[k] *= sign)
+            scale = _qr_group_max(max(abs(xt), abs(xb)), d, Val(D))
+            # Scale before squaring; all-zero columns have the identity reflector.
+            divisor = scale == zero(T) ? one(T) : scale
+            xt /= divisor
+            xb /= divisor
+            magnitude = sqrt(_group_sum(xt * xt + xb * xb, d, Val(D)))
+            alpha = if j <= Int32(M)
+                shfl_sync(mask, xt, _shuffle_source(base + j))
+            else
+                shfl_sync(mask, xb, _shuffle_source(base + j - Int32(M)))
+            end
+            beta = -copysign(magnitude, alpha)
+            v1 = alpha - beta
+            tau = magnitude == zero(T) ? zero(T) : (beta - alpha) / beta
+            vd = magnitude == zero(T) ? one(T) : v1
+            vt = d == j && j <= Int32(M) ? one(T) : xt / vd
+            vb = d + Int32(M) == j ? one(T) : xb / vd
+            @unroll for k in (1i32):Int32(K)
+                if k > j
+                    projection = _group_sum(vt * top[k] + vb * bot[k], d, Val(D))
+                    update = tau * projection
+                    top[k] -= vt * update
+                    bot[k] -= vb * update
+                end
+            end
+            diagonal = beta * scale
+            @unroll for k in (1i32):Int32(K)
+                if k == j
+                    if d >= j
+                        top[k] = d == j ? diagonal : zero(T)
+                    end
+                    if d + Int32(M) >= j
+                        bot[k] = d + Int32(M) == j ? diagonal : zero(T)
+                    end
+                end
+            end
+            # Normalize the entire completed row, including the cross block. Zero
+            # diagonals deliberately keep +1 so a nonzero trailing row is preserved.
+            sign = diagonal < zero(T) ? -one(T) : one(T)
+            @unroll for k in (1i32):Int32(K)
+                if k >= j
+                    d == j && (top[k] *= sign)
+                    d + Int32(M) == j && (bot[k] *= sign)
+                end
             end
         end
     end
