@@ -29,12 +29,16 @@ function Test.finish(ts::ProgressTestSet)
 end
 
 # TestItemRunner discovers every @testitem, including the sub-kernel suites.
-# CPU-only machines run explicitly tagged algebra/planner/layout tests. Set this
-# variable on a GPU machine to exercise the same selection used by hosted CI.
+# CPU-only machines run explicitly tagged algebra/planner/layout tests. Set
+# CPU_ONLY on a GPU machine for the hosted CI selection; EXTENDED=false omits
+# the separately tagged large-shape cases. Full coverage remains the default.
+const extended = get(ENV, "BATCHEDKERNELS_TEST_EXTENDED", "true") != "false"
+const include_item = ti -> extended || !(:extended in ti.tags)
 const cpu_only = get(ENV, "BATCHEDKERNELS_TEST_CPU_ONLY", "false") == "true"
 if cpu_only || !CUDA.functional()
     @info "Running CPU tests; CUDA kernel tests require a functional GPU"
-    @run_package_tests filter = ti -> :cpu in ti.tags testset = ProgressTestSet
+    @run_package_tests filter = ti -> :cpu in ti.tags && include_item(ti) testset =
+        ProgressTestSet
 else
-    @run_package_tests testset = ProgressTestSet
+    @run_package_tests filter = include_item testset = ProgressTestSet
 end
