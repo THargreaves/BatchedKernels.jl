@@ -13,7 +13,7 @@ end
 @inline function _qr_columns!(
     left, right, d::Int32, ::Val{R}, ::Val{P}, ::Val{Q}, ::Val{D}, ::Val{K}
 ) where {R,P,Q,D,K}
-    chunk_size = Val(K <= 8 ? 1 : 4)
+    chunk_size = Val(R <= 32 ? 1 : 4)
     _qr_columns_panel!(
         left,
         right,
@@ -64,7 +64,7 @@ end
     # Broadcast once, then reuse for both the projection and rank-one update.
     # Keeping this explicit avoids a second shuffle of every reflector element.
     reflector = MVector{Int(R),T}(undef)
-    # Keep small problems fully unrolled; larger ones use chunks of four reflectors.
+    # Keep up to 32 assembled rows fully unrolled; larger problems use four-reflector chunks.
     # This bounds code growth while static row indices preserve register storage.
     # Separate panel phases remove left/right selection inside each element loop.
     @inbounds @unroll for chunk in 0:((Last - First) ÷ Chunk)

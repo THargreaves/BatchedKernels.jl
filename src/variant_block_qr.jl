@@ -18,9 +18,9 @@ end
     T = eltype(top)
     base = mod1(threadIdx().x, 32i32) - d
     mask = @inbounds _register_group_mask(Val(D), base)
-    # Keep small problems fully unrolled; larger ones use chunks of four reflectors.
+    # Keep up to 32 assembled rows fully unrolled; larger problems use four-reflector chunks.
     # Constant fragment indices preserve register storage with less code growth.
-    chunk_size = K <= 8 ? 1 : 4
+    chunk_size = M + N <= 32 ? 1 : 4
     @inbounds @unroll for chunk in 0:((K - 1) ÷ chunk_size)
         for j in Int32(1 + chunk_size * chunk):Int32(min(K, chunk_size * (chunk + 1)))
             xt, xb = zero(T), zero(T)
