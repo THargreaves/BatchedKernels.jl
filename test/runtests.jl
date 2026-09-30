@@ -28,7 +28,8 @@ function Test.finish(ts::ProgressTestSet)
     return ts
 end
 
-# TestItemRunner discovers every @testitem, including the sub-kernel suites.
+# Discover only test/: repository-wide discovery also executes nested worktrees.
+# Each test item explicitly imports BatchedKernels.
 # CPU-only machines run explicitly tagged algebra/planner/layout tests. Set
 # CPU_ONLY on a GPU machine for the hosted CI selection; EXTENDED=false omits
 # the separately tagged large-shape cases. Full coverage remains the default.
@@ -37,8 +38,9 @@ const include_item = ti -> extended || !(:extended in ti.tags)
 const cpu_only = get(ENV, "BATCHEDKERNELS_TEST_CPU_ONLY", "false") == "true"
 if cpu_only || !CUDA.functional()
     @info "Running CPU tests; CUDA kernel tests require a functional GPU"
-    @run_package_tests filter = ti -> :cpu in ti.tags && include_item(ti) testset =
-        ProgressTestSet
+    TestItemRunner.run_tests(
+        @__DIR__; filter=ti -> :cpu in ti.tags && include_item(ti), testset=ProgressTestSet
+    )
 else
-    @run_package_tests filter = include_item testset = ProgressTestSet
+    TestItemRunner.run_tests(@__DIR__; filter=include_item, testset=ProgressTestSet)
 end
