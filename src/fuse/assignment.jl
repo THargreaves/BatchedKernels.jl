@@ -401,7 +401,7 @@ function plan_memory(
             elseif v.shape_rule === :qr_residual
                 n = inputshapes[1][2]
                 ((n, n), (n,), ())
-            elseif v.shape_rule === :scalar_logdet
+            elseif v.shape_rule in (:scalar_logdet, :scalar_triangular)
                 ()
             else
                 inputshapes[1]

@@ -4,6 +4,11 @@
 
 ### Fusion and numerical operations
 
+- Support ordinary subtraction of traced matrices with matching shapes and
+  precision under the legacy and hybrid planners.
+- Support `logabsdet` of Float32/Float64 traced upper/lower triangular matrices,
+  including adjoint/transpose parents and Cholesky factors. Return the ordinary
+  log-magnitude/sign tuple, preserving singular and nonfinite diagonal semantics.
 - Compile large QR problems in groups of four reflectors, retaining full
   unrolling for small problems and register storage for working fragments.
 - Add `BatchedRNG(seed)` and fused uniform/normal sampling for Float32/Float64

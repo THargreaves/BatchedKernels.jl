@@ -84,6 +84,15 @@ function Base.:+(A::TraceMatrix{T,D_M,D_N}, B::TraceMatrix{T,D_M,D_N}) where {T,
     return TraceMatrix{T,D_M,D_N}(A.tape, out)
 end
 
+# --- Matrix - Matrix --------------------------------------------------------
+
+function Base.:-(A::TraceMatrix{T,M,N}, B::TraceMatrix{T,M,N}) where {T,M,N}
+    A.tape === B.tape ||
+        throw(ArgumentError("Difference operands belong to different tapes"))
+    out = emit_call!(A.tape, -, NodeRef[A.ref, B.ref], TraceMatrix{T,M,N})
+    return TraceMatrix{T,M,N}(A.tape, out)
+end
+
 # Preserve ordinary wrapped addition, including the unmodified expression
 # `(A + A') / 2`. The planner sees the adjoint and can reject unsafe aliasing.
 for Wrapper in (Adjoint, Transpose)
@@ -403,6 +412,21 @@ end
 
 function LinearAlgebra.logdet(M::Symmetric{T,<:TraceMatrix{T,D_M,D_M}}) where {T<:Real,D_M}
     return logdet(cholesky(M))
+end
+
+# Separate scalar nodes keep the ordinary tuple compatible with both planners.
+# Neither operation assumes a positive diagonal, unlike covariance_root_logdet.
+function _triangular_logabs end
+function _triangular_detsign end
+
+function LinearAlgebra.logabsdet(
+    A::TraceTriangularMatrix{T}
+) where {T<:Union{Float32,Float64}}
+    tape = _trace_tape(A)
+    ref = register_wrapped!(tape, A)
+    magnitude = emit_call!(tape, _triangular_logabs, NodeRef[ref], TraceScalar{T})
+    sign = emit_call!(tape, _triangular_detsign, NodeRef[ref], TraceScalar{T})
+    return TraceScalar{T}(tape, magnitude), TraceScalar{T}(tape, sign)
 end
 
 # --- Scalar arithmetic ------------------------------------------------------

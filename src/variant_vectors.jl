@@ -60,6 +60,27 @@ end
     return _group_sum(value, d, Val(D))
 end
 
+@inline function variant_triangular_logabs(A, d::Int32, ::Val{N}, ::Val{D}) where {N,D}
+    value = zero(eltype(A))
+    @unroll for k in (1i32):Int32(N)
+        diagonal = theirs(A, k, k)
+        if d == k
+            value = log(abs(diagonal))
+        end
+    end
+    return _group_sum(value, d, Val(D))
+end
+
+@inline function variant_triangular_detsign(A, ::Int32, ::Val{N}, ::Val{D}) where {N,D}
+    # Broadcasts already replicate each diagonal across the group. Multiply in
+    # Julia's diagonal order to preserve signed zeros and NaN propagation.
+    value = one(eltype(A))
+    @unroll for k in (1i32):Int32(N)
+        value *= sign(theirs(A, k, k))
+    end
+    return value
+end
+
 @inline function variant_norm_sq(x, d::Int32, ::Val{N}, ::Val{D}) where {N,D}
     value = d <= Int32(N) ? abs2(@inbounds(x[d])) : zero(eltype(x))
     return _group_sum(value, d, Val(D))

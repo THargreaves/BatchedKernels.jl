@@ -203,6 +203,16 @@ function orientation_variants(::typeof(logdet), A::Type)
     return (_orientation_variant(:logdet_any, (:any,), :none, :scalar_logdet),)
 end
 
+function orientation_variants(
+    fn::Union{typeof(_triangular_logabs),typeof(_triangular_detsign)}, A::Type
+)
+    _variant_input_domain((A,)) && _variant_triangular(A) || return ()
+    m, n = _variant_shape(A)
+    m == n || return ()
+    id = fn === _triangular_logabs ? :triangular_logabs_any : :triangular_detsign_any
+    return (_orientation_variant(id, (:any,), :none, :scalar_triangular),)
+end
+
 """Emit a validated variant call; assignment/residence and alias validation belongs to M5."""
 function emit_variant(v::OrientationVariant, dest, args::Vector, types::Vector, D_MAX::Int)
     1 <= D_MAX <= 32 || throw(ArgumentError("D_MAX must be in 1:32"))
@@ -240,6 +250,8 @@ function emit_variant(v::OrientationVariant, dest, args::Vector, types::Vector, 
         qr_compress_residual
     elseif v.shape_rule === :scalar_logdet
         logdet
+    elseif v.shape_rule === :scalar_triangular
+        v.id === :triangular_logabs_any ? _triangular_logabs : _triangular_detsign
     elseif startswith(String(v.id), "add")
         (+)
     else
@@ -250,6 +262,9 @@ function emit_variant(v::OrientationVariant, dest, args::Vector, types::Vector, 
     if v.shape_rule === :scalar_logdet
         n = shapes[1][1]
         return :($dest = variant_logdet($(args[1]), d, Val(Int32($n)), Val(Int32($D_MAX))))
+    end
+    if v.shape_rule === :scalar_triangular
+        return emit_primitive(fn, dest, args, types, D_MAX)
     end
     if v.shape_rule === :qr_residual
         m, n = shapes[1]

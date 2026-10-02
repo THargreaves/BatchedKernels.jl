@@ -116,13 +116,14 @@ function emit_primitive(::typeof(-), dest::Symbol, args::Vector, types::Vector, 
     if _is_scalar_op(types)
         return _emit_scalar_assign(-, dest, args)
     end
-    # Vector subtraction. (Matrix `I - M` does not reach this method — it is
-    # captured as an `IAddSubWrapped` value at the overload site and consumed
-    # lazily by `arg_kernel_expr`, not as a `-` CallNode.)
+    # Matrix and vector subtraction share the existing arithmetic kernels.
+    # I - M is represented separately as an IAddSubWrapped value.
     a, b = args
-    D_M, = shape(types[1])
+    dims = shape(types[1])
+    D_M = dims[1]
+    D_N = length(dims) == 1 ? 0 : dims[2]
     return :(batch_op!(
-        -, $dest, $a, $b, d, Val(Int32($D_M)), Val(Int32(0)), Val(Int32($D_MAX))
+        -, $dest, $a, $b, d, Val(Int32($D_M)), Val(Int32($D_N)), Val(Int32($D_MAX))
     ))
 end
 
@@ -295,6 +296,19 @@ function emit_primitive(
     M, = args
     n = shape(types[1])[1]
     return :($dest = variant_logdet($M, d, Val(Int32($n)), Val(Int32($D_MAX))))
+end
+
+function emit_primitive(
+    fn::Union{typeof(_triangular_logabs),typeof(_triangular_detsign)},
+    dest::Symbol,
+    args::Vector,
+    types::Vector,
+    D_MAX::Int,
+)
+    body =
+        fn === _triangular_logabs ? :variant_triangular_logabs : :variant_triangular_detsign
+    n = shape(types[1])[1]
+    return :($dest = $body($(args[1]), d, Val(Int32($n)), Val(Int32($D_MAX))))
 end
 
 function emit_primitive(

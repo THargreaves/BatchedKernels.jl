@@ -97,11 +97,15 @@ during host tracing and can become a cached constant. Distribution objects,
 
 - Fused numerical inputs and intermediates use one matching type: Float32 or
   Float64 (mixed precision is not supported). 
-- Supported operations include matrix products and addition, matrix-vector
+- Supported operations include matrix products and addition/subtraction, matrix-vector
   products, vector addition/subtraction, triangular solves, Cholesky, QR,
   `dot`, `sum(abs2, x)`, and scalar arithmetic. Support is specific to operand
   types: for example, triangular matrix solves accept upper or lower factors,
   while triangular vector solves currently accept lower factors.
+- `logabsdet` accepts real upper/lower triangular matrices, including
+  adjoint/transpose parents and Cholesky `.L`/`.U` factors, and returns the
+  standard `(log_magnitude, sign)` tuple. Negative, zero, and nonfinite diagonals
+  follow Julia's triangular semantics. Arbitrary dense `logabsdet` is not supported.
 - Use named functions with supported array operations. Capturing closures,
   callable structs, arbitrary scalar indexing, elementwise array broadcasts,
   and branches on computed values are unsupported.
