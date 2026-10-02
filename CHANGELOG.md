@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Member assignment
+
+- Add eager `BatchedCuVector` member assignment with exact shape checks,
+  backing-array element conversion, and overlap-safe host/device copies.
+- Document borrowed composite storage and member assignment ownership.
+
 ### Fusion and numerical operations
 
 - Support ordinary subtraction of traced matrices with matching shapes and

@@ -63,6 +63,54 @@ Base.size(x::BatchedCuVector) = (batch_size(x),)
 Base.IndexStyle(::Type{<:BatchedCuVector}) = IndexLinear()
 Base.getindex(x::BatchedCuVector, i::Integer) = view(x.data, :, i)
 
+# Member assignment is slice assignment: retain the packed storage and copy the
+# values, as for eachcol(A)[i] = value. Restrict destinations to storage maps whose
+# members cannot overlap (in particular, reject repeated-index views).
+_member_storage(a::Union{Array,CuArray}) = a
+function _member_storage(a::SubArray)
+    all(i -> i isa Union{Integer,Base.Slice,AbstractRange}, parentindices(a)) ||
+        throw(ArgumentError("member assignment requires regular range views"))
+    any(i -> i isa AbstractRange && length(i) > 1 && iszero(step(i)), parentindices(a)) &&
+        throw(ArgumentError("member assignment requires distinct destination indices"))
+    return _member_storage(parent(a))
+end
+_member_storage(a::Base.ReshapedArray) = _member_storage(parent(a))
+function _member_storage(a)
+    return throw(ArgumentError("unsupported member assignment storage $(typeof(a))"))
+end
+
+"""
+    batch[i::Integer] = value::AbstractVector
+
+Copy `value` into member `i` of a `BatchedCuVector`, retaining its storage. The
+source must have exactly the member's axes; scalar expansion is not performed.
+Element conversion follows the backing array's copy operation, without rollback
+if conversion or device execution fails. `setindex!` returns `batch`.
+
+Dense host/CUDA arrays and regular range views are supported. Source and destination
+must both be host arrays or reside on the same CUDA device. Overlapping sources
+are snapshotted before writing. Existing views of the destination observe the
+write; a non-aliasing source and other members are unchanged. This is an eager
+operation, not mutation inside `fuse`.
+"""
+function Base.setindex!(x::BatchedCuVector, value::AbstractVector, i::Integer)
+    checkbounds(x, i)
+    dest = x[i]
+    axes(dest) == axes(value) || throw(DimensionMismatch("batch member axes differ"))
+    dstroot, srcroot = _member_storage(x.data), _member_storage(value)
+    (dstroot isa CuArray) == (srcroot isa CuArray) ||
+        throw(ArgumentError("member assignment does not transfer between host and device"))
+    if dstroot isa CuArray
+        CUDA.device(dstroot) == CUDA.device(srcroot) ||
+            throw(ArgumentError("member assignment requires the same CUDA device"))
+    end
+    # Comparing a dense CUDA view to a SubArray can miss overlap. Compare their
+    # unwrapped storage instead; conservative positives only cost one member copy.
+    source = Base.mightalias(dstroot, srcroot) ? copy(value) : value
+    copyto!(dest, source)
+    return x
+end
+
 # -----------------------------------------------------------------------------
 # BatchedCuScalar
 # -----------------------------------------------------------------------------

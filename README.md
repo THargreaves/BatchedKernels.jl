@@ -57,6 +57,20 @@ subsequent `fuse` calls directly.
 (on the host or device) to every field of a `BatchedStruct`. Gathered batched
 fields get their own storage; shared fields stay shared.
 
+`vectors[i] = value` copies a vector into one member of a `BatchedCuVector`,
+like assignment into `eachcol(A)`. Existing member views observe the write;
+the source is not retained as the member. Shapes must match exactly, and ordinary
+backing-array element conversion is allowed. Dense arrays and regular range views
+are supported, on the host or on one CUDA device; assignment does not implicitly
+transfer between them. Overlapping sources are snapshotted before writing.
+Conversion/device failures do not promise rollback. Shared and composite member
+assignment is not supported. This eager operation is separate from fused mutation.
+
+`BatchedStruct(T, components)` borrows its component batches without copying
+numerical storage. Its `.components` exposes those same batches. Assemble a new
+composite from newly computed fields to preserve previous populations; extracting
+a component does not give it independent ownership.
+
 ## Random sampling
 
 Pass a `BatchedRNG` explicitly. Sampling then runs inside the fused kernel:
