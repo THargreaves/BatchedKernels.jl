@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### GPU array sampling
+
+- Add `rand!` and `randn!` for dense Float32/Float64 `CuArray`s using
+  `BatchedRNG`, sharing launch reservations with fused sampling. Document
+  copying, reseeding, asynchronous launches and unsupported destinations.
+
 ### Member assignment
 
 - Add eager `BatchedCuVector` member assignment with exact shape checks,

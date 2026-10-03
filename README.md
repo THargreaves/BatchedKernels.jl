@@ -97,15 +97,34 @@ advance it. Use `copy(rng)` to preserve its current position in an independent
 RNG, or `Random.seed!(rng, 123)` to restart. Batch size comes from the input
 containers; for sampling-only functions, supply `fuse(sample, rng; batch_size=N)`.
 
+The same RNG also fills ordinary dense GPU arrays outside `fuse`:
+
+```julia
+uniforms = CuArray{Float32}(undef, 100_000)
+rand!(rng, uniforms)
+randn!(rng, uniforms)
+```
+
+These methods support Float32/Float64 `CuArray`s of any rank on the active CUDA
+device, with lengths up to `typemax(Int)` subject to available memory. Each
+nonempty fill reserves one stream position, shared with fused sampling. Empty
+arrays and validation or compilation failures consume none; failures after
+reservation consume that position. Array fills use logical column-major indices,
+so reshaping the destination preserves samples for the same seed and position.
+Noncontiguous views and CPU sampling with `BatchedRNG` are not supported.
+
 The same seed and sequence of calls reproduce samples within a package version.
 Changing thread count, scheduling or storage layout preserves samples; splitting
 one batch across several calls changes them. CPU RNG sequences and bitwise normal
 samples across devices or versions are not guaranteed. Concurrent callers reserve
 distinct stream positions, but their order is not fixed.
+Copying duplicates the future stream; it does not create an independent random
+substream. Reseeding does not affect already submitted kernels, which retain their
+original RNG snapshots. Callers must coordinate reseeding with concurrent use.
 
 Always pass the RNG to sampling calls. Implicit `rand()` or `randn()` executes
-during host tracing and can become a cached constant. Distribution objects,
-`rand!`/`randn!`, and random-dependent control flow are unsupported.
+during host tracing and can become a cached constant. Inside fused functions,
+distribution objects, `rand!`/`randn!`, and random-dependent control flow are unsupported.
 
 ## Supported code and limits
 

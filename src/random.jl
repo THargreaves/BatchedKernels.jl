@@ -3,11 +3,12 @@ export BatchedRNG
 """
     BatchedRNG(seed::Integer)
 
-Random stream for `fuse`. Pass it as an explicit argument to a scalar function
+Random stream for `fuse` and `rand!`/`randn!` on dense `CuArray`s of Float32 or
+Float64. Pass it as an explicit argument to a scalar function
 using `rand(rng, T, dims...)` or `randn(rng, T, dims...)`. Batch size comes from
 other inputs, or `fuse(...; batch_size=N)` for sampling without array inputs.
 
-Each nonempty fused launch containing sampling advances the stream once.
+Each nonempty array fill or fused launch containing sampling advances the stream once.
 Tracing, compilation, empty batches and unused RNG arguments do not advance it.
 Use `Random.seed!(rng, seed)` to restart, or `copy(rng)` to checkpoint the stream.
 Reservations are synchronized; concurrent callers get distinct counters, but
@@ -116,3 +117,61 @@ end
     end
     return u
 end
+
+# Ordinary array fills use the same launch reservations as fuse, but assign all
+# remaining 64 counter bits to the zero-based logical linear index. Splitting
+# those bits into the fused particle/site/element coordinates is injective.
+@inline function _array_random_address(index::UInt64)
+    return ((index >> 32) % UInt32, (index % UInt32) >> 10, UInt32(index & 0x3ff))
+end
+
+function _fill_random_kernel!(A, rng::DeviceRNG, normal::Val)
+    i = UInt64(blockIdx().x - 1) * UInt64(blockDim().x) + UInt64(threadIdx().x)
+    stride = UInt64(blockDim().x) * UInt64(gridDim().x)
+    n = UInt64(length(A))
+    while i <= n
+        particle, site, element = _array_random_address(i - UInt64(1))
+        @inbounds A[Int(i)] = _random_sample(eltype(A), normal, rng, particle, site, element)
+        i += stride
+    end
+    return nothing
+end
+
+function _fill_random!(rng::BatchedRNG, A::CuArray{T}, normal::Val) where {T}
+    T in (Float32, Float64) ||
+        throw(ArgumentError("BatchedRNG array sampling supports Float32 and Float64"))
+    # The counter mapping covers UInt64 indices; Julia arrays have the stricter
+    # Int length limit. UInt64 kernel arithmetic leaves room for the final stride.
+    0 <= length(A) <= typemax(Int) || throw(ArgumentError("array length must fit in Int"))
+    isempty(A) && return A
+    CUDA.device(A) == CUDA.device() ||
+        throw(ArgumentError("the destination CuArray must be on the active CUDA device"))
+    # Adaptation and compilation happen before reservation. Any subsequent launch
+    # failure consumes its reservation, including asynchronously reported errors.
+    kernel = @cuda launch=false _fill_random_kernel!(A, DeviceRNG(0, 0), normal)
+    threads = 256
+    blocks = min(cld(length(A), threads), 65535)
+    state = only(_reserve_rngs([rng], [true]))
+    kernel(A, state, normal; threads, blocks)
+    return A
+end
+
+"""
+    rand!(rng::BatchedRNG, A::CuArray)
+    randn!(rng::BatchedRNG, A::CuArray)
+
+Fill a dense Float32/Float64 GPU array with uniforms in `[0, 1)` or standard
+normals. The destination must be on the active CUDA device. Array rank and shape
+do not affect the logical linear random addresses; lengths up to `typemax(Int)`
+are supported, subject to available memory. Noncontiguous views are not supported.
+
+A nonempty fill consumes one launch reservation shared with `fuse`. Empty fills,
+validation failures and compilation do not advance the stream. A failure after
+reservation does consume it. The current task's CUDA stream is used; reseeding
+does not cancel work already submitted with an immutable RNG snapshot.
+"""
+Random.rand!(rng::BatchedRNG, A::CuArray) = _fill_random!(rng, A, Val(false))
+Random.randn!(rng::BatchedRNG, A::CuArray) = _fill_random!(rng, A, Val(true))
+# Resolve the intersection with GPUArrays' AbstractRNG floating-array fallback.
+Random.randn!(rng::BatchedRNG, A::CuArray{<:Union{AbstractFloat,Complex{<:AbstractFloat}}}) =
+    _fill_random!(rng, A, Val(true))

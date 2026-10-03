@@ -29,10 +29,97 @@
         epoch in (0, 1, 2^32), p in 0:2, s in 0:2, e in (0, 1, 1023)
     ]
     @test allunique(vec(addresses))
+    # Array addresses must remain injective across both the 10-bit element and
+    # 32-bit address boundaries, without allocating impractically large arrays.
+    for index in UInt64[0, 1, 1023, 1024, 2^32-1, 2^32, typemax(Int)-1]
+        p, s, e = BK._array_random_address(index)
+        @test e < 1024 && s < 1 << 22
+        @test (UInt64(p) << 32) | (UInt64(s) << 10) | UInt64(e) == index
+    end
     for T in (Float32, Float64)
         @test BK._uniform(T, UInt32(0), UInt32(0)) == 0
         @test BK._uniform(T, typemax(UInt32), typemax(UInt32)) == prevfloat(one(T))
     end
+end
+
+@testitem "GPU array random fills and mixed streams" tags = [:gpu] begin
+    using BatchedKernels, Random, CUDA
+    const BK = BatchedKernels
+    fused(r) = randn(r, Float32, 3)
+    for T in (Float32, Float64), (fill!, normal) in ((rand!, false), (randn!, true))
+        for dims in ((), (1,), (1025,), (3, 5, 71))
+            A = CuArray{T}(undef, dims)
+            r = BatchedRNG(71)
+            @test fill!(r, A) === A
+            @test r.counter == 1
+            expected = [
+                BK._random_sample(T, Val(normal), BK.DeviceRNG(71, 0),
+                    BK._array_random_address(UInt64(i-1))...) for i in 1:length(A)
+            ]
+            if normal
+                @test vec(Array(A)) ≈ expected rtol=10eps(T)
+            else
+                @test vec(Array(A)) == expected
+            end
+            B = CuArray{T}(undef, length(A))
+            fill!(BatchedRNG(71), B)
+            @test vec(Array(A)) == Array(B)
+            # A deliberately small grid exercises repeated grid-stride writes.
+            CUDA.@cuda threads=32 blocks=1 BK._fill_random_kernel!(
+                B, BK.DeviceRNG(71, 0), Val(normal))
+            @test vec(Array(A)) == Array(B)
+        end
+    end
+    r = BatchedRNG(19)
+    A = CuArray{Float32}(undef, 1031)
+    rand!(r, A)
+    checkpoint = copy(r)
+    first = fuse(fused, r; batch_size=7)
+    randn!(r, A)
+    saved = Array(A)
+    @test r.counter == 3
+    @test Array(first.data) == Array(fuse(fused, checkpoint; batch_size=7).data)
+    randn!(checkpoint, A)
+    @test Array(A) == saved
+    # Reservations also work across separate CUDA streams; reseeding after
+    # submission leaves each already-enqueued snapshot unchanged.
+    B = similar(A)
+    Random.seed!(r, 29)
+    CUDA.stream!(CUDA.CuStream()) do
+        rand!(r, A)
+    end
+    CUDA.stream!(CUDA.CuStream()) do
+        rand!(r, B)
+    end
+    Random.seed!(r, 29)
+    CUDA.synchronize()
+    ref = similar(A)
+    rand!(r, ref)
+    @test Array(A) == Array(ref)
+    rand!(r, ref)
+    @test Array(B) == Array(ref)
+    @test Array(A) != Array(B)
+    position = r.counter
+    for f in (rand!, randn!)
+        empty = CuArray{Float32}(undef, 2, 0)
+        @test f(r, empty) === empty
+        for T in (Float16, Int32, ComplexF32)
+            @test_throws ArgumentError f(r, CuArray{T}(undef, 7))
+            @test_throws ArgumentError f(r, CuArray{T}(undef, 0))
+        end
+        @test r.counter == position
+        # Noncontiguous views are outside this API. Random's fallback must fail
+        # without consuming the BatchedRNG or partially writing the destination.
+        parent = CUDA.fill(Float32(-1), 5, 3)
+        strided = view(parent, 1:2:5, :)
+        @test_throws MethodError f(r, strided)
+        @test Array(parent) == fill(Float32(-1), 5, 3)
+        @test r.counter == position
+    end
+    r.counter = typemax(UInt64)
+    @test_throws ArgumentError rand!(r, A)
+    @test_throws ArgumentError randn!(r, A)
+    @test r.counter == typemax(UInt64)
 end
 
 @testitem "Random tracing and inference" tags = [:cpu] begin
