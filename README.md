@@ -47,6 +47,27 @@ the kernel.
 | `SharedCuMatrix(data, N)` | `m × n` | One matrix used by every entry |
 | `SharedCuVector(data, N)` | Length `d` | One vector used by every entry |
 
+Use `shared(atom, N)` when every field of an immutable composite is shared:
+
+```julia
+struct AffineMap{M,V}
+    A::M
+    b::V
+end
+apply_affine(map, x) = map.A * x + map.b
+
+map = shared(AffineMap(CUDA.rand(Float32, 3, 3), CUDA.rand(Float32, 3)), N)
+ys = fuse(apply_affine, map, xs)
+```
+
+The helper recursively builds the existing shared containers and `BatchedStruct`s.
+It borrows device storage: changes to the original arrays are visible on later
+calls. It performs no uploads, copies or numerical computation. Supported scalar
+fields become trace constants, so changing their values can trigger compilation.
+Supported matrix wrappers retain their structure. Host arrays, mutable composites
+and unsupported field/type-parameter layouts are rejected. Use explicit
+`BatchedStruct` components when some fields vary across batch entries.
+
 Input containers must agree on `N`. `BatchedStruct(T, components)` groups named
 component batches into a batch of structs; `SharedValue(value, N)` supplies a
 shared literal field. A function returning a tuple produces a `BatchedStruct`;

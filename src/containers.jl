@@ -17,7 +17,7 @@
 
 export BatchedCuMatrix, BatchedCuVector, BatchedCuScalar
 export SharedCuMatrix, SharedCuVector
-export SharedValue, BatchedStruct
+export SharedValue, BatchedStruct, shared
 
 # -----------------------------------------------------------------------------
 # BatchedCuMatrix
@@ -435,4 +435,70 @@ end
         return :(throw($err))
     end
     return :($result)
+end
+
+"""
+    shared(value, n::Integer)
+
+Declare that every member of a batch of length `n` uses the same device-resident
+`value`. Dense CUDA vectors and matrices become `SharedCuVector` and
+`SharedCuMatrix`; immutable composites become `BatchedStruct`s of recursively
+shared fields. Existing device storage is borrowed without uploads, copies,
+scalar indexing or materialized repetition. Mutating that storage affects every
+member; the caller must keep it valid while kernels use it.
+
+Isbits numeric scalars, `Char` and `nothing` become `SharedValue` literals. Their
+values specialize the fused trace, so changing them can require recompilation.
+Supported structural wrappers include adjoints, transposes, triangular matrices
+and `Symmetric`. Composite types must satisfy the existing `BatchedStruct` tracing
+rules: array field types must adapt through direct type parameters, and the
+reconstructed type must accept its fields in declaration order.
+
+Host arrays, tuples, mutable or fieldless composites, `Hermitian`, and existing
+batch containers are not supported. Use `BatchedStruct` explicitly for mixtures
+of shared and varying fields. An empty batch (`n == 0`) is permitted.
+"""
+function shared(value, n::Integer)
+    0 <= n <= typemax(Int) ||
+        throw(ArgumentError("shared batch length must be nonnegative and fit in Int"))
+    return _shared(value, Int(n), "value")
+end
+
+function _shared(value::CuArray{T,N}, n::Int, path::String) where {T,N}
+    N == 1 && return SharedCuVector(value, n)
+    N == 2 && return SharedCuMatrix(value, n)
+    throw(ArgumentError("shared $path must be a CUDA vector or matrix, got rank $N"))
+end
+
+function _shared(value::Union{Number,Char,Nothing}, n::Int, path::String)
+    isbits(value) || throw(ArgumentError("shared $path requires an isbits scalar"))
+    return SharedValue(value, n)
+end
+
+function _shared(value, n::Int, path::String)
+    T = typeof(value)
+    if value isa BatchedOrShared || value isa Tuple || value isa NamedTuple ||
+       value isa Hermitian || value isa Function || !isstructtype(T) ||
+       ismutabletype(T) || fieldcount(T) == 0
+        throw(ArgumentError("unsupported shared field $path of type $T"))
+    end
+    names = fieldnames(T)
+    fields = map(names) do name
+        _shared(getfield(value, name), n, "$path.$name")
+    end
+    result = BatchedStruct(T, NamedTuple{names}(fields))
+    # Check type substitution without invoking constructors or reading storage.
+    # Fixed concrete array fields cannot receive their phantom tracing types.
+    traced = try
+        trace_element_type(typeof(result))
+    catch err
+        err isa Union{ArgumentError,TypeError} || rethrow()
+        throw(ArgumentError("shared $path cannot adapt $T to traced field types: $err"))
+    end
+    for (name, field) in zip(names, fields)
+        trace_element_type(typeof(field)) <: fieldtype(traced, name) || throw(
+            ArgumentError("shared $path.$name has a fixed field type that cannot accept traced values"),
+        )
+    end
+    return result
 end

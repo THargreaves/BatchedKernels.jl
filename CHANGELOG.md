@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Shared composites
+
+- Add `shared(atom, N)` to explicitly share device vector/matrix leaves,
+  scalar literals and supported immutable composites across a batch. Borrow
+  device storage without uploads or copies, preserve supported wrappers, and
+  reject unsupported fields and reconstruction layouts.
+
 ### GPU array sampling
 
 - Add `rand!` and `randn!` for dense Float32/Float64 `CuArray`s using

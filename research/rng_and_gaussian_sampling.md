@@ -45,6 +45,12 @@ singular covariance or alter the statistical model. Sampling a conditional
 Gaussian is needed for trajectory draws; RBPF forward updates should continue
 to integrate the Gaussian state analytically.
 
+One concrete tracing gap found while testing shared composites is wrapped
+triangular matrix-vector multiplication; scalar-times-vector multiplication also
+lacks a general traced overload. Preserving the wrapper alone does not provide
+these operations. Add narrow numerical support when connecting GF's native
+square-root sampling methods, with unused-triangle masking tests.
+
 An optional Distributions extension can subsequently lower supported
 `rand(rng, distribution)` calls to these same traced operations. Handle two
 distinct cases: adapting an existing distribution's parameters into runtime
@@ -78,12 +84,12 @@ instead of adding a parallel hierarchy of traced distribution types.
 - Keep direct `MvNormal` integration optional. BK supplies numerical primitives;
   GF retains filtering, resampling, model validation and trajectory semantics.
 
-## Related storage proposal
+## Related shared-composite storage
 
-The separate shared-composite proposal is complementary: an explicit
-`shared(atom, N)` helper could recursively borrow device leaves and reuse BK's
-existing `BatchedStruct` reconstruction. It must not infer parameter sharing,
-upload CPU arrays, repeat storage, or lift arbitrary CPU model callbacks. Mixed
-shared/batched composites should continue to use explicit components. Replacing
-GF's repeated selected-state arrays also requires auditing callbacks that assume
+The `shared(atom, N)` helper added for 0.2.2 recursively borrows device leaves and
+reuses BK's existing `BatchedStruct` reconstruction. It does not infer parameter
+sharing, upload CPU arrays, repeat storage, or lift arbitrary CPU model callbacks.
+Mixed shared/batched composites continue to use explicit components. Future GF
+cleanup can replace its repeated wrappers with this helper. Replacing GF's
+repeated selected-state arrays also requires auditing callbacks that assume
 batched matrix storage; that cleanup is not automatic from adding the helper.
