@@ -78,14 +78,27 @@ subsequent `fuse` calls directly.
 (on the host or device) to every field of a `BatchedStruct`. Gathered batched
 fields get their own storage; shared fields stay shared.
 
+`allocate_batch(batch, capacity)` creates owned, writable storage with matching
+field structure, scalar types and inner dimensions. `pool[indices] = batch`
+(`setindex!(pool, batch, indices)`) copies a population into distinct pool slots.
+Bulk assignment requires exact scalar types and shapes, with no implicit conversion.
+Shared numerical arrays and
+scalars become per-slot storage; non-numerical shared literals remain invariant.
+The copy validates all fields before writing, rejects aliasing between source and
+destination or between destination fields, and preserves unselected slots.
+`check_batch_copy(pool, batch)` performs the representation checks without writing;
+it is useful before updating metadata belonging to a storage pool. These operations
+support host-backed batches as well as CUDA storage and do not invoke fusion.
+
 `vectors[i] = value` copies a vector into one member of a `BatchedCuVector`,
 like assignment into `eachcol(A)`. Existing member views observe the write;
 the source is not retained as the member. Shapes must match exactly, and ordinary
 backing-array element conversion is allowed. Dense arrays and regular range views
 are supported, on the host or on one CUDA device; assignment does not implicitly
 transfer between them. Overlapping sources are snapshotted before writing.
-Conversion/device failures do not promise rollback. Shared and composite member
-assignment is not supported. This eager operation is separate from fused mutation.
+Conversion/device failures do not promise rollback. Single-member shared and composite
+assignment is not supported; use bulk assignment with a one-element index vector.
+These eager operations are separate from fused mutation.
 
 `BatchedStruct(T, components)` borrows its component batches without copying
 numerical storage. Its `.components` exposes those same batches. Assemble a new

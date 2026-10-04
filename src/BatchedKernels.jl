@@ -12,6 +12,7 @@ import Random123
 include("random.jl")
 
 include("containers.jl")
+include("batch_storage.jl")
 include("memory.jl")
 include("accessors.jl")
 include("operations.jl")
