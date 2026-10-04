@@ -73,6 +73,16 @@ can differ from GeneralisedFilters' existing implementation: compare likelihoods
 or `(B'B, B'r, logscale - r'r/2)`, not individual factors. There is no process
 covariance inverse and no backward jitter.
 
+Shared Float32/Float64 fields now use `SharedScalar` runtime kernel arguments.
+The integration tests vary `SqrtInformationLikelihood.logscale` through GF's
+original scorer, both with and without its constant, and check cache reuse.
+Use `literal(value, N)` for deliberate trace-time configuration. Downstream
+storage adapters that enumerate concrete BK containers must also accept
+`SharedScalar` if such fields can enter their populations; in particular, GF's
+particle-tree adapter currently enumerates `SharedValue` explicitly. The current
+RBPF population fixtures do not contain runtime shared scalar leaves. BK's
+`allocate_batch` materializes these leaves into writable per-member storage.
+
 ## Merge sequence
 
 1. Keep GeneralisedFilters' existing CPU methods and StaticArrays behavior as the

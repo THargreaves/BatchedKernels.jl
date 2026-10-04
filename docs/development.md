@@ -39,8 +39,30 @@ synchronized and are not rolled back after launch/device errors. See
 
 Compiled kernels are cached within the Julia process by function, input
 specialization, storage choices, launch settings and device. Shapes and numerical
-types affect specialization; batch size, array contents and RNG state do not.
-`SharedValue` contents are trace-time literals and do affect specialization.
+types affect specialization; batch size, array contents, shared runtime scalar
+values and RNG state do not. `shared(Float32/Float64, N)` creates a `SharedScalar`;
+its input specification is a shared `TraceScalar` leaf keyed by type and lifecycle.
+The current host scalar is included in the launch arguments and bound directly to
+a register value, with no device upload, batch replication or shared-memory slot.
+Derived scalar expressions use the existing per-member execution path, and scalar
+results use ordinary `BatchedCuScalar` output storage.
+
+`literal(value, N)` creates a `SharedValue`. Its input specification includes the
+type and value in the cache key, and tracing receives the ordinary value. Literal
+outputs also retain this representation when fed into another fused call. Both
+contracts apply recursively to `BatchedStruct` fields. Runtime scalar leaves share
+the kernel's Float32/Float64 precision constraint even when the recipe ignores
+them; unsupported numeric types are not silently converted or specialized.
+
+Uniformity across batch members is separate from availability during tracing.
+The operator-overloading tracer cannot capture a Julia `if` on a runtime scalar;
+ordinary numerical predicates reject traced scalars and recommend explicit
+literals for intentional specialization. `===`/`!==` inspect object identity and
+cannot be overloaded to provide numerical predicate semantics. Trace-time literal
+branches must still have an output structure inferable from argument types:
+specializing a value in the kernel cache does not provide value-based return-type
+inference at the public call site. General lazy branches and heterogeneous runtime
+scalar types require separate compiler work.
 
 Use `fuse` for application code. The tape, planner and kernel cache are internal.
 `nthreads` defaults to 128 (or the explicit assignment's thread count) and must
@@ -65,14 +87,25 @@ include output allocation; kernel-only timings measure a different cost. Existin
 Run from the repository root:
 
 ```sh
-julia --project -e 'using Pkg; Pkg.test(; julia_args=`--check-bounds=auto`)'
+julia --project -e 'using Pkg; Pkg.test(; julia_args=`-g0 --check-bounds=auto`)'
 BATCHEDKERNELS_TEST_CPU_ONLY=true julia --project -e 'using Pkg; Pkg.test()'
 ```
 
 `Pkg.test()` otherwise forces `--check-bounds=yes`, including in device code.
-Bounds checks add local memory to every kernel, so the GPU tests asserting
-register-resident kernels would fail; `--check-bounds=auto` honours `@inbounds`
-as in normal use. The CPU selection has no such checks.
+`--check-bounds=auto` honours `@inbounds` as in normal use. Production GPU
+resource checks also require `-g0` and `debug_accessors=false`. At higher debug
+levels, CUDA's exception-reporting code can allocate local memory even when the
+numerical computation keeps its values in registers. For example, CUDA 6.2's
+checked square root adds a 32-byte reporting stack to the small Cholesky/solve
+test at `-g1` on the tested RTX 4090; it uses zero local bytes at `-g0`.
+Disabling debug reporting keeps
+the domain check and exception signaling; it does not select unchecked or
+approximate arithmetic. The zero-local-memory assertion remains strict.
+
+Run diagnostic correctness checks separately with debug accessors enabled, as
+described in the [memory test notes](../test/memory/README.md). The CPU selection
+has no GPU resource checks. The runner records the effective Julia/CUDA versions,
+debug level and bounds mode so resource results can be compared across environments.
 
 Each test item prints its name and elapsed time. With CUDA available, the first
 command runs all items. Sub-kernel tests use the representative shapes in
@@ -84,7 +117,7 @@ Julia 1.11 and 1.12 and runs the CPU selection.
 To skip the largest block-QR storage cases during local development:
 
 ```sh
-BATCHEDKERNELS_TEST_EXTENDED=false julia --project -e 'using Pkg; Pkg.test()'
+BATCHEDKERNELS_TEST_EXTENDED=false julia --project -e 'using Pkg; Pkg.test(; julia_args=`-g0 --check-bounds=auto`)'
 ```
 
 Other shape sweeps still run. The default full selection retains all cases.

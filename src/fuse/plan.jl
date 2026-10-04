@@ -48,8 +48,9 @@ end
 function slot_kind(node::TapeNode, meta::NodeMeta)
     node isa ConstNode && return :literal
     node isa NewNode && return :inline
+    meta.type <: TraceScalar && return :scalar
     if meta.lifecycle == BATCHED
-        return meta.type <: TraceScalar ? :scalar : :batched
+        return :batched
     elseif meta.lifecycle == SHARED
         return :shared
     else
@@ -122,6 +123,7 @@ function plan_memory(tape::Tape; order::AbstractVector{Int}=1:length(tape.nodes)
     next_shared_V = 1
     for (i, (node, meta)) in enumerate(zip(tape.nodes, tape.metas))
         if node isa InputNode && meta.lifecycle == SHARED
+            meta.type <: TraceScalar && continue
             k = pool_kind(meta)
             if k === :M
                 shared_slots[i] = SlotAssignment(:M, next_shared_M)

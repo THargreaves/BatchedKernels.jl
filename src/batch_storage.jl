@@ -10,7 +10,7 @@ values. Non-numerical isbits `SharedValue` literals remain shared and must match
 Composite types follow their allocated leaves, as with batch gathering.
 
 Storage stays on the prototype's device (or host for host-backed batches). A batch
-containing only numerical literals defaults to CUDA storage. Mixed host/device or
+containing only shared numerical scalars defaults to CUDA storage. Mixed host/device or
 multi-device numerical leaves are rejected. Dense arrays and regular range views
 are supported, as for batch member assignment. No GPU fusion is involved.
 """
@@ -27,7 +27,7 @@ function _batch_template(
 )
     return _member_storage(x.data)
 end
-_batch_template(x::SharedValue) = nothing
+_batch_template(x::Union{SharedScalar,SharedValue}) = nothing
 _batch_template(x::AbstractVector) = _member_storage(x)
 function _batch_template(x::BatchedStruct)
     return _first_batch_template(map(_batch_template, values(x.components)))
@@ -42,7 +42,7 @@ function _batch_roots(
 )
     return [_member_storage(x.data)]
 end
-_batch_roots(x::SharedValue) = ()
+_batch_roots(x::Union{SharedScalar,SharedValue}) = ()
 _batch_roots(x::AbstractVector) = [_member_storage(x)]
 function _batch_roots(x::BatchedStruct)
     return Any[r for c in values(x.components) for r in _batch_roots(c)]
@@ -76,6 +76,10 @@ end
 function _allocate_batch(x::SharedValue{T}, n, template) where {T}
     isbitstype(T) || throw(ArgumentError("shared storage literals must be isbits"))
     T <: Number || return SharedValue(x.value, n)
+    data = template === nothing ? CuArray{T}(undef, n) : similar(template, T, n)
+    return BatchedCuScalar(data)
+end
+function _allocate_batch(x::SharedScalar{T}, n, template) where {T}
     data = template === nothing ? CuArray{T}(undef, n) : similar(template, T, n)
     return BatchedCuScalar(data)
 end
@@ -180,8 +184,18 @@ end
 function _check_batch_copy(dest::BatchedCuScalar, src::BatchedCuScalar)
     return _check_batch_leaf(dest.data, src.data, (), ())
 end
-function _check_batch_copy(dest::BatchedCuScalar{T}, src::SharedValue{S}) where {T,S}
+function _check_batch_copy(
+    dest::BatchedCuScalar{T}, src::Union{SharedScalar{S},SharedValue{S}}
+) where {T,S}
     T === S && T <: Number || throw(ArgumentError("batch scalar types differ"))
+    return nothing
+end
+function _check_batch_copy(dest::SharedScalar, src::SharedScalar)
+    typeof(dest.value) === typeof(src.value) && isequal(dest.value, src.value) || throw(
+        ArgumentError(
+            "shared scalar destinations cannot change value; use allocate_batch for writable per-member storage",
+        ),
+    )
     return nothing
 end
 function _check_batch_copy(dest::SharedValue, src::SharedValue)
@@ -219,11 +233,12 @@ function _copy_batch!(dest::BatchedCuScalar, indices, src::BatchedCuScalar)
     dest.data[indices] = src.data
     return dest
 end
-function _copy_batch!(dest::BatchedCuScalar, indices, src::SharedValue)
+function _copy_batch!(dest::BatchedCuScalar, indices, src::Union{SharedScalar,SharedValue})
     @views dest.data[indices] .= src.value
     return dest
 end
 _copy_batch!(dest::SharedValue, indices, src::SharedValue) = dest
+_copy_batch!(dest::SharedScalar, indices, src::SharedScalar) = dest
 function _copy_batch!(dest::AbstractVector, indices, src::AbstractVector)
     dest[indices] = src
     return dest

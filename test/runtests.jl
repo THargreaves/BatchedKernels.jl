@@ -1,5 +1,7 @@
 using TestItems, TestItemRunner, CUDA, Test
 
+@info "Test configuration" julia=VERSION cuda=pkgversion(CUDA) debug_level=Base.JLOptions().debug_level check_bounds=Base.JLOptions().check_bounds
+
 # Cold CUDA compilation can keep a single test item busy for minutes, and the
 # default test set reports nothing until the whole run ends. Print each package,
 # file and test item as it starts and finishes so slow items can be identified.

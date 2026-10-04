@@ -204,7 +204,7 @@ function _codegen(
         push!(stmts, :($shmem_sym = $(shared_allocation(n_mats_per_block))))
     end
 
-    # Scalar tape locals: each BATCHED `TraceScalar` node lives in a Julia local
+    # Scalar tape locals: each `TraceScalar` node lives in a Julia local
     # `s{id}`, replicated across the D lanes of a warp-matrix after the
     # producing reduction's shfl-broadcast. Pre-initialised here so the
     # variables exist outside the per-primitive `if active` blocks (a value
@@ -223,8 +223,14 @@ function _codegen(
     shared_input_view_syms = Dict{Int,Symbol}()
     shared_load_order = Int[]  # warps may each load several distinct shared inputs
     for (k, id) in enumerate(shared_input_ids)
-        push!(shared_load_order, id)
         meta = tape.metas[id]
+        if meta.type <: TraceScalar
+            sym = scalar_node_sym[id]
+            push!(stmts, :($sym = $(s_in_syms[k])))
+            shared_input_view_syms[id] = sym
+            continue
+        end
+        push!(shared_load_order, id)
         slot = planner.shared_slots[id]
         if slot.kind === :M
             shmem_sym = Symbol("shmem_SM", slot.idx)
@@ -262,7 +268,7 @@ function _codegen(
         end
     end
 
-    if !isempty(shared_input_ids)
+    if !isempty(shared_load_order)
         push!(stmts, :(sync_threads()))
     end
 

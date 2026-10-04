@@ -11,7 +11,8 @@ end
 function require_register_resident(kernel)
     resources = register_resources(kernel)
     resources.local_bytes == 0 || error(
-        "Expected register-resident kernel, found $(resources.local_bytes) local-memory bytes per thread",
+        "Expected register-resident kernel, found $(resources.local_bytes) local-memory bytes per thread. " *
+        "Production resource checks require -g0 --check-bounds=auto and debug_accessors=false.",
     )
     return resources
 end

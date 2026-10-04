@@ -10,12 +10,12 @@
     end
     struct EmptyLabel end
 
-    value = Label(Int32(3), 2f0)
+    value = Label(3.0f0, 2.0f0)
     batch = shared(value, 7)
     @test length(batch) == 7
     @test eltype(batch) === typeof(value)
-    @test batch.components.count isa SharedValue{Int32}
-    @test batch.components.scale.value === 2f0
+    @test batch.components.count isa SharedScalar{Float32}
+    @test batch.components.scale.value === 2.0f0
     @test batch[2] === value
     @test length(shared(value, 0)) == 0
     @test shared('U', 3).value === 'U'
@@ -56,7 +56,7 @@ end
 
     mean = CuArray(Float32[1, 2, 3])
     factor = CuArray(Float32[2 1 0; 9 3 1; 8 7 4])
-    atom = ScaledGaussian(GaussianLike(mean, UpperTriangular(factor)), 0.5f0, Int32(7))
+    atom = ScaledGaussian(GaussianLike(mean, UpperTriangular(factor)), 0.5f0, 'k')
     batch = shared(atom, 5)
     @test batch isa BatchedStruct
     @test eltype(batch) === typeof(atom)
@@ -66,7 +66,7 @@ end
     @test triangular.components.data.data === factor
     @test triangular[1] isa UpperTriangular
     @test parent(triangular[1]) === factor
-    @test batch.components.label.value === Int32(7)
+    @test batch.components.label.value === 'k'
     @test eltype(shared(atom, 0)) === typeof(atom)
 
     vectors = Float32[1 2 3 4 5; 2 3 4 5 6; 3 4 5 6 7]
@@ -80,8 +80,8 @@ end
     expected = vec(0.5f0 .* sum(abs2, residuals; dims=1))
     @test Array(actual.data) ≈ expected
     # Borrowed storage stays live, and does not get captured in the trace cache.
-    fill!(mean, 4f0)
-    residuals = 4f0 .+ (UpperTriangular(Array(factor))' \ vectors)
+    fill!(mean, 4.0f0)
+    residuals = 4.0f0 .+ (UpperTriangular(Array(factor))' \ vectors)
     @test Array(fuse(draw, batch, x).data) ≈ vec(0.5f0 .* sum(abs2, residuals; dims=1))
 
     rectangular = CuArray(Float32[1 0; 0 2; 1 1])
@@ -93,9 +93,14 @@ end
     @test Array(fuse(sample, covariance, z).data) ≈
         Array(mean) .+ Array(rectangular) * ones(Float32, 2, 5)
 
-    for wrapper in (adjoint(factor), transpose(factor), LowerTriangular(factor),
-                    UnitUpperTriangular(factor), UnitLowerTriangular(factor),
-                    Symmetric(factor, :U))
+    for wrapper in (
+        adjoint(factor),
+        transpose(factor),
+        LowerTriangular(factor),
+        UnitUpperTriangular(factor),
+        UnitLowerTriangular(factor),
+        Symmetric(factor, :U),
+    )
         wrapped_batch = shared(wrapper, 5)
         @test eltype(wrapped_batch) === typeof(wrapper)
         @test parent(wrapped_batch[1]) === factor
@@ -103,6 +108,11 @@ end
         # still governed by the existing tracer overloads.
         @test BK.trace_element_type(typeof(wrapped_batch)) <: AbstractMatrix{Float32}
     end
+    # Cholesky.info is an integer structural field, not a runtime numeric input.
+    chol = shared(Cholesky(factor, 'U', 0), 5)
+    @test chol.components.factors.data === factor
+    @test chol.components.info isa SharedValue{Int}
+    @test Array(fuse(logdet, chol).data) ≈ fill(2.0f0 * log(24.0f0), 5)
     @test_throws ArgumentError shared(Hermitian(factor), 5)
     @test_throws ArgumentError shared(FixedVector(mean), 5)
     @test_throws ArgumentError shared(CUDA.zeros(Float32, 2, 2, 2), 5)

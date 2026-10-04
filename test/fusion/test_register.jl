@@ -186,6 +186,8 @@ end
         fn = entry.fn
         @cuda launch = false fn(kernel_args...)
     end
+    # Production resource checks run with -g0 --check-bounds=auto. CUDA's
+    # checked sqrt can otherwise reserve local memory for exception reporting.
     @test BK.DEBUG_ACCESSORS || CUDA.memory(compiled).local == 0
     @info "Small fused register solve resources" registers = CUDA.registers(compiled) memory = CUDA.memory(
         compiled

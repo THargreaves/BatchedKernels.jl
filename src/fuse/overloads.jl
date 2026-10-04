@@ -439,6 +439,34 @@ end
 # Number literals get folded as `ConstNode(T(x))` so they bake into the
 # generated kernel at the trace eltype.
 
+# These identities depend only on the numerical type, not the runtime value.
+Base.zero(::TraceScalar{T}) where {T} = zero(T)
+Base.zero(::Type{TraceScalar{T}}) where {T} = zero(T)
+Base.one(::TraceScalar{T}) where {T} = one(T)
+Base.one(::Type{TraceScalar{T}}) where {T} = one(T)
+
+# The straight-line tracer cannot capture runtime branches. In particular,
+# Number's equality fallback can compare tracer identities and silently select
+# a branch (including isnan's x != x test), so reject comparisons explicitly.
+function _runtime_scalar_condition_error()
+    return throw(
+        ArgumentError(
+            "Runtime scalar comparisons and conditions are unsupported inside fused functions; " *
+            "use literal(value, n) for an intentional trace-time configuration constant",
+        ),
+    )
+end
+for op in (:(==), :isequal, :isless, :<, :<=)
+    @eval begin
+        Base.$op(::TraceScalar, ::TraceScalar) = _runtime_scalar_condition_error()
+        Base.$op(::TraceScalar, ::Number) = _runtime_scalar_condition_error()
+        Base.$op(::Number, ::TraceScalar) = _runtime_scalar_condition_error()
+    end
+end
+for op in (:iszero, :isone, :isfinite, :isinf, :isnan)
+    @eval Base.$op(::TraceScalar) = _runtime_scalar_condition_error()
+end
+
 for _op in (:+, :-, :*, :/)
     @eval begin
         function Base.$_op(a::TraceScalar{T}, b::TraceScalar{T}) where {T}
@@ -455,13 +483,10 @@ for _op in (:+, :-, :*, :/)
             out = emit_call!(b.tape, $_op, NodeRef[aref, b.ref], TraceScalar{T})
             return TraceScalar{T}(b.tape, out)
         end
+        function Base.$_op(::TraceScalar, ::TraceScalar)
+            throw(ArgumentError("Traced scalar arithmetic requires matching element types"))
+        end
     end
-end
-
-# Matching-type operands use the specific method above. Reject mixed traced
-# precision explicitly rather than leaving the two Number overloads ambiguous.
-function Base.:/(::TraceScalar, ::TraceScalar)
-    return throw(ArgumentError("Traced scalar division requires matching element types"))
 end
 
 function Base.:-(s::TraceScalar{T}) where {T}

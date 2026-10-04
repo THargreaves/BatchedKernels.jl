@@ -21,6 +21,7 @@ Base.BroadcastStyle(::Type{<:BatchedCuScalar}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:SharedCuMatrix}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:SharedCuVector}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:SharedValue}) = BatchedStyle()
+Base.BroadcastStyle(::Type{<:SharedScalar}) = BatchedStyle()
 Base.BroadcastStyle(::Type{<:BatchedStruct}) = BatchedStyle()
 Base.BroadcastStyle(::BatchedStyle, ::Broadcast.DefaultArrayStyle{0}) = BatchedStyle()
 Base.BroadcastStyle(::BatchedStyle, ::BatchedStyle) = BatchedStyle()
@@ -112,6 +113,13 @@ function _collect_runtime_inputs!(
 end
 function _collect_runtime_inputs!(::Vector, ::Vector, N_ref::Ref, x::SharedValue)
     _set_or_check_batch_n!(N_ref, batch_size(x))
+    return nothing
+end
+function _collect_runtime_inputs!(
+    ::Vector, shared_args::Vector, N_ref::Ref, x::SharedScalar
+)
+    _set_or_check_batch_n!(N_ref, batch_size(x))
+    push!(shared_args, x.value)
     return nothing
 end
 function _collect_runtime_inputs!(
@@ -461,7 +469,9 @@ end
 function batchify_type(::Type{Union{}})
     return throw(
         ArgumentError(
-            "Scalar function has no supported return type for these traced inputs"
+            "Scalar function has no supported return type for these traced inputs. " *
+            "Runtime scalar conditions are unsupported; use literal(value, n) " *
+            "only for intentional trace-time configuration.",
         ),
     )
 end

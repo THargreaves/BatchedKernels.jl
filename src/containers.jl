@@ -10,14 +10,14 @@
 # - `SharedCuMatrix` / `SharedCuVector`: the same underlying array reused
 #   across every batch entry; carries an explicit batch size so it satisfies
 #   the `AbstractVector` contract.
-# - `SharedValue`: a single scalar reused across the batch (used inside
-#   composite values for fields such as `Cholesky.uplo`).
+# - `SharedScalar`: a runtime numerical scalar reused across the batch.
+# - `SharedValue`: an explicit trace-time literal reused across the batch.
 # - `BatchedStruct`: struct-of-arrays representation of a batch of composite
 #   scalar values.
 
 export BatchedCuMatrix, BatchedCuVector, BatchedCuScalar
 export SharedCuMatrix, SharedCuVector
-export SharedValue, BatchedStruct, shared
+export SharedScalar, SharedValue, BatchedStruct, shared, literal
 
 # -----------------------------------------------------------------------------
 # BatchedCuMatrix
@@ -175,9 +175,49 @@ is_shared_type(::Type{<:SharedCuMatrix}) = true
 is_shared_type(::Type{<:SharedCuVector}) = true
 
 # -----------------------------------------------------------------------------
-# SharedValue
+# Shared scalars and literals
 # -----------------------------------------------------------------------------
 
+"""
+    SharedScalar(value, n::Integer)
+
+A Float32 or Float64 runtime input shared by all `n` batch members. The value is
+passed to the kernel by value; changing it between calls does not specialize the
+trace. Use `literal(value, n)` for deliberate trace-time specialization.
+"""
+struct SharedScalar{T} <: AbstractVector{T}
+    value::T
+    batch_n::Int
+    function SharedScalar{T}(value::T, n::Integer) where {T}
+        T in (Float32, Float64) || throw(
+            ArgumentError(
+                "SharedScalar requires Float32 or Float64; use literal(value, n) for a trace-time constant",
+            ),
+        )
+        0 <= n <= typemax(Int) ||
+            throw(ArgumentError("shared batch length must be nonnegative and fit in Int"))
+        return new{T}(value, Int(n))
+    end
+end
+SharedScalar(value::T, n::Integer) where {T} = SharedScalar{T}(value, n)
+Base.eltype(::Type{SharedScalar{T}}) where {T} = T
+Base.size(x::SharedScalar) = (x.batch_n,)
+Base.length(x::SharedScalar) = x.batch_n
+Base.IndexStyle(::Type{<:SharedScalar}) = IndexLinear()
+function Base.getindex(x::SharedScalar, i::Integer)
+    checkbounds(x, i)
+    return x.value
+end
+batch_size(x::SharedScalar) = x.batch_n
+is_shared_type(::Type{<:SharedScalar}) = true
+
+"""
+    SharedValue(value, n)
+
+A shared trace-time literal. Its type and value specialize the fused trace.
+Prefer `literal(value, n)` to declare constants explicitly, or `shared(value, n)`
+for runtime floating-point inputs.
+"""
 struct SharedValue{T} <: AbstractVector{T}
     value::T
     batch_n::Int
@@ -188,6 +228,22 @@ Base.length(x::SharedValue) = x.batch_n
 Base.IndexStyle(::Type{<:SharedValue}) = IndexLinear()
 Base.getindex(x::SharedValue, ::Integer) = x.value
 batch_size(x::SharedValue) = x.batch_n
+
+"""
+    literal(value, n::Integer)
+
+Declare an isbits number, `Char`, or `nothing` as a trace-time constant for `n`
+batch members. Returns `SharedValue`; changing the value specializes the trace.
+The scalar recipe receives the ordinary value, so it can select a branch while
+tracing. Use `BatchedStruct` to mix literal fields with runtime shared fields.
+"""
+function literal(value, n::Integer)
+    0 <= n <= typemax(Int) ||
+        throw(ArgumentError("literal batch length must be nonnegative and fit in Int"))
+    value isa Union{Number,Char,Nothing} && isbits(value) ||
+        throw(ArgumentError("literal requires an isbits number, Char, or nothing"))
+    return SharedValue(value, Int(n))
+end
 
 # -----------------------------------------------------------------------------
 # BatchedStruct
@@ -343,6 +399,7 @@ const BatchedOrShared = Union{
     BatchedCuScalar,
     SharedCuMatrix,
     SharedCuVector,
+    SharedScalar,
     SharedValue,
     BatchedStruct,
 }
@@ -391,6 +448,7 @@ function _gather(x::SharedCuVector{T,D,A}, idxs) where {T,D,A}
     return SharedCuVector{T,D,A}(x.data, length(idxs))
 end
 _gather(x::SharedValue, idxs) = SharedValue(x.value, length(idxs))
+_gather(x::SharedScalar, idxs) = SharedScalar(x.value, length(idxs))
 # Composites may also hold ordinary host or device vectors.
 _gather(x::AbstractVector, idxs) = x[idxs]
 function _gather(x::BatchedStruct{T}, idxs) where {T}
@@ -440,19 +498,24 @@ end
 """
     shared(value, n::Integer)
 
-Declare that every member of a batch of length `n` uses the same device-resident
-`value`. Dense CUDA vectors and matrices become `SharedCuVector` and
+Declare that every member of a batch of length `n` uses the same `value`.
+Dense CUDA vectors and matrices become `SharedCuVector` and
 `SharedCuMatrix`; immutable composites become `BatchedStruct`s of recursively
 shared fields. Existing device storage is borrowed without uploads, copies,
 scalar indexing or materialized repetition. Mutating that storage affects every
 member; the caller must keep it valid while kernels use it.
 
-Isbits numeric scalars, `Char` and `nothing` become `SharedValue` literals. Their
-values specialize the fused trace, so changing them can require recompilation.
+Float32 and Float64 scalars become runtime `SharedScalar` inputs: their values
+can change without recompilation. Other numerical types, including integers and
+Booleans, require explicit `literal(value, n)` when they are static configuration;
+runtime fusion of these types is unsupported. `Char` and `nothing` remain
+structural literals. Use `literal` for a floating-point constant used in tracing
+control flow. Runtime-dependent branches are unsupported.
 Supported structural wrappers include adjoints, transposes, triangular matrices
-and `Symmetric`. Composite types must satisfy the existing `BatchedStruct` tracing
-rules: array field types must adapt through direct type parameters, and the
-reconstructed type must accept its fields in declaration order.
+and `Symmetric`; Cholesky `uplo` and `info` remain structural literals.
+Composite types must satisfy the existing `BatchedStruct` tracing rules: array
+and runtime scalar field types must adapt through direct type parameters, and
+the reconstructed type must accept its fields in declaration order.
 
 Host arrays, tuples, mutable or fieldless composites, `Hermitian`, and existing
 batch containers are not supported. Use `BatchedStruct` explicitly for mixtures
@@ -467,37 +530,77 @@ end
 function _shared(value::CuArray{T,N}, n::Int, path::String) where {T,N}
     N == 1 && return SharedCuVector(value, n)
     N == 2 && return SharedCuMatrix(value, n)
-    throw(ArgumentError("shared $path must be a CUDA vector or matrix, got rank $N"))
+    return throw(ArgumentError("shared $path must be a CUDA vector or matrix, got rank $N"))
 end
 
-function _shared(value::Union{Number,Char,Nothing}, n::Int, path::String)
-    isbits(value) || throw(ArgumentError("shared $path requires an isbits scalar"))
+_shared(value::Union{Float32,Float64}, n::Int, ::String) = SharedScalar(value, n)
+function _shared(value::Number, n::Int, path::String)
+    return throw(
+        ArgumentError(
+            "shared $path has unsupported runtime scalar type $(typeof(value)); supported types are Float32 and Float64. Use literal(value, n) for an intentional trace-time constant, or BatchedStruct to mark individual fields as literals",
+        ),
+    )
+end
+function _shared(value::Union{Char,Nothing}, n::Int, ::String)
     return SharedValue(value, n)
+end
+
+function _shared(value::Cholesky, n::Int, path::String)
+    fields = (
+        _shared(getfield(value, :factors), n, "$path.factors"),
+        literal(getfield(value, :uplo), n),
+        literal(getfield(value, :info), n),
+    )
+    return _shared_composite(value, n, path, fields)
 end
 
 function _shared(value, n::Int, path::String)
     T = typeof(value)
-    if value isa BatchedOrShared || value isa Tuple || value isa NamedTuple ||
-       value isa Hermitian || value isa Function || !isstructtype(T) ||
-       ismutabletype(T) || fieldcount(T) == 0
+    if value isa BatchedOrShared ||
+        value isa Tuple ||
+        value isa NamedTuple ||
+        value isa Hermitian ||
+        value isa Function ||
+        !isstructtype(T) ||
+        ismutabletype(T) ||
+        fieldcount(T) == 0
         throw(ArgumentError("unsupported shared field $path of type $T"))
     end
     names = fieldnames(T)
     fields = map(names) do name
-        _shared(getfield(value, name), n, "$path.$name")
+        return _shared(getfield(value, name), n, "$path.$name")
     end
+    return _shared_composite(value, n, path, fields)
+end
+
+function _shared_composite(value, n::Int, path::String, fields)
+    T = typeof(value)
+    names = fieldnames(T)
     result = BatchedStruct(T, NamedTuple{names}(fields))
     # Check type substitution without invoking constructors or reading storage.
-    # Fixed concrete array fields cannot receive their phantom tracing types.
+    # Fixed array and numerical scalar fields cannot receive phantom trace types.
     traced = try
         trace_element_type(typeof(result))
     catch err
         err isa Union{ArgumentError,TypeError} || rethrow()
-        throw(ArgumentError("shared $path cannot adapt $T to traced field types: $err"))
+        changed = join(
+            (
+                "$path.$name" for (name, field) in zip(names, fields) if
+                trace_element_type(typeof(field)) !== eltype(field)
+            ),
+            ", ",
+        )
+        throw(
+            ArgumentError(
+                "shared $path cannot adapt $T to traced field types ($changed): $err. Runtime scalar fields need compatible type parameters; use BatchedStruct with literal(value, n) for intentional static fields",
+            ),
+        )
     end
     for (name, field) in zip(names, fields)
         trace_element_type(typeof(field)) <: fieldtype(traced, name) || throw(
-            ArgumentError("shared $path.$name has a fixed field type that cannot accept traced values"),
+            ArgumentError(
+                "shared $path.$name has a fixed field type that cannot accept traced values; use a compatible field type parameter or BatchedStruct with literal(value, n) for an intentional static field",
+            ),
         )
     end
     return result

@@ -5,9 +5,14 @@
 ### Shared composites
 
 - Add `shared(atom, N)` to explicitly share device vector/matrix leaves,
-  scalar literals and supported immutable composites across a batch. Borrow
+  runtime Float32/Float64 scalars and supported immutable composites across a batch. Borrow
   device storage without uploads or copies, preserve supported wrappers, and
   reject unsupported fields and reconstruction layouts.
+- Shared floating-point fields now use by-value kernel arguments and reuse
+  compiled kernels when their values change. Use `literal(value, N)` for
+  deliberate specialization; existing `SharedValue` literals retain their meaning.
+  Other numeric types require explicit literals for static configuration.
+  Runtime scalar conditions remain unsupported; structural wrapper metadata stays literal.
 
 ### GPU array sampling
 
@@ -77,8 +82,10 @@
 
 - Test sub-kernels on representative shapes instead of exhaustive size sweeps,
   reducing the full GPU suite from about 45 to 5 minutes. Run GPU tests with
-  `--check-bounds=auto`: `Pkg.test()` otherwise forces bounds checks that make
-  every kernel use local memory and fail the register-residency checks.
+  `-g0 --check-bounds=auto`: forced bounds checks and debug exception reporting
+  can add local memory and fail production register-residency checks.
+  Keep checked numerical operations and the strict zero-local-memory assertion;
+  run accessor diagnostics separately. Record effective test configuration.
 - Restrict test discovery to `test/`, excluding nested checkouts, and print live
   test names and timings. Large block-QR storage cases remain in the default
   suite and can be skipped with `BATCHEDKERNELS_TEST_EXTENDED=false`.

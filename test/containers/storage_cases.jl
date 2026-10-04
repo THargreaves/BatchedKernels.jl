@@ -28,7 +28,7 @@ function storage_cases(array)
                 ),
             ),
             id=BatchedCuScalar(array(Int64.(2^40 .+ (1:n)))),
-            value=SharedValue(7.0f0, n),
+            value=shared(7.0f0, n),
         ),
     )
     dest = @inferred allocate_batch(source, 8)
@@ -48,6 +48,8 @@ function storage_cases(array)
     @test Array(dest.components.value.data) == fill(7.0f0, 8)
     source.components.belief.components.mean.data .= -5
     @test Array(dest.components.belief.components.mean.data) == repeat(Float32[1, 2], 1, 8)
+    # Both runtime shared values and explicit numerical literals can populate
+    # independent batch storage without changing precision.
     next = BatchedStruct(
         StorageState, merge(source.components, (; value=SharedValue(9.0f0, n)))
     )

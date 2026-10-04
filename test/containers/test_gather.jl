@@ -68,6 +68,9 @@
     literal = SharedValue('L', n)[idxs]
     @test literal.value === 'L'
     @test length(literal) == length(idxs)
+    runtime = @inferred SharedScalar(2.5f0, n)[idxs]
+    @test runtime isa SharedScalar{Float32}
+    @test runtime.value === 2.5f0 && length(runtime) == length(idxs)
 
     # Ordinary vector components are gathered by their own indexing.
     plain = BatchedStruct(Belief, (; mean=collect(1:n), covariance=L))[idxs]

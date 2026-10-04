@@ -133,6 +133,7 @@ function trace_element_type(::Type{<:BatchedCuScalar{T}}) where {T}
     return TraceScalar{T}
 end
 trace_element_type(::Type{SharedValue{T}}) where {T} = T
+trace_element_type(::Type{SharedScalar{T}}) where {T} = TraceScalar{T}
 
 @generated function trace_element_type(::Type{BS}) where {T,C,BS<:BatchedStruct{T,C}}
     comp_types = C.parameters[2].parameters
@@ -339,6 +340,9 @@ function input_spec(x::SharedCuVector)
 end
 function input_spec(x::SharedValue)
     return LiteralInput(x.value)
+end
+function input_spec(x::SharedScalar)
+    return LeafInput(trace_element_type(typeof(x)), SHARED)
 end
 function input_spec(x::BatchedStruct{T}) where {T}
     comps = getfield(x, :components)

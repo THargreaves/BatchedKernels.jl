@@ -34,7 +34,7 @@ end
 host(x::BatchedCuMatrix, i) = Array(x.data)[:, :, i]
 host(x::BatchedCuVector, i) = Array(x.data)[:, i]
 host(x::BatchedCuScalar, i) = Array(x.data)[i]
-host(x::SharedValue, i) = x.value
+host(x::Union{SharedValue,SharedScalar}, i) = x.value
 function host(x::BatchedStruct{T}, i) where {T}
     xs = map(c -> host(c, i), values(x.components))
     return T <: Tuple ? xs : Base.typename(T).wrapper(xs...)
@@ -176,7 +176,7 @@ println("Julia ", VERSION, "; CUDA.jl ", pkgversion(CUDA), "; GPU checks: ", gpu
                 suffix_fields = (
                     B=sh(messages[1].B),
                     r=sh(messages[1].r),
-                    logscale=SharedValue(T(messages[1].logscale), N),
+                    logscale=shared(T(messages[1].logscale), N),
                 )
                 suffix_type = GF.SqrtInformationLikelihood{
                     eltype(suffix_fields.B),eltype(suffix_fields.r),T
@@ -229,6 +229,46 @@ println("Julia ", VERSION, "; CUDA.jl ", pkgversion(CUDA), "; GPU checks: ", gpu
                     @test isapprox(host(ov, i), refo; rtol=tol, atol=tol)
                 end
             end
+        end
+    end
+end
+
+# Named wrappers preserve GF's scalar recipe and its trace-time keyword choice.
+function gf_overlap_with_constant(s, l)
+    return GF.compute_marginal_predictive_likelihood(s, l; include_constant=true)
+end
+
+if gpu
+    @testset "GF shared runtime likelihood constants" begin
+        for T in (Float32, Float64)
+            N = 5
+            states = [GF.GaussianState(T[i / 10, -i / 20], Matrix{T}(I, 2, 2)) for i in 1:N]
+            population = pack(states)
+            B, r = Matrix{T}(I, 2, 2), T[0.2, -0.1]
+            dB, dr = CuArray(B), CuArray(r)
+            constants = T[0, 1, -2, 1]
+            relative, absolute = Matrix{T}(undef, N, 4), Matrix{T}(undef, N, 4)
+            growth = Int[]
+            for (j, c) in enumerate(constants)
+                likelihood = shared(GF.SqrtInformationLikelihood(dB, dr, c), N)
+                before = length(BatchedKernels.KERNEL_CACHE)
+                relative[:, j] = Array(
+                    fuse(GF.compute_marginal_predictive_likelihood, population, likelihood).data,
+                )
+                absolute[:, j] = Array(
+                    fuse(gf_overlap_with_constant, population, likelihood).data
+                )
+                push!(growth, length(BatchedKernels.KERNEL_CACHE) - before)
+            end
+            expected = [
+                GF.compute_marginal_predictive_likelihood(
+                    s, GF.SqrtInformationLikelihood(B, r, zero(T))
+                ) for s in states
+            ]
+            tol = T === Float32 ? 3e-5 : 2e-12
+            @test relative ≈ repeat(expected, 1, 4) rtol=tol atol=tol
+            @test absolute ≈ expected .+ constants' rtol=tol atol=tol
+            @test growth[2:end] == [0, 0, 0]
         end
     end
 end

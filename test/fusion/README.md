@@ -56,6 +56,11 @@ inputs at 64 threads, and public return inference. GPU resource checks compare t
 planner's aligned byte budget with compiled static shared memory, allowing unused
 tail padding and dead allocation elimination. Use memcheck, racecheck and synccheck for the focused GPU item.
 
+Production resource checks require `-g0 --check-bounds=auto` with accessor
+diagnostics disabled. At higher debug levels, CUDA exception reporting can add
+local-memory stack even without register spills. Run diagnostic correctness with
+accessors enabled separately; retain the strict zero-local gate for production.
+
 `HybridPlannerOutput.peak_register_elements` counts live per-lane matrix elements,
 including overlapping inputs and fresh outputs. Row orientation contributes the row
 extent and column orientation the column extent. Wrappers share their parent's count.

@@ -46,6 +46,8 @@ the kernel.
 | `BatchedCuScalar(data)` | Length `N` | One scalar per entry |
 | `SharedCuMatrix(data, N)` | `m × n` | One matrix used by every entry |
 | `SharedCuVector(data, N)` | Length `d` | One vector used by every entry |
+| `shared(value, N)` for Float32/Float64 | Host scalar | One runtime scalar used by every entry |
+| `literal(value, N)` | Trace-time value | Explicit value specialization |
 
 Use `shared(atom, N)` when every field of an immutable composite is shared:
 
@@ -62,15 +64,46 @@ ys = fuse(apply_affine, map, xs)
 
 The helper recursively builds the existing shared containers and `BatchedStruct`s.
 It borrows device storage: changes to the original arrays are visible on later
-calls. It performs no uploads, copies or numerical computation. Supported scalar
-fields become trace constants, so changing their values can trigger compilation.
+calls. It performs no uploads, copies or numerical computation. Float32/Float64
+scalar fields become `SharedScalar` runtime inputs, passed by value at each launch.
+Changing their values reuses the kernel when types, shapes and execution options
+stay the same, including when a field is unused by the recipe.
 Supported matrix wrappers retain their structure. Host arrays, mutable composites
 and unsupported field/type-parameter layouts are rejected. Use explicit
 `BatchedStruct` components when some fields vary across batch entries.
 
 Input containers must agree on `N`. `BatchedStruct(T, components)` groups named
-component batches into a batch of structs; `SharedValue(value, N)` supplies a
-shared literal field. A function returning a tuple produces a `BatchedStruct`;
+component batches into a batch of structs. Use `literal(value, N)` for intentional
+trace-time constants: it supplies the ordinary value while tracing and specializes
+the kernel on that value. The existing `SharedValue(value, N)` constructor retains
+these literal semantics. For example, configuration can stay static alongside
+changing numerical data:
+
+```julia
+struct ScoringOptions{T,M}
+    scale::T
+    mode::M
+end
+options = BatchedStruct(ScoringOptions, (; scale=shared(2f0, N), mode=literal(true, N)))
+```
+
+Runtime scalar support currently covers Float32 and Float64, matching all other
+numerical inputs in a fused call. `shared` rejects other numeric types, including
+integers and Booleans; use `literal` when those values are static configuration.
+`Char`, `nothing`, and supported matrix-wrapper metadata remain structural literals.
+This changes the earlier `shared` behavior, which specialized on every scalar
+field. Code that relies on scalar values for tracing-time decisions should opt
+into `literal` explicitly.
+Expressions previously evaluated on literal fields must now use supported traced
+operations. For example, `log(scale)` and `exp(scale)` are not yet supported for
+runtime scalars; preprocessing those values on the host remains possible.
+
+Composite scalar fields must accept their traced types through compatible direct
+type parameters, just like array fields. Fields sharing a type parameter must
+have matching traced types. Fixed `Float32` fields and parameters bounded
+by `Real` or `AbstractFloat` cannot accept `TraceScalar`, which subtypes `Number`;
+use an appropriate unbounded parameter or an explicit literal component.
+A function returning a tuple produces a `BatchedStruct`;
 use `values(result.components)` to unpack its batched outputs. Outputs can feed
 subsequent `fuse` calls directly.
 
@@ -166,7 +199,8 @@ distribution objects, `rand!`/`randn!`, and random-dependent control flow are un
   Float64 (mixed precision is not supported). 
 - Supported operations include matrix products and addition/subtraction, matrix-vector
   products, vector addition/subtraction, triangular solves, Cholesky, QR,
-  `dot`, `sum(abs2, x)`, and scalar arithmetic. Support is specific to operand
+  `dot`, `sum(abs2, x)`, and scalar `+`, `-`, `*`, `/`, `zero`, and `one`.
+  Support is specific to operand
   types: for example, triangular matrix solves accept upper or lower factors,
   while triangular vector solves currently accept lower factors.
 - `logabsdet` accepts real upper/lower triangular matrices, including
@@ -175,7 +209,12 @@ distribution objects, `rand!`/`randn!`, and random-dependent control flow are un
   follow Julia's triangular semantics. Arbitrary dense `logabsdet` is not supported.
 - Use named functions with supported array operations. Capturing closures,
   callable structs, arbitrary scalar indexing, elementwise array broadcasts,
-  and branches on computed values are unsupported.
+  and branches on runtime values are unsupported, including shared scalars.
+  Ordinary `if` can depend on types, known dimensions or explicit literals, provided
+  the function still has one inferable output structure. Numerical predicates on
+  traced scalars fail explicitly. Identity operators `===`/`!==` inspect tracer
+  objects and must not be used to compare runtime numerical values. Eager `ifelse`
+  does not add runtime branch support.
 - General mutation is unsupported. Explicit `cholesky!` and matrix `ldiv!`
   have dedicated implementations with shared storage and narrower shape limits.
   Ordinary out-of-place calculations preserve input arrays.
