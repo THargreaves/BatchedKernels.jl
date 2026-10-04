@@ -234,5 +234,5 @@ launch options and tests.
 
 ## Development
 
-AI coding assistance was used for parts of the fusion compiler, container APIs,
-regression tests, and documentation.
+BatchedKernels was primarily written by human contributors. Later changes used
+AI coding assistance and were reviewed by the maintainer.
