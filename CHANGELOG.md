@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+First release submitted to the General registry.
 
 ### Shared composites
 

@@ -231,3 +231,8 @@ launch options and tests.
   QR helper contracts, and particle-weight calculations.
 - [Kalman benchmarks](benchmarking/kalman/README.md) and
   [matrix multiplication benchmarks](benchmarking/matmul/README.md).
+
+## Development
+
+AI coding assistance was used for parts of the fusion compiler, container APIs,
+regression tests, and documentation.

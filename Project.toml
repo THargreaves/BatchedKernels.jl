@@ -1,6 +1,6 @@
 name = "BatchedKernels"
 uuid = "2fc592bb-64fa-475c-8993-177b89068dc6"
-version = "0.2.3"
+version = "0.3.0"
 authors = ["Tim Hargreaves"]
 
 [deps]

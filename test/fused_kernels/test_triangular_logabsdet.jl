@@ -3,8 +3,8 @@
     const BK = BatchedKernels
 
     wrappers = (
-        UpperTriangular,
-        LowerTriangular,
+        A -> UpperTriangular(A),
+        A -> LowerTriangular(A),
         A -> UpperTriangular(A'),
         A -> LowerTriangular(A'),
         A -> UpperTriangular(transpose(A)),
