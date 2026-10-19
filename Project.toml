@@ -14,7 +14,7 @@ StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [compat]
 CUDA = "5.5.2, 6"
-KernelAbstractions = "0.9.41"
+KernelAbstractions = "0.9.41, 0.10"
 LinearAlgebra = "1.11.0"
 Preferences = "1"
 Random = "1"
